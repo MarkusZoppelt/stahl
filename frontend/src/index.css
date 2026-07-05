@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: var(--bg);
+  --color-bg-secondary: var(--bg-secondary);
+  --color-bg-tertiary: var(--bg-tertiary);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+  --color-purple: var(--purple);
+  --color-cyan: var(--cyan);
+}
+
+:root {
+  /* Tokyo Night Storm (dark) */
+  --bg: #1a1b26;
+  --bg-secondary: #24283b;
+  --bg-tertiary: #2a2e3f;
+  --fg: #a9b1d6;
+  --fg-muted: #787c99;
+  --fg-subtle: #565f89;
+  --border: #2a2e3f;
+  --accent: #7aa2f7;
+  --accent-hover: #565f89;
+  --accent-fg: #1a1b26;
+  --success: #73daca;
+  --success-bg: rgba(115, 218, 202, 0.12);
+  --danger: #f7768e;
+  --danger-bg: rgba(247, 118, 142, 0.12);
+  --warning: #e0af68;
+  --warning-bg: rgba(224, 175, 104, 0.12);
+  --info: #7dcfff;
+  --info-bg: rgba(125, 207, 255, 0.12);
+  --purple: #bb9af7;
+  --cyan: #7dcfff;
+}
+
+html.light {
+  /* Tokyo Night Day */
+  --bg: #d5d6db;
+  --bg-secondary: #e6e7ed;
+  --bg-tertiary: #f0f1f5;
+  --fg: #343b58;
+  --fg-muted: #4e5579;
+  --fg-subtle: #9699a3;
+  --border: #cbccd1;
+  --accent: #34548a;
+  --accent-hover: #0f4b6e;
+  --accent-fg: #ffffff;
+  --success: #33635c;
+  --success-bg: rgba(51, 99, 92, 0.12);
+  --danger: #8c4351;
+  --danger-bg: rgba(140, 67, 81, 0.12);
+  --warning: #8f5e15;
+  --warning-bg: rgba(143, 94, 21, 0.12);
+  --info: #0f4b6e;
+  --info-bg: rgba(15, 75, 110, 0.12);
+  --purple: #7847bd;
+  --cyan: #0f4b6e;
+}
+
+* {
+  border-color: var(--border);
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-subtle);
+}
+
+/* Utility classes that reference theme vars */
+.bg-app {
+  background-color: var(--bg);
+}
+.bg-secondary {
+  background-color: var(--bg-secondary);
+}
+.bg-tertiary {
+  background-color: var(--bg-tertiary);
+}
+.text-default {
+  color: var(--fg);
+}
+.text-muted {
+  color: var(--fg-muted);
+}
+.text-subtle {
+  color: var(--fg-subtle);
+}
+.border-default {
+  border-color: var(--border);
+}

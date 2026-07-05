@@ -1,0 +1,23 @@
+[package]
+name = "stahl"
+version = "0.1.0"
+description = "Stahl Capital — Tauri desktop GUI for portfolio_rs"
+authors = ["Markus Zoppelt"]
+license = "MIT"
+repository = "https://github.com/MarkusZoppelt/stahl"
+edition = "2024"
+rust-version = "1.85"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+portfolio_rs = "0.8.0"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
