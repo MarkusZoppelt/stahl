@@ -6,6 +6,8 @@ A local-first desktop GUI for [`portfolio_rs`](https://github.com/MarkusZoppelt/
 investment portfolios, run policy-aware reviews, simulate rebalancing, and manage a durable finance
 workspace, all from a native app. Built with [Tauri 2](https://tauri.app), React, and TypeScript.
 
+![Performance view](screenshots/performance.png)
+
 > **Status:** early prototype. Expect rough edges.
 
 ## Features
