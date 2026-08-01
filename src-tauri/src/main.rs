@@ -23,12 +23,21 @@ fn main() {
     // `cargo build`/`cargo tauri dev`/`cargo tauri build` runs, not just
     // binaries built through the flake.
     #[cfg(target_os = "linux")]
-    if env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        // SAFETY: this runs as the very first statement in `main`, before
-        // any other threads (tokio runtime, webview) are spawned, so there
-        // is no concurrent access to the environment.
-        unsafe {
-            env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    {
+        if env::var_os("DISPLAY").is_none() && env::var_os("WAYLAND_DISPLAY").is_none() {
+            eprintln!(
+                "error: no display server detected \
+                 (DISPLAY and WAYLAND_DISPLAY are both unset).\n\
+                 Stahl is a desktop GUI — run it from a graphical session."
+            );
+            std::process::exit(1);
+        }
+
+        if env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            // SAFETY: first statement in main, before any other threads spawn.
+            unsafe {
+                env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            }
         }
     }
 
