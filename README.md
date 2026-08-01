@@ -26,24 +26,30 @@ workspace, all from a native app. Built with [Tauri 2](https://tauri.app), React
 - **Settings** — currency, theme, and AI provider configuration
 
 
+## Run
+
+```sh
+nix run github:MarkusZoppelt/stahl
+```
+
+## Install
+
+```sh
+nix profile install github:MarkusZoppelt/stahl
+```
+
+Native installers (`.dmg`, `.deb`/`.AppImage`, `.msi`) are attached to
+[GitHub Releases](https://github.com/MarkusZoppelt/stahl/releases).
+
 ## Building
 
 ### With Nix (recommended)
 
-Builds reproducibly on macOS, Linux, and NixOS — no manual Rust/Node/GTK setup required.
-
 ```sh
-nix build .#stahl      # produces ./result/bin/stahl
-./result/bin/stahl
-```
-
-```sh
-nix run .#stahl        # build + run in one step
-```
-
-```sh
-nix develop             # dev shell: cargo, pnpm, cargo-tauri, rust-analyzer, clippy, etc.
-cargo tauri dev          # hot-reloading dev build
+nix build .#stahl      # ./result/bin/stahl
+nix run .#stahl        # build + run
+nix develop            # cargo, pnpm, cargo-tauri, rust-analyzer, …
+cargo tauri dev
 ```
 
 > If `cargo tauri dev` fails with a `dyld`/`libiconv` error, you likely have a stale
