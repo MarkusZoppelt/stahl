@@ -1,7 +1,7 @@
 name: Update frontendDepsHash
 
 on:
-  pull_request:
+  pull_request_target:
     paths:
       - frontend/package.json
       - frontend/pnpm-lock.yaml
@@ -23,6 +23,14 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
             accept-flake-config = true
+
+      - name: Ensure hash script from base
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          mkdir -p scripts
+          git show "origin/${{ github.base_ref }}:scripts/update-frontend-deps-hash.sh" \
+            > scripts/update-frontend-deps-hash.sh
+          chmod +x scripts/update-frontend-deps-hash.sh
 
       - run: ./scripts/update-frontend-deps-hash.sh
 
