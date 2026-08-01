@@ -234,6 +234,7 @@
         packages = {
           default = stahl;
           stahl = stahl;
+          frontend-deps = frontendDeps;
         };
 
         apps.default = flake-utils.lib.mkApp {

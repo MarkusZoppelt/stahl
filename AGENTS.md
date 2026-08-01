@@ -40,13 +40,15 @@ Guidance for AI agents (and humans) working on this repo.
 `flake.nix` builds the frontend hermetically via `pkgs.fetchPnpmDeps`, which
 is a fixed-output derivation pinned to `frontendDepsHash`. Any change to
 `frontend/package.json` or `frontend/pnpm-lock.yaml` invalidates that hash.
-To regenerate it:
+Regenerate with:
 
-1. Set `frontendDepsHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";`
-   (nix's `lib.fakeHash`) in `flake.nix`.
-2. Run `nix build .#stahl -L` and copy the `got: sha256-...` value from the
-   hash-mismatch error back into `frontendDepsHash`.
-3. Rebuild to confirm it succeeds.
+```sh
+./scripts/update-frontend-deps-hash.sh
+```
+
+Dependabot owns Cargo, frontend npm, and GitHub Actions. A weekly workflow
+updates `flake.lock`. CI runs the hash script on PRs that touch the frontend
+lockfile (including Dependabot) and commits the result.
 
 This hash is the same across `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`,
 and `aarch64-darwin` — `fetchPnpmDeps` fetches every optional dependency

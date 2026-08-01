@@ -1,0 +1,35 @@
+name: Update frontendDepsHash
+
+on:
+  pull_request:
+    paths:
+      - frontend/package.json
+      - frontend/pnpm-lock.yaml
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            accept-flake-config = true
+
+      - run: ./scripts/update-frontend-deps-hash.sh
+
+      - run: |
+          git diff --quiet flake.nix && exit 0
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add flake.nix
+          git commit -m "chore(nix): update frontendDepsHash"
+          git push
