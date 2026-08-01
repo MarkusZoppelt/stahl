@@ -40,4 +40,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add flake.nix
           git commit -m "chore(nix): update frontendDepsHash"
+          git pull --rebase origin "${{ github.head_ref }}"
           git push
