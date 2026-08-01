@@ -146,6 +146,7 @@
                 gtk3
                 libsoup_3
                 glib
+                glib-networking
                 cairo
                 pango
                 gdk-pixbuf
@@ -153,6 +154,10 @@
                 atk
                 librsvg
                 zlib
+                gst_all_1.gstreamer
+                gst_all_1.gst-plugins-base
+                gst_all_1.gst-plugins-good
+                gst_all_1.gst-plugins-bad
               ]
             ))
             ++ (pkgs.lib.optionals isDarwin (
