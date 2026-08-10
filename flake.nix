@@ -57,7 +57,7 @@
         # esbuild/rolldown), not just the ones matching the host platform,
         # so this hash is identical across systems. Verified by comparing
         # the fetch output on aarch64-darwin and x86_64-linux.
-        frontendDepsHash = "sha256-XVZLYuGgWtMeq3Yr5/yfNPsWdbDh8rXcJ/62Fj9i3wg=";
+        frontendDepsHash = "sha256-xongWWGyRNRIo/+jCZy5g/D63EoWYMP13j5aeOeUiUU=";
 
         frontendDeps = pkgs.fetchPnpmDeps {
           pname = "stahl-frontend";
