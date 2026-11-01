@@ -17,7 +17,7 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-portfolio_rs = "0.8.0"
+portfolio_rs = "0.9.1"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
