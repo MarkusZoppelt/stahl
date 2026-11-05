@@ -42,3 +42,8 @@ jobs:
 
       - name: smoke-test the built binary
         run: file result/bin/stahl
+
+      # Outside `nix flake check`: these need a login session, not a sandbox.
+      - name: end-to-end tests
+        if: matrix.os == 'macos-latest'
+        run: nix develop -c cargo test --test e2e
