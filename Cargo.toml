@@ -1,6 +1,39 @@
-[workspace]
-members = ["src-tauri"]
-resolver = "2"
+[package]
+name = "stahl"
+version = "0.2.0"
+description = "Stahl Capital — native desktop app for portfolio_rs"
+authors = ["Markus Zoppelt"]
+license = "MIT"
+repository = "https://github.com/MarkusZoppelt/stahl"
+edition = "2024"
+rust-version = "1.98"
+
+[package.metadata.bundle]
+name = "Stahl Capital"
+identifier = "net.zoppelt.stahl"
+icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/128x128@2x.png", "assets/icons/icon.icns"]
+category = "public.app-category.finance"
+short_description = "Your local-first portfolio, on your own machine."
+osx_minimum_system_version = "11.0"
+
+[dependencies]
+chrono = "0.4"
+gpui-kit = "0.9"
+portfolio_rs = "0.10"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+gpui-kit = { version = "0.9", features = ["test-support"] }
+tempfile = "3"
+
+# GPUI's macOS platform must own the process's main thread, which the default
+# test harness keeps for itself.
+[[test]]
+name = "e2e"
+harness = false
 
 [profile.release]
 lto = true
