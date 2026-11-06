@@ -423,25 +423,45 @@ impl Backend {
         Ok(())
     }
 
+    /// Open a workspace and remember it.
+    ///
+    /// This does what `AppState::load_workspace` does, except that it saves the config through
+    /// [`Self::save_config`]: that one always writes to the user's default location, so a backend
+    /// with its config elsewhere would overwrite the real one. It also drops the policy of whatever
+    /// was open before, which would otherwise be reviewed against the new portfolio.
     pub async fn load_workspace(&self, dir: String) -> BackendResult<()> {
-        {
-            let mut config = self.config.write().await;
-            self.state
-                .load_workspace(&dir, &mut config)
-                .await
-                .map_err(report)?;
+        let root = Path::new(&dir);
+        let positions = root.join("positions.json");
+        if !positions.exists() {
+            return Err(format!(
+                "{dir} is not a workspace, because it has no positions.json. Pick another folder, \
+                 or create a new workspace."
+            ));
         }
+        let policy_path = root.join("portfolio/policy.toml");
+        let policy = if policy_path.exists() {
+            let policy = Policy::from_file(&policy_path.to_string_lossy())
+                .map_err(|error| format!("failed to load policy: {error:#}"))?;
+            Some(policy)
+        } else {
+            None
+        };
+        self.state
+            .load_file(&positions.to_string_lossy())
+            .await
+            .map_err(report)?;
+        *self.state.workspace_dir.write().await = Some(dir.clone());
+        *self.state.policy.write().await = policy;
+        self.config.write().await.set_workspace(dir);
         self.save_config().await
     }
 
+    /// Open a single positions file and remember it. See [`Self::load_workspace`] for why this
+    /// doesn't use `AppState::load_simple_file`.
     pub async fn load_simple_file(&self, path: String) -> BackendResult<()> {
-        {
-            let mut config = self.config.write().await;
-            self.state
-                .load_simple_file(&path, &mut config)
-                .await
-                .map_err(report)?;
-        }
+        self.state.load_file(&path).await.map_err(report)?;
+        *self.state.policy.write().await = None;
+        self.config.write().await.set_portfolio_file(path);
         self.save_config().await
     }
 
@@ -794,6 +814,63 @@ mod tests {
         let open = runtime.block_on(backend.startup(None)).unwrap();
         assert_eq!(open.file_path, None);
         assert_eq!(open.workspace_dir, None);
+    }
+
+    #[test]
+    fn opening_saves_the_config_where_the_backend_keeps_it() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+
+        runtime
+            .block_on(backend.load_simple_file(path.clone()))
+            .unwrap();
+        let saved = AppConfig::load_from(&dir.path().join("config.yml")).unwrap();
+        assert_eq!(saved.portfolio_file, Some(path));
+
+        let workspace = dir.path().to_string_lossy().into_owned();
+        runtime
+            .block_on(backend.load_workspace(workspace.clone()))
+            .unwrap();
+        let saved = AppConfig::load_from(&dir.path().join("config.yml")).unwrap();
+        assert_eq!(saved.workspace_dir, Some(workspace));
+    }
+
+    #[test]
+    fn opening_a_folder_without_positions_says_what_is_wrong() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let folder = dir.path().to_string_lossy().into_owned();
+
+        let error = runtime
+            .block_on(backend.load_workspace(folder))
+            .unwrap_err();
+        assert!(error.contains("no positions.json"), "{error}");
+    }
+
+    #[test]
+    fn a_policy_does_not_follow_you_to_the_next_portfolio() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+        let policy = Backend::policy_from_strategy("balanced-growth").unwrap();
+        fs::create_dir_all(dir.path().join("portfolio")).unwrap();
+        fs::write(
+            dir.path().join("portfolio/policy.toml"),
+            Backend::policy_to_toml(&policy).unwrap(),
+        )
+        .unwrap();
+
+        runtime.block_on(async {
+            let workspace = dir.path().to_string_lossy().into_owned();
+            backend.load_workspace(workspace).await.unwrap();
+            assert!(backend.policy().await.is_some());
+            backend.load_simple_file(path).await.unwrap();
+            assert!(backend.policy().await.is_none());
+        });
     }
 
     #[test]

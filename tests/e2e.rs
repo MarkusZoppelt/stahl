@@ -1,8 +1,7 @@
 //! End-to-end tests: the real views and handlers on real `portfolio_rs` data with fixture
 //! quotes, driven through pointer and keyboard input in Rune's headless runtime.
 //!
-//! These never touch the user's config: the backend points at a temp directory, and opening goes
-//! through `startup`, which doesn't write it.
+//! These never touch the user's config: the backend keeps it in a temp directory.
 
 use std::{
     env, fs,

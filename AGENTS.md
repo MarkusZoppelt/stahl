@@ -74,9 +74,9 @@ cargo run --example demo -- --snap /tmp/x.png --scene holdings --at 2 --size 132
 Every screen has a scene in `examples/demo.rs`; add one with each new screen. Regenerate
 `screenshots/` the same way when the UI changes.
 
-Tests must not touch the user's config. `AppState::load_workspace` and
-`load_simple_file` save it to the default location whatever `Backend` was given,
-so tests open portfolios through `Backend::startup`, on a backend from `demo::backend`.
+Tests must not touch the user's config. `AppState::load_workspace` and `load_simple_file` save it
+to the default location whatever they are given, so never call them. Go through `Backend`, whose
+own versions save where it was told to, on a backend from `demo::backend`.
 
 Updates are off unless given an `Updater`: `State::new` has a disabled one, and only `app::run` uses
 `Updater::github()`. Tests use `app::headless_with_updater` with `demo::FakeReleases` and paths in a
