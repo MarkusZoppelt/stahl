@@ -48,6 +48,19 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
+    /// A page of a new workspace with nothing in it yet.
+    fn empty(s: &mut State, page: Page) {
+        s.startup();
+        s.settle();
+        let dir = env::temp_dir()
+            .join(format!("stahl-empty-{}", process::id()))
+            .join("My Portfolio");
+        demo::seed_empty_workspace(&dir);
+        s.load_workspace(dir.to_string_lossy().into_owned());
+        s.settle();
+        s.navigate(page);
+        s.settle();
+    }
     /// A newer release waiting, as if a check at startup had found it.
     fn update_scene(s: &mut State, installation: Installation, dialog: bool) {
         scene(s, Page::Overview);
@@ -124,6 +137,16 @@ fn main() {
                 s.load_file(file.to_string_lossy().into_owned());
                 s.settle();
             }),
+            ("empty-overview", |s| empty(s, Page::Overview)),
+            ("empty-holdings", |s| empty(s, Page::Holdings)),
+            ("empty-allocation", |s| empty(s, Page::Allocation)),
+            ("empty-performance", |s| empty(s, Page::Performance)),
+            ("empty-review", |s| empty(s, Page::Review)),
+            ("empty-rebalance", |s| empty(s, Page::Rebalance)),
+            ("empty-policy", |s| empty(s, Page::Policy)),
+            ("empty-documents", |s| empty(s, Page::Documents)),
+            ("empty-briefing", |s| empty(s, Page::Briefing)),
+            ("empty-health", |s| empty(s, Page::Health)),
             ("privacy", |s| {
                 scene(s, Page::Overview);
                 s.privacy = true;
