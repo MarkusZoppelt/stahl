@@ -52,6 +52,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return false;
     }
+    if portfolio::holdings_key(s, event, tx) {
+        return true;
+    }
     let Key::Command(key) = event.key else {
         return false;
     };

@@ -7,8 +7,8 @@ use portfolio_rs::{
     state::{PositionDto, TopMoverDto},
 };
 use rune::{
-    Beat, Cx, El, PopupItem, PopupMenu, Sequence, Tx, col, el, icon, popup_menu_supported, row,
-    text,
+    Beat, Cx, El, Key, KeyEvent, PopupItem, PopupMenu, Sequence, Tx, col, el, icon,
+    popup_menu_supported, row, text,
     tok::{TextStyle, motion::LEAD},
 };
 use rune_kit::{
@@ -368,7 +368,7 @@ fn header_cell(
     if right { cell.justify_end() } else { cell }
 }
 
-fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
+fn holding_row(s: &State, position: &PositionDto, first: bool, last: bool, t: &Theme) -> El {
     let k = &t.kit;
     let id = position.id;
     let selected = s.selected == Some(id);
@@ -417,7 +417,24 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         .hover(k.c.hover)
         .motion(LEAD)
         .press_scale(0.995)
+        // The first stop in the table when Tab comes back to it, and where its arrows start.
+        .focus_selected(selected)
         .on_press(move |s: &mut State| s.select_position(id))
+        .on_key(
+            move |s: &mut State, event: &KeyEvent, _: &mut Tx| match &event.key {
+                Key::Enter if plain(event) => {
+                    s.open_form(Some(id));
+                    true
+                }
+                // The group presses the row a key lands on, even this one, and a press toggles. So
+                // keep the keys that can't leave this row from the group: at an end of the table,
+                // and letters, which would type-select.
+                Key::Up | Key::Home => first,
+                Key::Down | Key::End => last,
+                Key::Text(typed) => !typed.trim().is_empty(),
+                _ => false,
+            },
+        )
         .on_secondary_press(move |s: &mut State, press, tx: &mut Tx| {
             // Only macOS has pop-up menus. Elsewhere, the details pane has the same actions.
             if !popup_menu_supported() {
@@ -525,8 +542,8 @@ fn search_input(s: &State) -> TextInput {
     }
 }
 
-pub fn holdings(s: &State, t: &Theme) -> El {
-    let k = &t.kit;
+/// The rows of the Holdings table, top to bottom.
+fn holding_rows(s: &State) -> Vec<&PositionDto> {
     let mut rows: Vec<&PositionDto> = s
         .positions
         .iter()
@@ -537,6 +554,64 @@ pub fn holdings(s: &State, t: &Theme) -> El {
         let order = compare(a, b, sort);
         if ascending { order } else { order.reverse() }
     });
+    rows
+}
+
+fn plain(event: &KeyEvent) -> bool {
+    let mods = event.mods;
+    !(mods.shift || mods.ctrl || mods.alt || mods.cmd)
+}
+
+/// The table's keys while nothing has focus: a selection made from Overview or the palette has no
+/// focused row yet. Once a row has focus, its group and its own handler take these, and any other
+/// focused control keeps them, so this never runs for a search field or a button.
+pub fn holdings_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    let idle = s.page == Page::Holdings
+        && s.has_portfolio()
+        && s.open.parse_error.is_none()
+        && s.palette.is_none()
+        && s.form.is_none()
+        && s.confirm.is_none();
+    if !idle || !plain(event) || tx.focused().is_some() {
+        return false;
+    }
+    if event.key == Key::Enter {
+        let Some(id) = s.selected else {
+            return false;
+        };
+        s.open_form(Some(id));
+        return true;
+    }
+    if !matches!(event.key, Key::Up | Key::Down) {
+        return false;
+    }
+    let rows: Vec<usize> = holding_rows(s)
+        .into_iter()
+        .map(|position| position.id)
+        .collect();
+    let Some(last) = rows.len().checked_sub(1) else {
+        return false;
+    };
+    let down = event.key == Key::Down;
+    let current = rows.iter().position(|id| Some(*id) == s.selected);
+    let target = rows[match current {
+        Some(index) if down => (index + 1).min(last),
+        Some(index) => index.saturating_sub(1),
+        None if down => 0,
+        None => last,
+    }];
+    // `select_position` toggles, and at an end of the table this is the row already selected.
+    if s.selected != Some(target) {
+        s.select_position(target);
+    }
+    tx.scroll_into_view(format!("holding-{target}"));
+    true
+}
+
+pub fn holdings(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let rows = holding_rows(s);
+    let end = rows.len().saturating_sub(1);
     col()
         .w_full()
         .gap(16.0)
@@ -608,8 +683,14 @@ pub fn holdings(s: &State, t: &Theme) -> El {
                 .child(
                     col()
                         .key("holdings-rows")
+                        .role("list")
+                        .label("Holdings")
+                        .focus_group()
+                        .focus_follows()
                         .w_full()
-                        .children(rows.into_iter().map(|position| holding_row(s, position, t))),
+                        .children(rows.into_iter().enumerate().map(|(index, position)| {
+                            holding_row(s, position, index == 0, index == end, t)
+                        })),
                 ),
         )
 }
