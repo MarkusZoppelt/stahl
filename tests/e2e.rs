@@ -703,3 +703,32 @@ fn a_window_too_narrow_for_both_shows_the_details_in_place_of_the_table() {
     assert!(app.exists("edit-position"));
     assert_eq!(columns_of(&app), ["sort-name", "sort-value"]);
 }
+
+#[test]
+fn collapsing_the_sidebar_hides_every_row_on_every_page() {
+    // What stays is the toolbar's title for the open page, which isn't part of the sidebar.
+    let mut app = Harness::boot(true, None);
+    let rows = [
+        "nav-overview",
+        "nav-holdings",
+        "nav-allocation",
+        "nav-performance",
+        "nav-review",
+        "nav-rebalance",
+        "nav-policy",
+        "nav-documents",
+        "nav-briefing",
+        "nav-health",
+        "nav-settings",
+    ];
+    for key in rows {
+        app.click(key);
+        app.click("sidebar-toggle");
+        assert!(!app.rt.state.sidebar.is_open());
+        for row in rows {
+            let (_, opacity) = app.rt.presented(row).expect("the row stays laid out");
+            assert_eq!(opacity, 0.0, "{row} shows with {key} open");
+        }
+        app.click("sidebar-toggle");
+    }
+}

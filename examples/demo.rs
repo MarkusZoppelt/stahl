@@ -57,6 +57,10 @@ fn main() {
                 scene(s, Page::Holdings);
                 s.select_position(0);
             }),
+            ("sidebar-collapsed", |s| {
+                scene(s, Page::Holdings);
+                s.sidebar.toggle();
+            }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
             ("review", |s| scene(s, Page::Review)),
