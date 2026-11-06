@@ -401,9 +401,9 @@ pub fn settings(s: &State, t: &Theme) -> El {
                         .center_y()
                         .gap(8.0)
                         .child(
-                            Button::new("Create Workspace…")
+                            Button::new("New Workspace…")
                                 .icon(&icons::FOLDER_OPEN)
-                                .on_press_tx(|s: &mut State, tx| s.create_workspace(tx))
+                                .on_press(|s: &mut State| s.open_new_workspace())
                                 .build(k)
                                 .key("create-workspace"),
                         )

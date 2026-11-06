@@ -6,9 +6,11 @@
 //! math, policy review, simulation, reports) lives in `portfolio_rs`.
 
 use std::{
+    env,
     fmt::Display,
     fs,
     future::Future,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -28,6 +30,7 @@ use portfolio_rs::{
     },
     policy::{self, Policy},
     review::Review,
+    services::atomic_write,
     simulate::RebalanceSimulation,
     state::{
         AllocationItemDto, AppConfigDto, AppState, CreatePositionRequest, GeneratedDocument,
@@ -51,6 +54,161 @@ fn report<E: Display>(error: E) -> String {
 /// here and on the command line is the same history.
 const HISTORY_ID: &str = "main";
 
+/// What a positions file holds before anything is added to it.
+const NO_POSITIONS: &str = "[]\n";
+
+/// Which field of the New Workspace form a problem belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceField {
+    Name,
+    Location,
+}
+
+/// Why a workspace can't be created, in words for the person filling in the form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceProblem {
+    pub field: WorkspaceField,
+    pub message: String,
+}
+
+impl WorkspaceProblem {
+    fn name(message: impl Into<String>) -> Self {
+        Self {
+            field: WorkspaceField::Name,
+            message: message.into(),
+        }
+    }
+
+    fn location(message: impl Into<String>) -> Self {
+        Self {
+            field: WorkspaceField::Location,
+            message: message.into(),
+        }
+    }
+}
+
+/// Where a workspace with this name and location would go. Touches nothing on disk, so the form
+/// can show it while you type.
+pub fn plan_workspace(name: &str, location: &str) -> Result<PathBuf, WorkspaceProblem> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WorkspaceProblem::name("Give the workspace a name."));
+    }
+    let forbidden = |c: char| c.is_control() || r#"/\:*?"<>|"#.contains(c);
+    if name.contains(forbidden) || name.ends_with('.') {
+        return Err(WorkspaceProblem::name(
+            r#"A name can't contain / \ : * ? " < > | or end with a dot."#,
+        ));
+    }
+    let location = location.trim();
+    if location.is_empty() {
+        return Err(WorkspaceProblem::location(
+            "Choose where to create the workspace.",
+        ));
+    }
+    let location = expand_home(location);
+    if !location.is_absolute() {
+        return Err(WorkspaceProblem::location(
+            "The location must be a full path, starting from the top of the disk.",
+        ));
+    }
+    Ok(location.join(name))
+}
+
+/// `~` and `~/x` as the home directory, as a path typed into a shell would be.
+fn expand_home(path: &str) -> PathBuf {
+    let rest = path
+        .strip_prefix('~')
+        .filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\']));
+    match (rest, env::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// Create a workspace in the format `portfolio_rs` uses, and return its directory.
+///
+/// `positions_from` is a file to copy the positions from, or `None` to start with no positions.
+/// The directory must not exist yet, so this can never overwrite anything. If it fails part way,
+/// what it created is removed again.
+pub fn create_workspace(
+    name: &str,
+    location: &str,
+    positions_from: Option<&str>,
+) -> Result<String, WorkspaceProblem> {
+    let dir = plan_workspace(name, location)?;
+    let shown = dir.display();
+    let parent = dir.parent().unwrap_or(&dir);
+    let parent_shown = parent.display();
+    if !parent.exists() {
+        return Err(WorkspaceProblem::location(format!(
+            "{parent_shown} doesn't exist. Choose an existing folder."
+        )));
+    }
+    if !parent.is_dir() {
+        return Err(WorkspaceProblem::location(format!(
+            "{parent_shown} is a file, not a folder."
+        )));
+    }
+    let exists = || {
+        WorkspaceProblem::name(format!(
+            "{shown} already exists. Choose another name, or open it as a workspace."
+        ))
+    };
+    // Also true of a dangling link, which `create_dir` would fail on anyway.
+    if fs::symlink_metadata(&dir).is_ok() {
+        return Err(exists());
+    }
+    let Some(root) = dir.to_str() else {
+        return Err(WorkspaceProblem::name(
+            "This name or location has characters Stahl can't store.",
+        ));
+    };
+    match fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(exists()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            return Err(WorkspaceProblem::location(format!(
+                "You can't write to {parent_shown}. Choose another location."
+            )));
+        }
+        Err(error) => {
+            return Err(WorkspaceProblem::location(format!(
+                "Couldn't create {shown}: {error}"
+            )));
+        }
+    }
+    let filled = || -> BackendResult<()> {
+        workspace::init_workspace(root, false).map_err(report)?;
+        let positions = match positions_from {
+            Some(file) => fs::read(file).map_err(report)?,
+            None => NO_POSITIONS.as_bytes().to_vec(),
+        };
+        atomic_write::write_new_private(&dir.join("positions.json"), &positions).map_err(report)
+    };
+    filled().map_err(|error| {
+        // Only ever what this call just made: `create_dir` fails on anything already there.
+        let _ = fs::remove_dir_all(&dir);
+        WorkspaceProblem::location(format!("Couldn't create {shown}: {error}"))
+    })?;
+    Ok(root.to_string())
+}
+
+/// Where the New Workspace form suggests putting one: Documents, or else the home directory.
+pub fn default_workspace_location() -> String {
+    let Some(home) = env::home_dir() else {
+        return String::new();
+    };
+    let documents = home.join("Documents");
+    let location = if documents.is_dir() { documents } else { home };
+    location.to_string_lossy().into_owned()
+}
+
 /// Everything the UI shows about the loaded portfolio, read together.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -63,6 +221,8 @@ pub struct Snapshot {
     pub findings: Vec<Finding>,
     /// connected | partial | offline | fixture
     pub network: String,
+    /// Whether there's a policy to review the portfolio against.
+    pub has_policy: bool,
 }
 
 /// What a holding's per-unit figures are in, which [`PositionDto`] doesn't say.
@@ -465,11 +625,6 @@ impl Backend {
         self.save_config().await
     }
 
-    pub fn init_workspace(&self, dir: &str) -> BackendResult<()> {
-        workspace::init_workspace(dir, false).map_err(report)?;
-        workspace::init_agent_files(dir, false).map_err(report)
-    }
-
     pub fn export_skill(&self, dir: &str) -> BackendResult<()> {
         agent_skill::skill_export(dir, false).map_err(report)
     }
@@ -491,6 +646,7 @@ impl Backend {
             performance: self.state.get_performance().await,
             findings: analytics::data_quality(&portfolio),
             network: analytics::network_status(&portfolio).to_string(),
+            has_policy: self.state.policy().await.is_some(),
         }
     }
 
@@ -504,8 +660,9 @@ impl Backend {
 
     /// Record today's valuation, so history builds up just by using the app.
     ///
-    /// Skipped for files that do not parse or are not fully priced, and for
-    /// encrypted portfolios, whose values must not land on disk in plaintext.
+    /// Skipped for files that do not parse or are not fully priced, for encrypted portfolios,
+    /// whose values must not land on disk in plaintext, and for empty portfolios, where history
+    /// would start with a zero that reads as a jump once there are positions.
     pub async fn record_today(&self) -> BackendResult<()> {
         let encrypted = self
             .state
@@ -516,6 +673,9 @@ impl Backend {
             return Ok(());
         }
         let portfolio = self.state.portfolio().await;
+        if portfolio.positions.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.today_point(&portfolio).await;
         if !snapshot.complete {
             return Ok(());
@@ -746,7 +906,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use portfolio_rs::services::quotes::AnyProvider;
+    use portfolio_rs::{doctor::HealthStatus, services::quotes::AnyProvider};
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
@@ -814,6 +974,129 @@ mod tests {
         let open = runtime.block_on(backend.startup(None)).unwrap();
         assert_eq!(open.file_path, None);
         assert_eq!(open.workspace_dir, None);
+    }
+
+    fn folder(dir: &TempDir) -> String {
+        dir.path().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_new_workspace_opens_in_the_portfolio_rs_format() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+
+        let root = create_workspace(" My Portfolio ", &folder(&dir), None).unwrap();
+        assert!(
+            root.ends_with("My Portfolio"),
+            "the name is trimmed: {root}"
+        );
+
+        runtime.block_on(async {
+            backend.load_workspace(root.clone()).await.unwrap();
+            let open = backend.open_document().await;
+            assert_eq!(open.workspace_dir, Some(root.clone()));
+            assert_eq!(open.parse_error, None);
+            assert!(backend.snapshot().await.positions.is_empty());
+
+            backend.record_today().await.unwrap();
+            let history = Path::new(&root).join("portfolio/history/main/snapshots.jsonl");
+            assert!(!history.exists(), "an empty portfolio has no history yet");
+
+            // `portfolio_rs doctor` agrees it's a workspace, and it only lacks a policy so far.
+            let health = backend.doctor(root.clone()).await.unwrap();
+            assert_eq!(health.issue_count, 0, "{:?}", health.checks);
+            let warned: Vec<&str> = health
+                .checks
+                .iter()
+                .filter(|check| check.status == HealthStatus::Warning)
+                .map(|check| check.name.as_str())
+                .collect();
+            assert_eq!(warned, ["Policy file", "Encryption"]);
+        });
+    }
+
+    #[test]
+    fn a_new_workspace_can_start_from_an_open_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_portfolio(&dir);
+        let root = create_workspace("Copied", &folder(&dir), Some(&file)).unwrap();
+        let copied = fs::read_to_string(Path::new(&root).join("positions.json")).unwrap();
+        assert_eq!(copied, CASH_ONLY);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            CASH_ONLY,
+            "left as it was"
+        );
+    }
+
+    #[test]
+    fn a_workspace_never_replaces_what_is_there() {
+        let dir = TempDir::new().unwrap();
+        let taken = dir.path().join("Taken");
+        fs::create_dir(&taken).unwrap();
+        fs::write(taken.join("keep.txt"), "mine").unwrap();
+
+        let problem = create_workspace("Taken", &folder(&dir), None).unwrap_err();
+        assert_eq!(problem.field, WorkspaceField::Name);
+        assert!(problem.message.contains("already exists"), "{problem:?}");
+        assert_eq!(fs::read_to_string(taken.join("keep.txt")).unwrap(), "mine");
+        assert_eq!(fs::read_dir(&taken).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_workspace_leaves_nothing_behind() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-file.json");
+        let problem =
+            create_workspace("Half", &folder(&dir), Some(&missing.to_string_lossy())).unwrap_err();
+        assert!(problem.message.contains("Couldn't create"), "{problem:?}");
+        assert!(!dir.path().join("Half").exists());
+    }
+
+    #[test]
+    fn workspace_names_and_locations_are_checked() {
+        let dir = TempDir::new().unwrap();
+        let location = folder(&dir);
+        let problem = |name: &str, location: &str| plan_workspace(name, location).unwrap_err();
+
+        assert_eq!(problem("  ", &location).field, WorkspaceField::Name);
+        for name in ["a/b", r"a\b", "..", "a:b", "tail."] {
+            let problem = problem(name, &location);
+            assert_eq!(problem.field, WorkspaceField::Name, "{name}");
+            assert!(problem.message.contains("can't contain"), "{name}");
+        }
+        assert_eq!(problem("a", "  ").field, WorkspaceField::Location);
+        assert!(problem("a", "relative/path").message.contains("full path"));
+        assert_eq!(
+            plan_workspace("a", &location).unwrap(),
+            dir.path().join("a")
+        );
+
+        let missing = dir.path().join("missing");
+        let problem = create_workspace("a", &missing.to_string_lossy(), None).unwrap_err();
+        assert_eq!(problem.field, WorkspaceField::Location);
+        assert!(problem.message.contains("doesn't exist"), "{problem:?}");
+
+        let file = write_portfolio(&dir);
+        let problem = create_workspace("a", &file, None).unwrap_err();
+        assert!(problem.message.contains("not a folder"), "{problem:?}");
+    }
+
+    #[test]
+    fn a_home_location_expands() {
+        let Some(home) = env::home_dir() else {
+            return;
+        };
+        assert_eq!(plan_workspace("a", "~").unwrap(), home.join("a"));
+        assert_eq!(
+            plan_workspace("a", "~/b").unwrap(),
+            home.join("b").join("a")
+        );
+        assert!(
+            plan_workspace("a", "~elsewhere").is_err(),
+            "not this user's"
+        );
     }
 
     #[test]

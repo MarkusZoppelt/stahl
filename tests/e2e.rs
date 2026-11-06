@@ -3,6 +3,8 @@
 //!
 //! These never touch the user's config: the backend keeps it in a temp directory.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
     io::{Cursor, Write},
@@ -1642,4 +1644,250 @@ fn the_default_updater_never_checks_anything() {
     app.type_text("check for updates");
     app.press(Key::Enter);
     assert!(app.has_text("Updates are turned off"));
+}
+
+impl Harness {
+    /// The form's location, set to a folder in this test's temp directory.
+    fn open_new_workspace_in(&mut self, location: &Path) {
+        self.command('n', true);
+        assert!(self.exists("workspace-create"), "the form opens");
+        self.rt
+            .state
+            .new_workspace
+            .as_mut()
+            .unwrap()
+            .location
+            .replace_text(location.to_string_lossy().as_ref());
+        self.settle();
+    }
+
+    fn problem(&self) -> String {
+        let form = self.rt.state.new_workspace.as_ref();
+        let problem = form.and_then(|form| form.problem.as_ref());
+        problem.map_or_else(String::new, |problem| problem.message.clone())
+    }
+
+    fn saved_config(&self) -> String {
+        fs::read_to_string(self.dir.path().join("config.yml")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn a_new_user_creates_a_workspace_and_adds_a_first_position() {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+
+    app.type_text("My Portfolio");
+    assert!(app.has_text("Creates "), "says where it will go");
+    app.click("workspace-create");
+
+    let root = location.join("My Portfolio");
+    assert!(app.rt.state.new_workspace.is_none(), "{}", app.problem());
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(root.to_string_lossy().as_ref())
+    );
+    for file in [
+        "positions.json",
+        "INVESTMENT_POLICY.md",
+        "AGENTS.md",
+        ".gitignore",
+        "portfolio/watchlist.json",
+    ] {
+        assert!(root.join(file).is_file(), "{file}");
+    }
+    for folder in ["diary", "decisions", "theses", "reports"] {
+        assert!(root.join("portfolio").join(folder).is_dir(), "{folder}");
+    }
+    assert!(app.exists(Page::Review.key()), "workspace pages are open");
+    assert!(
+        app.saved_config().contains("My Portfolio"),
+        "reopens next time: {}",
+        app.saved_config()
+    );
+
+    app.command('n', false);
+    app.type_text("Savings");
+    app.rt
+        .state
+        .form
+        .as_mut()
+        .unwrap()
+        .amount
+        .replace_text("1000");
+    app.rt
+        .state
+        .form
+        .as_mut()
+        .unwrap()
+        .asset_class
+        .replace_text("Cash");
+    app.settle();
+    app.click("form-submit");
+    assert_eq!(app.rt.state.positions.len(), 1);
+    app.command('s', false);
+    let positions = fs::read_to_string(root.join("positions.json")).unwrap();
+    assert!(positions.contains("Savings"), "{positions}");
+}
+
+#[test]
+fn a_workspace_needs_a_name_and_a_place_that_can_hold_it() {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    fs::create_dir(location.join("Taken")).unwrap();
+    app.open_new_workspace_in(&location);
+
+    app.click("workspace-create");
+    assert_eq!(app.problem(), "Give the workspace a name.");
+    assert!(app.exists("workspace-problem"), "the problem shows");
+
+    app.click("workspace-name");
+    app.type_text("a/b");
+    app.click("workspace-create");
+    assert!(app.problem().contains("can't contain"), "{}", app.problem());
+    assert!(!location.join("a").exists());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.name.replace_text("Taken");
+    app.settle();
+    app.click("workspace-create");
+    assert!(
+        app.problem().contains("already exists"),
+        "{}",
+        app.problem()
+    );
+    assert!(!app.rt.state.is_workspace());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.name.replace_text("New");
+    form.location
+        .replace_text(location.join("nowhere").to_string_lossy().as_ref());
+    app.settle();
+    app.click("workspace-create");
+    assert!(app.problem().contains("doesn't exist"), "{}", app.problem());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.location.clear();
+    app.settle();
+    app.click("workspace-create");
+    assert!(app.problem().contains("Choose where"), "{}", app.problem());
+
+    assert_eq!(app.rt.state.open.workspace_dir, None, "nothing was opened");
+    app.click("workspace-cancel");
+    assert!(app.rt.state.new_workspace.is_none());
+    assert!(
+        !app.saved_config().contains("workspace_dir: "),
+        "nothing was remembered: {}",
+        app.saved_config()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_in_a_folder_you_cannot_write_says_so() {
+    let mut app = Harness::boot(false, None);
+    let locked = app.dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root can write anywhere, so this can't be tested as root.
+    let writable = fs::write(locked.join("probe"), "").is_ok();
+    if !writable {
+        app.open_new_workspace_in(&locked);
+        app.type_text("New");
+        app.click("workspace-create");
+        assert!(app.problem().contains("can't write"), "{}", app.problem());
+        assert!(app.rt.state.new_workspace.is_some(), "the form stays open");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn unsaved_changes_are_not_lost_to_a_new_workspace() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('n', false);
+    app.click("form-submit");
+    assert!(app.rt.state.dirty);
+
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("New");
+    app.click("workspace-create");
+    assert!(
+        app.problem().contains("Save your changes"),
+        "{}",
+        app.problem()
+    );
+    assert!(!location.join("New").exists());
+    assert!(app.rt.state.dirty, "still there to save");
+}
+
+#[test]
+fn a_new_workspace_can_bring_the_open_file_along() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    assert!(app.has_text("Bring my 5 positions from portfolio.json"));
+    app.type_text("Kept");
+    app.click("workspace-create");
+    assert_eq!(app.rt.state.positions.len(), 5);
+    assert!(app.rt.state.is_workspace());
+
+    // From a workspace there's nothing to offer, and leaving the box unticked starts empty.
+    app.open_new_workspace_in(&location);
+    assert!(!app.exists("workspace-keep"));
+    app.type_text("Fresh");
+    app.click("workspace-create");
+    assert!(app.rt.state.positions.is_empty());
+
+    assert_eq!(
+        fs::read_to_string(location.join("portfolio.json")).unwrap(),
+        demo::POSITIONS,
+        "the original is untouched"
+    );
+}
+
+#[test]
+fn ticking_off_the_open_file_starts_empty() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("Fresh");
+    app.click("workspace-keep");
+    app.click("workspace-create");
+    assert!(app.rt.state.positions.is_empty());
+}
+
+#[test]
+fn the_palette_reaches_a_new_workspace_and_offers_only_what_works() {
+    let mut app = Harness::boot(false, None);
+    app.command('k', false);
+    assert!(app.has_text("New Workspace"));
+    assert!(
+        !app.has_text("Add Position"),
+        "there's nothing to add to yet"
+    );
+    assert!(!app.has_text("Holdings"), "no pages without a portfolio");
+    app.type_text("new work");
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert!(app.exists("workspace-create"));
+    app.press(Key::Escape);
+    assert!(app.rt.state.new_workspace.is_none());
+}
+
+#[test]
+fn opening_another_portfolio_forgets_the_last_ones_results() {
+    let mut app = Harness::boot(true, None);
+    app.command('5', false);
+    assert!(app.rt.state.review.data.is_some());
+    assert!(app.rt.state.has_policy);
+
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("Next");
+    app.click("workspace-create");
+    assert!(!app.rt.state.has_policy, "the policy stayed behind");
+    assert!(app.rt.state.review.data.is_none());
+    assert_eq!(app.rt.state.page, Page::Overview);
 }

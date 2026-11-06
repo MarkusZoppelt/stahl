@@ -4,11 +4,12 @@ use rune::{
     El, Icon, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text,
     tok::motion::LEAD,
 };
-use rune_kit::{Button, ButtonVariant, Dialog, Keybind, TextInput, Toast, ToastRegion};
+use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toast, ToastRegion};
 
 use crate::{
+    backend::{WorkspaceField, plan_workspace},
     icons,
-    state::{Command, Confirm, FormField, Page, State},
+    state::{Command, Confirm, FormField, Page, State, file_name},
     theme::Theme,
     view::{page_icon, portfolio::matches_search, ui, updates},
 };
@@ -19,6 +20,9 @@ pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
     }
     if s.form.is_some() {
         form(s, t, layer);
+    }
+    if s.new_workspace.is_some() {
+        new_workspace(s, t, layer);
     }
     if let Some(confirm) = &s.confirm {
         confirmation(confirm, t, layer);
@@ -132,29 +136,42 @@ pub fn entries(s: &State) -> Vec<Entry> {
         command,
         group: "Actions",
     };
-    let mut all: Vec<Entry> = Page::PORTFOLIO
-        .into_iter()
-        .chain(Page::INSIGHTS)
-        .chain([Page::Settings])
-        .map(page_entry)
-        .collect();
-    if s.is_workspace() {
-        all.extend(Page::PLAN.map(page_entry));
+    // Without a portfolio, only what can start one, or doesn't need one, has any effect.
+    let mut all: Vec<Entry> = Vec::new();
+    if s.has_portfolio() {
+        all.extend(
+            Page::PORTFOLIO
+                .into_iter()
+                .chain(Page::INSIGHTS)
+                .chain([Page::Settings])
+                .map(page_entry),
+        );
+        if s.is_workspace() {
+            all.extend(Page::PLAN.map(page_entry));
+        }
+        all.extend([
+            action(
+                "Refresh Prices",
+                &icons::REFRESH,
+                Some((false, "R")),
+                Command::Refresh,
+            ),
+            action(
+                "Add Position",
+                &icons::PLUS,
+                Some((false, "N")),
+                Command::AddPosition,
+            ),
+            action("Save", &icons::SAVE, Some((false, "S")), Command::Save),
+        ]);
     }
     all.extend([
         action(
-            "Refresh Prices",
-            &icons::REFRESH,
-            Some((false, "R")),
-            Command::Refresh,
+            "New Workspace…",
+            &icons::FOLDER_PLUS,
+            Some((true, "N")),
+            Command::NewWorkspace,
         ),
-        action(
-            "Add Position",
-            &icons::PLUS,
-            Some((false, "N")),
-            Command::AddPosition,
-        ),
-        action("Save", &icons::SAVE, Some((false, "S")), Command::Save),
         action(
             "Open Portfolio File…",
             &icons::FILE_BRACES,
@@ -168,28 +185,10 @@ pub fn entries(s: &State) -> Vec<Entry> {
             Command::OpenWorkspace,
         ),
         action(
-            "Hide or Show Amounts",
-            &icons::EYE_OFF,
-            Some((true, "H")),
-            Command::Privacy,
-        ),
-        action(
             "Toggle Light/Dark Theme",
             &icons::MOON,
             None,
             Command::Theme,
-        ),
-        action(
-            "Toggle Sidebar",
-            &icons::LAYOUT_DASHBOARD,
-            Some((true, "B")),
-            Command::Sidebar,
-        ),
-        action(
-            "Copy Briefing as Markdown",
-            &icons::COPY,
-            None,
-            Command::CopyBriefing,
         ),
         action(
             "Check for Updates…",
@@ -198,6 +197,28 @@ pub fn entries(s: &State) -> Vec<Entry> {
             Command::CheckForUpdates,
         ),
     ]);
+    if s.has_portfolio() {
+        all.extend([
+            action(
+                "Hide or Show Amounts",
+                &icons::EYE_OFF,
+                Some((true, "H")),
+                Command::Privacy,
+            ),
+            action(
+                "Toggle Sidebar",
+                &icons::LAYOUT_DASHBOARD,
+                Some((true, "B")),
+                Command::Sidebar,
+            ),
+            action(
+                "Copy Briefing as Markdown",
+                &icons::COPY,
+                None,
+                Command::CopyBriefing,
+            ),
+        ]);
+    }
     let query = s
         .palette
         .as_ref()
@@ -556,6 +577,149 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
     .on_close(|s: &mut State| s.form = None)
     .child(fields)
     .build(k, layer);
+}
+
+fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
+    let k = &t.kit;
+    let Some(form) = &s.new_workspace else {
+        return;
+    };
+    let wrong = |field: WorkspaceField| {
+        form.problem
+            .as_ref()
+            .is_some_and(|problem| problem.field == field)
+    };
+    let submit = |s: &mut State, _: &mut Tx| s.submit_new_workspace();
+    let name = TextInput::new(&form.name)
+        .label("Name")
+        .placeholder("My Portfolio")
+        .invalid(wrong(WorkspaceField::Name))
+        .width(None)
+        .on_edit(|s: &mut State| &mut s.new_workspace.as_mut().expect("form is open").name)
+        .on_submit(submit)
+        .build(k)
+        .key("workspace-name");
+    let location = TextInput::new(&form.location)
+        .label("Location")
+        .placeholder("Folder to create it in")
+        .invalid(wrong(WorkspaceField::Location))
+        .width(None)
+        .on_edit(|s: &mut State| &mut s.new_workspace.as_mut().expect("form is open").location)
+        .on_submit(submit)
+        .build(k)
+        .key("workspace-location");
+    // Encrypted files are left out, because a copy would be plaintext. Say so, or they'd look lost.
+    let keep = s.positions_to_keep().map(|file| {
+        Checkbox::new(form.keep_positions)
+            .label(format!(
+                "Bring my {} positions from {}",
+                s.positions.len(),
+                file_name(file)
+            ))
+            .description("Copies them. The original file stays as it is.")
+            .on_toggle(|s: &mut State| {
+                if let Some(form) = &mut s.new_workspace {
+                    form.keep_positions = !form.keep_positions;
+                }
+            })
+            .build(k)
+            .key("workspace-keep")
+    });
+    let encrypted = s
+        .open
+        .file_path
+        .as_deref()
+        .is_some_and(|file| file.ends_with(".gpg"))
+        && !s.is_workspace()
+        && !s.positions.is_empty();
+    let target = plan_workspace(&form.name.text, &form.location.text)
+        .ok()
+        .map(|dir| format!("Creates {}", dir.display()));
+    let fields = col()
+        .w_full()
+        .gap(14.0)
+        .px(16.0)
+        .pb(16.0)
+        .child(ui::wide_field("Name", name, t))
+        .child(ui::wide_field(
+            "Location",
+            row()
+                .center_y()
+                .w_full()
+                .gap(8.0)
+                .child(col().grow(1.0).w(0.0).min_w(0.0).child(location))
+                .child(
+                    Button::new("Choose…")
+                        .on_press_tx(|s: &mut State, tx: &mut Tx| s.choose_workspace_location(tx))
+                        .build(k)
+                        .key("workspace-choose"),
+                ),
+            t,
+        ))
+        .children(keep)
+        .children(encrypted.then(|| {
+            ui::caption(
+                "This workspace starts empty: an encrypted file can't be copied without decrypting it.",
+                t,
+            )
+            .wrap()
+        }))
+        .children(target.map(|target| {
+            ui::caption(target, t)
+                .key("workspace-target")
+                .truncate_middle()
+        }))
+        .children(
+            form.problem
+                .as_ref()
+                .map(|problem| ui::danger(problem.message.clone(), t).key("workspace-problem")),
+        )
+        .child(
+            row()
+                .center_y()
+                .w_full()
+                .justify_between()
+                .gap(8.0)
+                .child(
+                    Button::new("Open Existing…")
+                        .variant(ButtonVariant::Ghost)
+                        .on_press_tx(|s: &mut State, tx: &mut Tx| {
+                            s.new_workspace = None;
+                            s.ask_for_workspace(tx);
+                        })
+                        .build(k)
+                        .key("workspace-open-instead"),
+                )
+                .child(
+                    row()
+                        .center_y()
+                        .gap(8.0)
+                        .child(
+                            Button::new("Cancel")
+                                .on_press(|s: &mut State| s.new_workspace = None)
+                                .build(k)
+                                .key("workspace-cancel"),
+                        )
+                        .child(
+                            Button::new("Create Workspace")
+                                .variant(ButtonVariant::Submit)
+                                .disabled(form.busy)
+                                .on_press(|s: &mut State| s.submit_new_workspace())
+                                .build(k)
+                                .key("workspace-create"),
+                        ),
+                ),
+        );
+    Dialog::new("new-workspace", "New Workspace")
+        .open(true)
+        .fit()
+        .width(520.0)
+        .description(
+            "A folder for your positions, policy, reports and decisions, in plain files you own.",
+        )
+        .on_close(|s: &mut State| s.new_workspace = None)
+        .child(fields)
+        .build(k, layer);
 }
 
 fn confirmation(confirm: &Confirm, t: &Theme, layer: &mut Vec<El>) {

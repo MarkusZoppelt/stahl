@@ -48,6 +48,18 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
+    /// What someone sees on first opening the app, with nothing to reopen.
+    fn first_run(s: &mut State) {
+        s.reset();
+        s.settle();
+        s.starting = false;
+    }
+    /// A form that shows no real path, and whose name is left out to show the problem.
+    fn example_form(s: &mut State) {
+        if let Some(form) = &mut s.new_workspace {
+            form.location.replace_text("/Users/you/Documents");
+        }
+    }
     /// A page of a new workspace with nothing in it yet.
     fn empty(s: &mut State, page: Page) {
         s.startup();
@@ -124,10 +136,18 @@ fn main() {
                 scene(s, Page::Holdings);
                 s.open_form(Some(0));
             }),
-            ("welcome", |s| {
-                s.reset();
+            ("welcome", first_run),
+            ("new-workspace", |s| {
+                first_run(s);
+                s.open_new_workspace();
+                example_form(s);
+            }),
+            ("new-workspace-problem", |s| {
+                first_run(s);
+                s.open_new_workspace();
+                example_form(s);
+                s.submit_new_workspace();
                 s.settle();
-                s.starting = false;
             }),
             ("parse-failure", |s| {
                 s.startup();

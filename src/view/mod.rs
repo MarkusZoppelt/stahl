@@ -50,6 +50,7 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.key == Key::Escape {
         return s.palette.take().is_some()
             || s.form.take().is_some()
+            || s.new_workspace.take().is_some()
             || s.confirm.take().is_some()
             || s.close_update_dialog();
     }
@@ -72,6 +73,7 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         ('r', false) => s.refresh_prices(),
         ('h', true) => s.privacy = !s.privacy,
         ('n', false) if s.has_portfolio() => s.open_form(None),
+        ('n', true) => s.open_new_workspace(),
         ('q', false) => s.quit_or_ask(tx),
         (key, false) => match Page::from_shortcut(key) {
             Some(page) if s.has_portfolio() => s.navigate(page),
@@ -269,34 +271,31 @@ fn sidebar(s: &State, t: &Theme) -> El {
     let mut bar = Sidebar::new().label("Sections").header(header).section(
         SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
     );
-    bar =
-        if s.is_workspace() {
-            bar.section(
-                SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))),
-            )
-        } else {
-            bar.child(
+    bar = if s.is_workspace() {
+        bar.section(SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))))
+    } else {
+        bar.child(
             col()
                 .key("nav-unlock")
                 .role("button")
-                .label("Open a workspace")
+                .label("Create a workspace")
                 .focusable(true)
                 .px(10.0)
                 .py(8.0)
                 .gap(2.0)
                 .radius(6.0)
                 .hover(k.c.hover)
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx))
+                .on_press(|s: &mut State| s.open_new_workspace())
                 .child(text("Plan").font(k.ty.text_xsmall_medium).color(k.c.text_faint))
                 .child(
                     ui::caption(
-                        "Open a workspace to set a policy, review drift, and simulate rebalancing.",
+                        "Create a workspace to set a policy, review drift, and simulate rebalancing.",
                         t,
                     )
                     .wrap(),
                 ),
         )
-        };
+    };
     bar.section(
         SidebarSection::new("Insights").rows(Page::INSIGHTS.map(|page| nav_row(s, page, t))),
     )

@@ -29,7 +29,10 @@ use rune::{ClipboardContent, FileDialogOptions, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
-    backend::{Backend, BackendResult, Briefing, History, OpenDocument, Period, Quote, Snapshot},
+    backend::{
+        self, Backend, BackendResult, Briefing, History, OpenDocument, Period, Quote, Snapshot,
+        WorkspaceField, WorkspaceProblem,
+    },
     format,
     update::{self, Installed, Release, Updater},
 };
@@ -280,6 +283,17 @@ impl PositionForm {
     }
 }
 
+/// The New Workspace form.
+pub struct NewWorkspaceForm {
+    pub name: TextEdit,
+    pub location: TextEdit,
+    /// Copy the positions of the open file, when there is one to copy.
+    pub keep_positions: bool,
+    pub problem: Option<WorkspaceProblem>,
+    /// Creating one is under way, so a second press mustn't start another.
+    pub busy: bool,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Confirm {
     Delete { id: usize, name: String },
@@ -295,6 +309,7 @@ pub enum Command {
     Save,
     OpenFile,
     OpenWorkspace,
+    NewWorkspace,
     Privacy,
     Theme,
     Sidebar,
@@ -387,6 +402,7 @@ pub struct State {
     pub findings: Vec<Finding>,
     /// connected | partial | offline | fixture
     pub network: String,
+    pub has_policy: bool,
     /// Position changes not written to disk yet.
     pub dirty: bool,
     pub loading: bool,
@@ -405,6 +421,7 @@ pub struct State {
     pub drop_hover: bool,
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
+    pub new_workspace: Option<NewWorkspaceForm>,
     pub confirm: Option<Confirm>,
     pub toast: Option<(String, Instant)>,
     toast_armed: bool,
@@ -580,6 +597,7 @@ impl State {
             performance: None,
             findings: Vec::new(),
             network: String::new(),
+            has_policy: false,
             dirty: false,
             loading: false,
             starting: true,
@@ -594,6 +612,7 @@ impl State {
             drop_hover: false,
             palette: None,
             form: None,
+            new_workspace: None,
             confirm: None,
             toast: None,
             toast_armed: false,
@@ -894,6 +913,7 @@ impl State {
         self.performance = Some(snapshot.performance);
         self.findings = snapshot.findings;
         self.network = snapshot.network;
+        self.has_policy = snapshot.has_policy;
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
@@ -942,19 +962,40 @@ impl State {
     }
 
     pub fn load_file(&mut self, path: String) {
-        self.change_and_reload(
-            true,
-            |state| state.dirty = false,
-            move |backend| async move { backend.load_simple_file(path).await },
-        );
+        self.change_and_reload(true, State::opened_another, move |backend| async move {
+            backend.load_simple_file(path).await
+        });
     }
 
     pub fn load_workspace(&mut self, dir: String) {
-        self.change_and_reload(
-            true,
-            |state| state.dirty = false,
-            move |backend| async move { backend.load_workspace(dir).await },
-        );
+        self.change_and_reload(true, State::opened_another, move |backend| async move {
+            backend.load_workspace(dir).await
+        });
+    }
+
+    /// A different portfolio is open now, so nothing fetched for the last one still applies.
+    fn opened_another(&mut self) {
+        self.dirty = false;
+        self.selected = None;
+        self.inspector.set_open(false);
+        self.search.clear();
+        self.history = None;
+        self.review = Loadable::default();
+        self.simulation = Loadable::default();
+        self.briefing = Loadable::default();
+        self.validation = Loadable::default();
+        self.doctor = Loadable::default();
+        self.policy.policy = None;
+        self.policy.editor.clear();
+        self.policy.message = None;
+        self.policy.error = None;
+        self.documents.generated = None;
+        self.documents.message = None;
+        self.documents.error = None;
+        if self.page.needs_workspace() && !self.is_workspace() {
+            self.page = Page::Overview;
+        }
+        self.load_page();
     }
 
     pub fn open_dropped(&mut self, path: &Path) {
@@ -981,6 +1022,111 @@ impl State {
 
     pub fn ask_for_workspace(&mut self, tx: &mut Tx) {
         self.ask_for_folder(tx, "Open Workspace", |state, dir| state.load_workspace(dir));
+    }
+
+    /// The file a new workspace can take its positions from: one open on its own, with something
+    /// in it, and not encrypted, because a copy would be plaintext.
+    pub fn positions_to_keep(&self) -> Option<&str> {
+        let file = self.open.file_path.as_deref()?;
+        (!self.is_workspace()
+            && self.has_portfolio()
+            && !self.positions.is_empty()
+            && !file.ends_with(".gpg"))
+        .then_some(file)
+    }
+
+    pub fn open_new_workspace(&mut self) {
+        self.palette = None;
+        let mut name = TextEdit::new("");
+        name.focused = true;
+        self.new_workspace = Some(NewWorkspaceForm {
+            name,
+            location: TextEdit::new(backend::default_workspace_location()),
+            keep_positions: true,
+            problem: None,
+            busy: false,
+        });
+    }
+
+    pub fn choose_workspace_location(&mut self, tx: &mut Tx) {
+        self.ask_for_folder(tx, "Choose a Location", |state, dir| {
+            if let Some(form) = &mut state.new_workspace {
+                form.location.replace_text(dir);
+                form.problem = None;
+            }
+        });
+    }
+
+    /// Create the workspace the form describes and open it. Problems stay in the form.
+    pub fn submit_new_workspace(&mut self) {
+        let keep = self.positions_to_keep().map(str::to_string);
+        let dirty = self.dirty;
+        let Some(form) = &mut self.new_workspace else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        if dirty {
+            form.problem = Some(WorkspaceProblem {
+                field: WorkspaceField::Location,
+                message: "Save your changes first: opening a new workspace closes this portfolio."
+                    .to_string(),
+            });
+            return;
+        }
+        let name = form.name.text.clone();
+        let location = form.location.text.clone();
+        let keep = keep.filter(|_| form.keep_positions);
+        form.problem = None;
+        form.busy = true;
+        self.loading = true;
+        self.error = None;
+        self.run(
+            move |backend| async move {
+                let dir = match backend::create_workspace(&name, &location, keep.as_deref()) {
+                    Ok(dir) => dir,
+                    Err(problem) => return Ok(Err(problem)),
+                };
+                if let Err(message) = backend.load_workspace(dir).await {
+                    return Ok(Err(WorkspaceProblem {
+                        field: WorkspaceField::Location,
+                        message,
+                    }));
+                }
+                backend.record_today_or_warn().await;
+                let snapshot = backend.snapshot().await;
+                Ok(Ok((
+                    backend.open_document().await,
+                    snapshot,
+                    backend.config().await,
+                )))
+            },
+            |state, result| {
+                state.loading = false;
+                match result {
+                    Ok(Ok((open, snapshot, config))) => {
+                        state.new_workspace = None;
+                        state.open = open;
+                        state.config = Some(config);
+                        state.apply_snapshot(snapshot);
+                        state.page = Page::Overview;
+                        state.opened_another();
+                        state.show_toast("Workspace created");
+                    }
+                    Ok(Err(problem)) => {
+                        if let Some(form) = &mut state.new_workspace {
+                            form.problem = Some(problem);
+                            form.busy = false;
+                        }
+                    }
+                    Err(error) => {
+                        state.new_workspace = None;
+                        state.error = Some(error);
+                    }
+                }
+            },
+        );
     }
 
     fn ask_for_folder(
@@ -1022,7 +1168,8 @@ impl State {
                     state.allocation.clear();
                     state.performance = None;
                     state.findings.clear();
-                    state.dirty = false;
+                    state.has_policy = false;
+                    state.opened_another();
                     state.page = Page::Overview;
                 }
                 Err(error) => state.error = Some(error),
@@ -1097,6 +1244,10 @@ impl State {
     }
 
     pub fn load_review(&mut self) {
+        if !self.has_policy {
+            self.review = Loadable::default();
+            return;
+        }
         self.review.loading = true;
         self.restart_draw = true;
         self.run(
@@ -1106,6 +1257,10 @@ impl State {
     }
 
     pub fn load_simulation(&mut self) {
+        if !self.has_policy {
+            self.simulation = Loadable::default();
+            return;
+        }
         self.simulation.loading = true;
         self.run(
             |backend| async move { backend.simulation().await },
@@ -1354,6 +1509,7 @@ impl State {
             Command::Save => self.save(),
             Command::OpenFile => self.ask_for_file(tx),
             Command::OpenWorkspace => self.ask_for_workspace(tx),
+            Command::NewWorkspace => self.open_new_workspace(),
             Command::Privacy => self.privacy = !self.privacy,
             Command::Theme => self.toggle_theme(),
             Command::Sidebar => self.sidebar.toggle(),
@@ -1630,18 +1786,6 @@ impl State {
         );
     }
 
-    pub fn create_workspace(&mut self, tx: &mut Tx) {
-        self.ask_for_folder(tx, "Create Workspace", |state, dir| {
-            match state.backend.init_workspace(&dir) {
-                Ok(()) => {
-                    state.show_toast("Workspace created");
-                    state.load_workspace(dir);
-                }
-                Err(error) => state.settings.error = Some(error),
-            }
-        });
-    }
-
     pub fn export_skill(&mut self, tx: &mut Tx) {
         self.ask_for_folder(tx, "Export Agent Skill", |state, dir| {
             match state.backend.export_skill(&dir) {
@@ -1689,6 +1833,7 @@ impl State {
                 state.policy.loading = false;
                 match result {
                     Ok(policy) => {
+                        state.has_policy = true;
                         state.show_policy(policy);
                         state.policy.message = Some("Policy loaded".to_string());
                     }
@@ -1702,6 +1847,7 @@ impl State {
         self.policy.loading = false;
         match result {
             Ok(policy) => {
+                self.has_policy = true;
                 self.policy.policy = Some(policy);
                 self.policy.message = Some(success.to_string());
             }

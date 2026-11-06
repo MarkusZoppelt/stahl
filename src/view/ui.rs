@@ -501,6 +501,16 @@ pub fn field(label: impl Into<String>, input: El, t: &Theme) -> El {
         .child(input)
 }
 
+/// A visible label over a field that has its whole row.
+pub fn wide_field(label: impl Into<String>, input: El, t: &Theme) -> El {
+    col()
+        .w_full()
+        .min_w(0.0)
+        .gap(6.0)
+        .child(caption(label, t))
+        .child(input)
+}
+
 /// A simple table: a header row and rows of cells, the first column left-aligned.
 pub fn table(headers: &[&str], rows: Vec<Vec<El>>, t: &Theme) -> El {
     let cell = |index: usize, content: El| {
