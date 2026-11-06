@@ -380,11 +380,17 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
         return;
     };
     let is_new = form.existing.is_none();
-    let currency = s.currency();
     let invalid = |field| {
         form.error
             .as_ref()
             .is_some_and(|error| error.field == field)
+    };
+    // portfolio_rs reads a ticker's purchase prices in its quote currency, which isn't known
+    // until the position has been priced.
+    let price_label = if form.ticker.text.trim().is_empty() {
+        format!("Price ({})", s.currency())
+    } else {
+        "Price (quote currency)".to_string()
     };
     macro_rules! access {
         ($field:ident) => {
@@ -496,10 +502,10 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                             t,
                         ))
                         .child(ui::field(
-                            format!("Price ({currency})"),
+                            price_label.clone(),
                             labelled(
                                 TextInput::new(&form.price)
-                                    .label(format!("Price ({currency})"))
+                                    .label(price_label)
                                     .placeholder("0.00")
                                     .invalid(invalid(FormField::Price)),
                                 "form-price",

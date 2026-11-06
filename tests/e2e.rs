@@ -7,7 +7,11 @@
 use std::{env, fs, path::Path, sync::Once, thread, time::Duration};
 
 use chrono::Local;
-use portfolio_rs::state::PositionDto;
+use portfolio_rs::{
+    AppConfig, FixtureProvider,
+    services::quotes::AnyProvider,
+    state::{AppState, PositionDto},
+};
 use rune::{Key, KeyEvent, Mods, Runtime};
 use stahl::{
     app,
@@ -53,6 +57,31 @@ impl Harness {
             workspace.then_some(root.as_path()),
             tokio.handle().clone(),
         );
+        let rt = app::headless(backend, initial, (1320.0, 860.0));
+        let mut harness = Harness {
+            rt,
+            dir,
+            _tokio: tokio,
+        };
+        harness.settle();
+        harness
+    }
+
+    /// Open `contents` with base currency EUR and prices from a fixture of `quotes`.
+    fn boot_with_quotes(contents: &str, quotes: &str) -> Harness {
+        offline();
+        let tokio = Tokio::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("portfolio.json");
+        fs::write(&path, contents).unwrap();
+        let provider = FixtureProvider::from_json(quotes).unwrap();
+        let backend = Backend::new(
+            AppState::with_quotes("EUR".to_string(), AnyProvider::Fixture(Box::new(provider))),
+            AppConfig::default(),
+            Some(dir.path().join("config.yml")),
+            tokio.handle().clone(),
+        );
+        let initial = Some(path.to_string_lossy().into_owned());
         let rt = app::headless(backend, initial, (1320.0, 860.0));
         let mut harness = Harness {
             rt,
@@ -550,6 +579,42 @@ fn selecting_a_holding_opens_its_details_and_search_filters() {
     assert!(app.exists("holding-3"));
 }
 
+/// A holding quoted in dollars, in a portfolio that reports in euros.
+const BITCOIN: &str = r#"[
+  {"Id": "pos_btc", "Name": "Bitcoin", "AssetClass": "Crypto", "Ticker": "BTC-USD", "Amount": 0.45,
+   "Purchases": [{"Date": "2025/05/28", "Quantity": 0.45, "Price": 50000.0}]}
+]"#;
+
+/// 1 EUR buys 1.25 USD, so 1 USD is €0.80.
+const DOLLAR_QUOTES: &str = r#"{
+  "latest": {
+    "BTC-USD": {"price": 60000.0, "currency": "USD"},
+    "EURUSD=X": {"price": 1.25, "currency": "USD"}
+  },
+  "previous_close": {"BTC-USD": 59000.0}
+}"#;
+
+#[test]
+fn a_foreign_holding_shows_each_figure_in_its_own_currency() {
+    let mut app = Harness::boot_with_quotes(BITCOIN, DOLLAR_QUOTES);
+    app.command('2', false);
+    app.click("holding-0");
+
+    // In the quote currency.
+    assert!(app.has_text("$60,000.00"), "the price");
+    assert!(app.has_text("$50,000.00"), "the average cost");
+    assert!(app.has_text("0.45 @ $50,000.00"), "the purchase");
+    // In the base currency: 0.45 × $60,000 × 0.8 and 0.45 × $50,000 × 0.8.
+    assert!(app.has_text("€21,600.00"), "the value");
+    assert!(app.has_text("€18,000.00"), "what was invested");
+    assert!(app.has_text("+€3,600.00"), "the PnL");
+    // The price that multiplies by the quantity to give the value.
+    assert!(app.has_text("€48,000.00"), "the price in the base currency");
+    // Never a dollar amount with a euro sign.
+    assert!(!app.has_text("€60,000.00"));
+    assert!(!app.has_text("€50,000.00"));
+}
+
 #[test]
 fn sorting_reverses_on_a_second_click() {
     let mut app = Harness::boot(false, Some(demo::POSITIONS));
@@ -688,4 +753,94 @@ fn the_same_position_and_class_fly_between_pages_without_clashing() {
     app.click(Page::Allocation.key());
     assert!(app.exists("allocation-0"));
     assert!(!app.exists("legend-0"));
+}
+
+#[test]
+fn a_foreign_holding_without_an_fx_rate_still_shows_its_quote() {
+    let quotes = r#"{"latest": {"BTC-USD": {"price": 60000.0, "currency": "USD"}}}"#;
+    let mut app = Harness::boot_with_quotes(BITCOIN, quotes);
+    app.command('2', false);
+    app.click("holding-0");
+
+    assert!(app.has_text("$60,000.00"), "the price");
+    assert!(app.has_text("$50,000.00"), "the average cost");
+    assert!(!app.has_text("Price (EUR)"), "nothing to convert with");
+}
+
+#[test]
+fn a_holding_nobody_has_priced_shows_no_currency() {
+    let mut app = Harness::boot_with_quotes(BITCOIN, r#"{"latest": {}}"#);
+    app.command('2', false);
+    app.click("holding-0");
+
+    // The purchase price was recorded in BTC-USD's quote currency, which isn't known here.
+    assert!(app.has_text("0.45 @ 50,000.00"), "the purchase");
+    assert!(!app.has_text("€50,000.00"));
+    assert!(!app.has_text("$50,000.00"));
+}
+
+#[test]
+fn a_minor_unit_quote_is_not_read_as_its_major_unit() {
+    let positions =
+        r#"[{"Name": "Vodafone", "AssetClass": "Stocks", "Ticker": "VOD.L", "Amount": 10.0}]"#;
+    let quotes = r#"{"latest": {
+        "VOD.L": {"price": 7500.0, "currency": "GBp"},
+        "EURGBP=X": {"price": 0.8, "currency": "GBP"}
+    }}"#;
+    let mut app = Harness::boot_with_quotes(positions, quotes);
+    app.command('2', false);
+    app.click("holding-0");
+
+    assert!(app.has_text("GBp\u{a0}7,500.00"), "the price, in pence");
+    // 7500p is £75, and 1 GBP is €1.25.
+    assert!(app.has_text("€93.75"), "the price in the base currency");
+    assert!(app.has_text("€937.50"), "the value");
+}
+
+#[test]
+fn a_holding_in_the_base_currency_has_one_price() {
+    let positions = r#"[
+      {"Name": "Fund", "AssetClass": "Stocks", "Ticker": "FUND", "Amount": 2.0,
+       "Purchases": [{"Date": "2025/05/28", "Quantity": 2.0, "Price": 90.0}]},
+      {"Name": "Flat", "AssetClass": "Real Estate", "Amount": 500.0,
+       "Purchases": [{"Date": "2025/05/28", "Quantity": 5.0, "Price": 80.0}]}
+    ]"#;
+    let quotes = r#"{"latest": {"FUND": {"price": 100.0, "currency": "EUR"}}}"#;
+    let mut app = Harness::boot_with_quotes(positions, quotes);
+    app.command('2', false);
+
+    app.click("holding-0");
+    assert!(app.has_text("€100.00"), "the price");
+    assert!(app.has_text("2 @ €90.00"), "the purchase");
+    assert!(!app.has_text("Price (EUR)"));
+
+    // Without a ticker, what was entered is in the base currency.
+    app.click("holding-1");
+    assert!(app.has_text("5 @ €80.00"), "the purchase");
+}
+
+#[test]
+fn privacy_mode_hides_a_foreign_holdings_prices() {
+    let mut app = Harness::boot_with_quotes(BITCOIN, DOLLAR_QUOTES);
+    app.command('2', false);
+    app.click("holding-0");
+    assert!(app.has_text("$60,000.00"));
+
+    app.click("privacy");
+    for shown in ["$60,000.00", "$50,000.00", "€48,000.00"] {
+        assert!(!app.has_text(shown), "{shown}");
+    }
+}
+
+#[test]
+fn the_form_only_names_a_currency_it_knows() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('2', false);
+    app.click("add-position");
+    assert!(app.has_text("Price (EUR)"));
+
+    app.click("form-ticker");
+    app.type_text("BTC-USD");
+    assert!(app.has_text("Price (quote currency)"));
+    assert!(!app.has_text("Price (EUR)"));
 }

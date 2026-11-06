@@ -1,0 +1,8 @@
+# What GitHub's generated release notes include.
+changelog:
+  exclude:
+    authors:
+      - dependabot
+      - dependabot[bot]
+      - github-actions
+      - github-actions[bot]

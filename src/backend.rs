@@ -56,11 +56,47 @@ const HISTORY_ID: &str = "main";
 pub struct Snapshot {
     pub summary: PortfolioSummaryDto,
     pub positions: Vec<PositionDto>,
+    /// One per position, at the index that is the position's id.
+    pub quotes: Vec<Quote>,
     pub allocation: Vec<AllocationItemDto>,
     pub performance: PerformanceDto,
     pub findings: Vec<Finding>,
     /// connected | partial | offline | fixture
     pub network: String,
+}
+
+/// What a holding's per-unit figures are in, which [`PositionDto`] doesn't say.
+///
+/// Its `price`, `average_cost` and purchase prices are in the quote currency, while its `value`,
+/// `invested` and `pnl` are in the base currency.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Quote {
+    pub ticker: Option<String>,
+    /// The currency of the per-unit figures. `None` for a ticker that no quote has priced yet.
+    pub currency: Option<String>,
+    /// The price in the base currency, when that differs from the quote currency and the FX rate
+    /// is known: exactly `value / quantity`.
+    pub base_price: Option<f64>,
+}
+
+impl Quote {
+    fn of(position: &PortfolioPosition, base: &str) -> Self {
+        // Like portfolio_rs: a holding without a ticker is entered in the base currency, and so
+        // is what a live quote that names no currency reports.
+        let in_base = position.get_ticker().is_none() || position.has_market_price();
+        Self {
+            ticker: position.get_ticker().map(String::from),
+            currency: position
+                .price_currency()
+                .filter(|_| position.get_ticker().is_some())
+                .map(String::from)
+                .or_else(|| in_base.then(|| base.to_string())),
+            base_price: position
+                .fx_rate()
+                .filter(|_| position.has_market_price())
+                .map(|rate| position.market_price() * rate),
+        }
+    }
 }
 
 /// Which portfolio is open, as opposed to its contents.
@@ -422,9 +458,15 @@ impl Backend {
 
     pub async fn snapshot(&self) -> Snapshot {
         let portfolio = self.state.portfolio().await;
+        let base = self.state.currency().await;
         Snapshot {
             summary: self.state.get_portfolio_summary().await,
             positions: self.state.get_positions().await,
+            quotes: portfolio
+                .positions
+                .iter()
+                .map(|position| Quote::of(position, &base))
+                .collect(),
             allocation: self.state.get_allocation().await,
             performance: self.state.get_performance().await,
             findings: analytics::data_quality(&portfolio),

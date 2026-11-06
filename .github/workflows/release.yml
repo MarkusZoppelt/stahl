@@ -67,7 +67,7 @@ jobs:
           cargo build --release
           Compress-Archive -Path target/release/stahl.exe -DestinationPath stahl-capital-windows-x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.platform }}
           path: |
@@ -77,8 +77,8 @@ jobs:
           if-no-files-found: error
 
   # One job after all the builds, so a failed build can't publish a release with installers missing.
+  # It runs on PRs too, so everything but the publishing itself is tested before a tag needs it.
   release:
-    if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -87,6 +87,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
@@ -94,13 +95,19 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: installer-*
           path: installers
           merge-multiple: true
 
+      - name: check every installer is there
+        run: |
+          ls -l installers
+          ls installers/*.dmg installers/*.deb installers/*.zip
+
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: "Stahl Capital ${{ github.ref_name }}"
           generate_release_notes: true

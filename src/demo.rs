@@ -11,7 +11,7 @@ use crate::backend::Backend;
 
 pub const POSITIONS: &str = r#"[
   {"Id": "pos_btc", "Name": "Bitcoin", "AssetClass": "Crypto", "Ticker": "BTC-USD", "Amount": 0.45,
-   "Purchases": [{"Date": "2025/05/28", "Quantity": 0.45, "Price": 42000.0}]},
+   "Purchases": [{"Date": "2025/05/28", "Quantity": 0.45, "Price": 52500.0}]},
   {"Id": "pos_spy", "Name": "S&P 500", "AssetClass": "Stocks", "Ticker": "SPY", "Amount": 80.0,
    "Purchases": [{"Date": "2024/01/10", "Quantity": 80.0, "Price": 410.0}]},
   {"Id": "pos_tlt", "Name": "Long Bonds", "AssetClass": "Bonds", "Ticker": "TLT", "Amount": 60.0,
@@ -59,12 +59,13 @@ tolerance_percent = 5.0
 
 const QUOTES: &str = r#"{
   "latest": {
-    "BTC-USD": {"price": 60000.0, "currency": "EUR"},
+    "BTC-USD": {"price": 75000.0, "currency": "USD"},
+    "EURUSD=X": {"price": 1.25, "currency": "USD"},
     "SPY": {"price": 500.0, "currency": "EUR"},
     "TLT": {"price": 90.0, "currency": "EUR"},
     "GLD": {"price": 200.0, "currency": "EUR"}
   },
-  "previous_close": {"BTC-USD": 59000.0, "SPY": 503.0, "TLT": 90.5, "GLD": 196.0}
+  "previous_close": {"BTC-USD": 73750.0, "SPY": 503.0, "TLT": 90.5, "GLD": 196.0}
 }"#;
 
 /// Write the demo's prices where `PORTFOLIO_RS_QUOTES=fixture:<path>` can find them.
@@ -80,10 +81,10 @@ pub fn seed_workspace(dir: &Path) {
     fs::write(dir.join("portfolio/policy.toml"), POLICY).expect("demo workspace is writable");
 
     let holdings = [
-        ("pos_btc", "Crypto", 0.45, 60000.0),
-        ("pos_spy", "Stocks", 80.0, 500.0),
-        ("pos_tlt", "Bonds", 60.0, 90.0),
-        ("pos_gld", "Gold", 25.0, 200.0),
+        ("pos_btc", "Crypto", 0.45, 75000.0, "USD", 0.8),
+        ("pos_spy", "Stocks", 80.0, 500.0, "EUR", 1.0),
+        ("pos_tlt", "Bonds", 60.0, 90.0, "EUR", 1.0),
+        ("pos_gld", "Gold", 25.0, 200.0, "EUR", 1.0),
     ];
     let today = Local::now().date_naive();
     let lines: Vec<String> = (1..=90)
@@ -96,12 +97,12 @@ pub fn seed_workspace(dir: &Path) {
                     .to_string(),
             ];
             let mut total = 30000.0;
-            for (id, class, quantity, price) in holdings {
+            for (id, class, quantity, price, currency, fx) in holdings {
                 let price = (price * wave * 100.0_f64).round() / 100.0;
-                let value = (quantity * price * 100.0_f64).round() / 100.0;
+                let value = (quantity * price * fx * 100.0_f64).round() / 100.0;
                 total += value;
                 positions.push(format!(
-                    r#"{{"positionId":"{id}","kind":"market","assetClass":"{class}","quantity":{quantity},"price":{price},"priceCurrency":"EUR","fxRate":1.0,"valueBase":{value}}}"#
+                    r#"{{"positionId":"{id}","kind":"market","assetClass":"{class}","quantity":{quantity},"price":{price},"priceCurrency":"{currency}","fxRate":{fx},"valueBase":{value}}}"#
                 ));
             }
             format!(
