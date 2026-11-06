@@ -42,3 +42,93 @@ jobs:
 
       - name: smoke-test the built binary
         run: file result/bin/stahl
+
+  # Without Nix, as a contributor or the release build sees each platform. Nix can't build for
+  # Windows, so this is its only coverage.
+  cargo:
+    name: cargo (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # To build, then a software Vulkan driver and a display to run on.
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev \
+            libxkbcommon-x11-0 mesa-vulkan-drivers xvfb x11-apps imagemagick
+
+      # rustup reads the version from rust-toolchain.toml.
+      - name: install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Saving this cache takes Windows longer than building. PRs restore main's.
+          save-if: ${{ runner.os != 'Windows' || github.ref == 'refs/heads/main' }}
+
+      - name: clippy
+        run: cargo clippy --all-targets -- --deny warnings
+
+      - name: unit and end-to-end tests
+        run: cargo test --no-fail-fast
+
+      - name: build the demo and the app
+        run: cargo build --bins --example demo
+
+      - name: render with the real renderer
+        run: |
+          mkdir -p renders
+          scenes=$(target/debug/examples/demo --list-scenes)
+          # Windows runners have a software GPU, at over a minute a scene.
+          if [ "$RUNNER_OS" = Windows ]; then
+            scenes="overview holding-details palette welcome"
+          fi
+          for scene in $scenes; do
+            target/debug/examples/demo --snap "renders/$scene.png" --scene "$scene" \
+              --at 2 --size 1320x860 --scale 1
+            test -s "renders/$scene.png"
+          done
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: renders-${{ matrix.os }}
+          path: renders
+          if-no-files-found: warn
+
+      - name: open a real window, and stay up
+        run: |
+          mkdir -p window
+          if [ "$RUNNER_OS" = Linux ]; then
+            Xvfb :99 -screen 0 1440x960x24 &
+            export DISPLAY=:99
+            sleep 2
+          fi
+          target/debug/examples/demo > window.log 2>&1 &
+          app=$!
+          sleep 15
+          cat window.log
+          # A photograph is a bonus: not every runner lets us take one.
+          case "$RUNNER_OS" in
+            Linux) xwd -root -display :99 -silent | convert xwd:- window/linux.png || true ;;
+            macOS) screencapture -x window/macos.png || true ;;
+            Windows) powershell -File .github/workflows/screenshot.ps1 window/windows.png || true ;;
+          esac
+          kill -0 "$app"
+          kill "$app"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: window-${{ matrix.os }}
+          path: window
+          if-no-files-found: warn
