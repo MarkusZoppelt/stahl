@@ -18,6 +18,9 @@ use stahl::{
 use tempfile::TempDir;
 use tokio::runtime::Runtime as Tokio;
 
+/// What the Edit form says when purchases decide the amount.
+const PURCHASES_NOTE: &str = "Amount is the total of this position's purchases";
+
 struct Harness {
     rt: Runtime<State>,
     dir: TempDir,
@@ -414,6 +417,103 @@ fn editing_saves_an_amount_with_three_decimals_unchanged() {
     app.click("form-submit");
     assert!(app.rt.state.form.is_none(), "saved without complaint");
     assert_eq!(added_position(&app).map(|p| p.amount), Some(12.345));
+}
+
+/// Open the real Edit dialog. In the demo data, 0 is Bitcoin, which has one purchase of 0.45, and
+/// 4 is Savings, 30000 with no purchases.
+fn edit_position(app: &mut Harness, id: usize) {
+    app.command('2', false);
+    app.click(&format!("holding-{id}"));
+    app.click("edit-position");
+    assert!(app.rt.state.form.is_some(), "the form opened");
+}
+
+fn amount_of(app: &Harness, id: usize) -> f64 {
+    app.rt
+        .state
+        .positions
+        .iter()
+        .find(|position| position.id == id)
+        .expect("the position exists")
+        .amount
+}
+
+#[test]
+fn an_amount_that_purchases_decide_isnt_silently_ignored() {
+    let mut app = Harness::boot(true, None);
+    edit_position(&mut app, 0);
+    app.click("form-amount");
+    app.type_text("1");
+    app.click("form-submit");
+
+    assert!(app.rt.state.form.is_none(), "the form closed");
+    assert_eq!(amount_of(&app, 0), 0.45, "purchases still decide");
+    assert!(!app.rt.state.dirty, "nothing changed, so it isn't Edited");
+    assert!(!app.exists("save"));
+
+    app.click("edit-position");
+    assert_eq!(app.rt.state.form.as_ref().unwrap().amount.text, "0.45");
+}
+
+#[test]
+fn an_amount_that_purchases_decide_is_read_only_and_says_why() {
+    let mut app = Harness::boot(true, None);
+    edit_position(&mut app, 0);
+    assert!(app.has_text(PURCHASES_NOTE), "the form explains itself");
+    assert_eq!(app.rt.state.form.as_ref().unwrap().amount.text, "0.45");
+
+    app.click("form-amount");
+    app.type_text("1");
+    assert_eq!(
+        app.rt.state.form.as_ref().unwrap().amount.text,
+        "0.45",
+        "typing can't reach it"
+    );
+}
+
+#[test]
+fn a_position_with_purchases_can_still_be_renamed() {
+    let mut app = Harness::boot(true, None);
+    edit_position(&mut app, 0);
+    app.type_text(" Core");
+    app.press(Key::Enter);
+
+    assert!(app.rt.state.form.is_none(), "enter saves");
+    let position = &app.rt.state.positions[0];
+    assert_eq!(position.name.as_deref(), Some("Bitcoin Core"));
+    assert_eq!(position.amount, 0.45);
+    assert_eq!(position.purchases.len(), 1, "no purchase was made up");
+    assert_eq!(position.invested, Some(18900.0), "cost basis is untouched");
+    assert!(app.rt.state.dirty);
+}
+
+#[test]
+fn an_amount_without_purchases_can_still_be_edited() {
+    let mut app = Harness::boot(true, None);
+    edit_position(&mut app, 4);
+    assert!(!app.has_text(PURCHASES_NOTE));
+    app.click("form-amount");
+    app.type_text("5");
+    app.click("form-submit");
+
+    assert_eq!(amount_of(&app, 4), 300005.0);
+    assert!(app.rt.state.dirty);
+
+    let path = app.dir.path().join("portfolio/positions.json");
+    assert!(!fs::read_to_string(&path).unwrap().contains("300005"));
+    app.command('s', false);
+    assert!(fs::read_to_string(&path).unwrap().contains("300005"));
+}
+
+#[test]
+fn saving_an_unchanged_form_isnt_an_edit() {
+    for id in [0, 4] {
+        let mut app = Harness::boot(true, None);
+        edit_position(&mut app, id);
+        app.click("form-submit");
+        assert!(app.rt.state.form.is_none(), "the form closed");
+        assert!(!app.rt.state.dirty, "position {id} didn't change");
+    }
 }
 
 #[test]
