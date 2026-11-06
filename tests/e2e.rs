@@ -610,3 +610,16 @@ fn privacy_mode_hides_a_foreign_holdings_prices() {
         assert!(!app.has_text(shown), "{shown}");
     }
 }
+
+#[test]
+fn the_form_only_names_a_currency_it_knows() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('2', false);
+    app.click("add-position");
+    assert!(app.has_text("Price (EUR)"));
+
+    app.click("form-ticker");
+    app.type_text("BTC-USD");
+    assert!(app.has_text("Price (quote currency)"));
+    assert!(!app.has_text("Price (EUR)"));
+}
