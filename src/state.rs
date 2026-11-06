@@ -273,6 +273,8 @@ pub struct Updates {
     pub dialog: bool,
     pub phase: UpdatePhase,
     pub checking: bool,
+    /// Nobody asked for the check that's running, so it only speaks up about a new version.
+    pub check_is_quiet: bool,
     /// The update worked, but the restart didn't.
     pub restart_error: Option<String>,
 }
@@ -463,6 +465,7 @@ impl State {
                 dialog: false,
                 phase: UpdatePhase::Idle,
                 checking: false,
+                check_is_quiet: false,
                 restart_error: None,
             },
         }
@@ -1073,7 +1076,9 @@ impl State {
 
     /// Quit, first asking about changes that aren't on disk.
     pub fn quit_or_ask(&mut self, tx: &mut Tx) {
-        if self.dirty {
+        if self.update_is_installing() {
+            self.show_toast("An update is installing. Quit when it has finished.");
+        } else if self.dirty {
             self.confirm = Some(Confirm::Quit);
         } else {
             tx.quit();
@@ -1089,14 +1094,21 @@ impl State {
 
     /// True when closing the window should quit. Otherwise it has reopened, asking what to do.
     fn close_quits(&mut self) -> bool {
-        if !self.dirty {
+        if self.update_is_installing() {
+            self.show_toast("An update is installing. Quit when it has finished.");
+        } else if self.dirty {
+            self.confirm = Some(Confirm::Quit);
+        } else {
             return true;
         }
-        self.confirm = Some(Confirm::Quit);
         if let Some(reopen) = &self.reopen {
             reopen();
         }
         false
+    }
+
+    fn update_is_installing(&self) -> bool {
+        self.updates.phase == UpdatePhase::Installing
     }
 
     pub fn save_and_quit(&mut self) {
@@ -1174,19 +1186,23 @@ impl State {
             return;
         }
         if self.updates.checking {
+            // Asking during the startup check gets that check's answer.
+            self.updates.check_is_quiet &= quiet;
             return;
         }
         self.updates.checking = true;
+        self.updates.check_is_quiet = quiet;
         let updater = self.updates.updater.clone();
         self.run(
             move |_| updater.check(),
-            move |state, result| state.finish_update_check(quiet, result),
+            |state, result| state.finish_update_check(result),
         );
     }
 
-    fn finish_update_check(&mut self, quiet: bool, result: BackendResult<Option<Release>>) {
+    fn finish_update_check(&mut self, result: BackendResult<Option<Release>>) {
         let updates = &mut self.updates;
         updates.checking = false;
+        let quiet = updates.check_is_quiet;
         match result {
             Ok(Some(release)) => {
                 // What's installed or installing stays the release in the dialog.
@@ -1199,14 +1215,22 @@ impl State {
                     updates.dialog = true;
                 }
             }
-            Ok(None) if !quiet => {
-                let current = updates.updater.current().clone();
-                self.show_toast(format!("You're up to date ({current})"));
+            Ok(None) => {
+                // A release that was offered and has since been pulled is no longer on offer.
+                if matches!(updates.phase, UpdatePhase::Idle | UpdatePhase::Failed(_)) {
+                    updates.available = None;
+                    updates.dialog = false;
+                    updates.phase = UpdatePhase::Idle;
+                }
+                if !quiet {
+                    let current = updates.updater.current().clone();
+                    self.show_toast(format!("You're up to date ({current})"));
+                }
             }
             Err(_) if !quiet => {
                 self.show_toast("Couldn't check for updates. Try again later.");
             }
-            Ok(None) | Err(_) => {}
+            Err(_) => {}
         }
     }
 
@@ -1262,7 +1286,8 @@ impl State {
     /// Start the new version and quit this one, saving first. A failed save keeps this one open,
     /// because quitting would lose what's unsaved.
     pub fn restart_after_update(&mut self) {
-        if self.updates.phase != UpdatePhase::Installed {
+        // `loading`: the save this started is still running, and a second one would restart twice.
+        if self.updates.phase != UpdatePhase::Installed || self.loading {
             return;
         }
         self.updates.restart_error = None;

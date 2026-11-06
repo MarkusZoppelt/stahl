@@ -755,6 +755,69 @@ fn restarting_saves_first_and_a_failed_save_stays_open() {
 }
 
 #[test]
+fn pressing_save_and_restart_twice_restarts_once() {
+    let install = FakeInstall::new();
+    let archive = windows_zip(b"MZ new");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-dismiss");
+    app.command('n', false);
+    app.type_text("Apple");
+    app.click("form-submit");
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    app.click("update-install");
+
+    app.rt.state.restart_after_update();
+    app.rt.state.restart_after_update();
+    app.settle();
+    assert_eq!(install.relaunches(), 1);
+}
+
+#[test]
+fn asking_during_the_startup_check_gets_its_answer() {
+    let install = FakeInstall::new();
+    let source = Arc::new(FakeReleases::offering(
+        update::current_version(),
+        Vec::new(),
+    ));
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.rt.state.check_for_updates(true);
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    assert!(app.has_text("You're up to date"));
+}
+
+#[test]
+fn a_release_that_was_pulled_is_no_longer_offered() {
+    let install = FakeInstall::new();
+    let archive = windows_zip(b"MZ new");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    assert!(app.rt.state.updates.available.is_some());
+
+    let empty = Arc::new(FakeReleases::offering(
+        update::current_version(),
+        Vec::new(),
+    ));
+    app.rt.state.updates.updater = install.windows(empty);
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    assert!(app.rt.state.updates.available.is_none());
+    assert!(!app.exists("update-banner"));
+    assert!(app.has_text("You're up to date"));
+}
+
+#[test]
+fn quitting_waits_for_an_update_that_is_installing() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.rt.state.updates.phase = UpdatePhase::Installing;
+    app.command('q', false);
+    assert!(!app.rt.state.is_quitting());
+    assert!(app.has_text("An update is installing"));
+}
+
+#[test]
 fn a_download_that_fails_its_checksum_is_never_installed() {
     let install = FakeInstall::new();
     let source = windows_release(&windows_zip(b"MZ evil"), &windows_zip(b"MZ new"));
