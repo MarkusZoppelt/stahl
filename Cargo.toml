@@ -1,6 +1,31 @@
-[workspace]
-members = ["src-tauri"]
-resolver = "2"
+[package]
+name = "stahl"
+version = "0.3.0"
+description = "Stahl Capital — native desktop app for portfolio_rs"
+authors = ["Markus Zoppelt"]
+license = "MIT"
+repository = "https://github.com/MarkusZoppelt/stahl"
+edition = "2024"
+rust-version = "1.98"
+
+[package.metadata.bundle]
+name = "Stahl Capital"
+identifier = "net.zoppelt.stahl"
+icon = ["assets/icons/32x32.png", "assets/icons/128x128.png", "assets/icons/128x128@2x.png", "assets/icons/icon.icns"]
+category = "public.app-category.finance"
+short_description = "Your local-first portfolio, on your own machine."
+
+[dependencies]
+chrono = "0.4"
+rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50", features = ["native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50", features = ["markdown"] }
+portfolio_rs = "0.10.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 lto = true

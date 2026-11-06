@@ -1,0 +1,532 @@
+//! The window: pure functions from [`State`] to elements.
+
+use std::env;
+
+use rune::{
+    Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
+    tok::{TextStyle, motion::LEAD},
+};
+use rune_kit::{
+    Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
+    shell::{Sidebar, SidebarRow, SidebarSection, SplitView, Toolbar, is_sidebar_toggle},
+};
+
+use crate::{
+    icons,
+    state::{Page, State, file_name},
+    theme::Theme,
+};
+
+mod charts;
+mod insights;
+mod overlays;
+mod plan;
+mod portfolio;
+pub mod ui;
+
+pub fn page_icon(page: Page) -> &'static Icon {
+    match page {
+        Page::Overview => &icons::LAYOUT_DASHBOARD,
+        Page::Holdings => &icons::CHART_COLUMN,
+        Page::Allocation => &icons::CHART_PIE,
+        Page::Performance => &icons::TRENDING_UP,
+        Page::Review => &icons::STETHOSCOPE,
+        Page::Rebalance => &icons::SCALE,
+        Page::Policy => &icons::SHIELD,
+        Page::Documents => &icons::FILE_TEXT,
+        Page::Briefing => &icons::CLIPBOARD_LIST,
+        Page::Health => &icons::HEART_PULSE,
+        Page::Settings => &icons::SETTINGS,
+    }
+}
+
+/// Keys nothing focused wanted, on every platform; the native menu shows the same chords on macOS.
+pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
+    if is_sidebar_toggle(event) {
+        s.sidebar.toggle();
+        return true;
+    }
+    if event.key == Key::Escape {
+        if s.palette.take().is_some() || s.form.take().is_some() || s.confirm.take().is_some() {
+            return true;
+        }
+        return false;
+    }
+    let Key::Command(key) = event.key else {
+        return false;
+    };
+    let shift = event.mods.shift;
+    match (key, shift) {
+        ('k', false) => {
+            if s.palette.take().is_none() {
+                s.open_palette();
+            }
+        }
+        ('o', false) => s.ask_for_file(tx),
+        ('o', true) => s.ask_for_workspace(tx),
+        ('s', false) => s.save(),
+        ('r', false) => s.refresh_prices(),
+        ('h', true) => s.privacy = !s.privacy,
+        ('n', false) if s.has_portfolio() => s.open_form(None),
+        ('q', false) => s.quit_or_ask(tx),
+        (key, false) => match Page::from_shortcut(key) {
+            Some(page) if s.has_portfolio() => s.navigate(page),
+            _ => return false,
+        },
+        _ => return false,
+    }
+    true
+}
+
+pub fn view(s: &State, cx: &mut Cx<State>) -> El {
+    let t = Theme::new(s.is_dark());
+    let mut layer = Vec::new();
+    let body = if s.starting {
+        splash(&t)
+    } else if s.open.parse_error.is_some() {
+        overlays::parse_failure(s, &t)
+    } else if !s.has_portfolio() {
+        welcome(s, &t)
+    } else {
+        shell(s, &t, cx, &mut layer)
+    };
+    overlays::build(s, &t, &mut layer);
+
+    let body = body
+        .fill(t.kit.c.bg_base)
+        .on_drop_files(|s: &mut State, files, _| {
+            s.drop_hover = false;
+            if let Some(path) = files.first() {
+                let path = path.clone();
+                s.open_dropped(&path);
+            }
+        })
+        .on_drop_hover(|s: &mut State, over, _| s.drop_hover = over);
+    let body = if s.drop_hover {
+        body.border(2.0, t.accent)
+    } else {
+        body
+    };
+    root(body, layer)
+}
+
+fn splash(t: &Theme) -> El {
+    let [accent, trend] = ui::aurora(t, t.up, 0.0);
+    col()
+        .w_full()
+        .h_full()
+        .center()
+        .gap(16.0)
+        .child(accent)
+        .child(trend)
+        .child(ui::orbiting_mark(48.0, t))
+        .child(ui::muted("Loading your portfolio…", t))
+}
+
+/// Rune's windowing library reports no file drags on Wayland, so don't offer them there.
+fn drops_work() -> bool {
+    !cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+fn welcome(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let choice = |key: &'static str,
+                  glyph: &'static Icon,
+                  primary: bool,
+                  title: &str,
+                  detail: &str,
+                  index: usize| {
+        ui::entering(
+            ui::card(t)
+                .key(key)
+                .role("button")
+                .focusable(true)
+                .grow(1.0)
+                .fill(t.card.alpha(0.55))
+                .backdrop_blur(20.0)
+                .hover(k.c.hover)
+                .press_scale(0.98)
+                .child(
+                    col()
+                        .size(40.0, 40.0)
+                        .radius(10.0)
+                        .continuous_corners()
+                        .center()
+                        .fill(if primary { t.accent } else { k.c.layer_03 })
+                        .child(icon(glyph, 20.0).color(if primary {
+                            k.c.bg_base
+                        } else {
+                            k.c.text_base
+                        })),
+                )
+                .child(
+                    text(title.to_string())
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                )
+                .child(ui::muted(detail, t).wrap()),
+            index,
+        )
+    };
+    let [accent, trend] = ui::aurora(t, t.up, 0.0);
+    col()
+        .w_full()
+        .h_full()
+        .center()
+        .gap(8.0)
+        .padding(24.0)
+        .child(accent)
+        .child(trend)
+        .child(ui::orbiting_mark(64.0, t).mb(8.0))
+        .child(
+            text("Welcome to Stahl Capital")
+                .font(TextStyle::new(30.0, 650.0).tracking(-0.4))
+                .color(k.c.text_base),
+        )
+        .child(ui::muted("Your portfolio, in plain files, on your own machine.", t).mb(24.0))
+        .child(
+            row()
+                .center_y()
+                .w_full()
+                .max_w(672.0)
+                .gap(16.0)
+                .equal_columns(2)
+                .child(
+                    choice(
+                        "welcome-workspace",
+                        &icons::FOLDER_OPEN,
+                        true,
+                        "Open a workspace",
+                        "Recommended. Holds your portfolio, policy, diary, decisions, and reports.",
+                        0,
+                    )
+                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx)),
+                )
+                .child(
+                    choice(
+                        "welcome-file",
+                        &icons::FILE_BRACES,
+                        false,
+                        "Open a positions file",
+                        "Quick start with just a positions.json. You can create a workspace later.",
+                        1,
+                    )
+                    .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_file(tx)),
+                ),
+        )
+        .children(
+            drops_work().then(|| {
+                ui::caption("or drop a file or folder anywhere on this window", t).mt(24.0)
+            }),
+        )
+        .children(
+            s.error
+                .as_ref()
+                .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(672.0)),
+        )
+}
+
+fn nav_row(s: &State, page: Page, t: &Theme) -> El {
+    SidebarRow::new(page.label())
+        .icon(page_icon(page))
+        .selected(s.page == page)
+        .on_select(move |s: &mut State, _| s.navigate(page))
+        .build(&t.kit)
+        .key(page.key())
+}
+
+fn sidebar(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let document = s
+        .open
+        .workspace_dir
+        .as_deref()
+        .or(s.open.file_path.as_deref())
+        .map(file_name)
+        .unwrap_or_default()
+        .to_string();
+    let header = row()
+        .center_y()
+        .gap(10.0)
+        .px(8.0)
+        .pb(8.0)
+        .child(ui::mark(28.0))
+        .child(
+            col()
+                .shrink()
+                .child(
+                    text("Stahl Capital")
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                )
+                .child(
+                    text(document)
+                        .font(k.ty.text_xsmall)
+                        .color(k.c.text_faint)
+                        .truncate(),
+                ),
+        );
+    let mut bar = Sidebar::new().label("Sections").header(header).section(
+        SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
+    );
+    bar =
+        if s.is_workspace() {
+            bar.section(
+                SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))),
+            )
+        } else {
+            bar.child(
+            col()
+                .key("nav-unlock")
+                .role("button")
+                .label("Open a workspace")
+                .focusable(true)
+                .px(10.0)
+                .py(8.0)
+                .gap(2.0)
+                .radius(6.0)
+                .hover(k.c.hover)
+                .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx))
+                .child(text("Plan").font(k.ty.text_xsmall_medium).color(k.c.text_faint))
+                .child(
+                    ui::caption(
+                        "Open a workspace to set a policy, review drift, and simulate rebalancing.",
+                        t,
+                    )
+                    .wrap(),
+                ),
+        )
+        };
+    bar.section(
+        SidebarSection::new("Insights").rows(Page::INSIGHTS.map(|page| nav_row(s, page, t))),
+    )
+    .footer(nav_row(s, Page::Settings, t))
+    .build(k)
+}
+
+/// How much to trust the numbers on screen, at a glance.
+fn freshness_label(network: &str, data_status: &str) -> (&'static str, Freshness) {
+    match (network, data_status) {
+        ("offline", _) => ("Offline", Freshness::Doubtful),
+        (_, "stale") => ("Stale prices", Freshness::Doubtful),
+        ("partial", _) | (_, "partial") => ("Partial prices", Freshness::Doubtful),
+        ("fixture", _) => ("Fixture prices", Freshness::Demo),
+        _ => ("Live", Freshness::Good),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Freshness {
+    Good,
+    Doubtful,
+    Demo,
+}
+
+fn freshness(s: &State, t: &Theme) -> El {
+    let status = s
+        .summary
+        .as_ref()
+        .map_or("complete", |summary| summary.data_status.as_str());
+    let (label, level) = freshness_label(&s.network, status);
+    let color = match level {
+        Freshness::Good => t.up,
+        Freshness::Doubtful => t.warn,
+        Freshness::Demo => t.info,
+    };
+    let time = s.updated_at.as_deref().unwrap_or("");
+    row()
+        .center_y()
+        .key("freshness")
+        .role("status")
+        .gap(6.0)
+        .center_y()
+        .child(
+            el().key(format!("freshness-{label}"))
+                .size(6.0, 6.0)
+                .radius(3.0)
+                .fill(color)
+                .motion(LEAD)
+                .cycle(ui::BREATHE),
+        )
+        .child(
+            RollingText::new("freshness-text", format!("{label} · {time}"))
+                .font(t.kit.ty.text_xsmall)
+                .color(t.kit.c.text_muted)
+                .build(&t.kit),
+        )
+        .help("How current these prices are")
+}
+
+fn tool(icon: &'static Icon, label: &str, t: &Theme) -> IconButton {
+    let _ = t;
+    IconButton::new(icon)
+        .variant(IconButtonVariant::Ghost)
+        .label(label.to_string())
+        .help(label.to_string())
+}
+
+fn toolbar(s: &State, t: &Theme) -> Toolbar {
+    let k = &t.kit;
+    let refresh = if s.loading {
+        Spinner::new().size(14.0).build(k).key("refreshing").mx(7.0)
+    } else {
+        tool(&icons::REFRESH, "Refresh Prices", t)
+            .shortcut(ui::chord(false, "R"))
+            .on_press(|s: &mut State| s.refresh_prices())
+            .build(k)
+            .key("refresh-prices")
+    };
+    let trailing = row()
+        .center_y()
+        .gap(2.0)
+        .center_y()
+        .children(s.dirty.then(|| {
+            Button::new("Save Changes")
+                .variant(ButtonVariant::Submit)
+                .icon(&icons::SAVE)
+                .help("Your edits are not on disk yet")
+                .on_press(|s: &mut State| s.save())
+                .build(k)
+                .key("save")
+                .mr(6.0)
+                .transition(Transition::scale(0.9).combined(Transition::opacity()))
+        }))
+        .child(
+            tool(&icons::SEARCH, "Command Palette", t)
+                .shortcut(ui::chord(false, "K"))
+                .on_press(|s: &mut State| s.open_palette())
+                .build(k)
+                .key("palette"),
+        )
+        .child(
+            tool(
+                if s.privacy {
+                    &icons::EYE_OFF
+                } else {
+                    &icons::EYE
+                },
+                if s.privacy {
+                    "Show Amounts"
+                } else {
+                    "Hide Amounts"
+                },
+                t,
+            )
+            .shortcut(ui::chord(true, "H"))
+            .on_press(|s: &mut State| s.privacy = !s.privacy)
+            .build(k)
+            .key("privacy"),
+        )
+        .child(
+            tool(
+                if t.dark { &icons::SUN } else { &icons::MOON },
+                if t.dark {
+                    "Switch to Light Mode"
+                } else {
+                    "Switch to Dark Mode"
+                },
+                t,
+            )
+            .on_press(|s: &mut State| s.toggle_theme())
+            .build(k)
+            .key("toggle-theme"),
+        )
+        .child(refresh);
+    Toolbar::new()
+        .leading(
+            row()
+                .center_y()
+                .gap(12.0)
+                .center_y()
+                .child(
+                    text(s.page.label())
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base),
+                )
+                .child(freshness(s, t)),
+        )
+        .trailing(trailing)
+}
+
+fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
+    let _ = &layer;
+    let page = match s.page {
+        Page::Overview => portfolio::overview(s, t, cx),
+        Page::Holdings => portfolio::holdings(s, t),
+        Page::Allocation => portfolio::allocation(s, t, cx),
+        Page::Performance => portfolio::performance(s, t, cx),
+        Page::Review => plan::review(s, t),
+        Page::Rebalance => plan::rebalance(s, t, cx),
+        Page::Policy => plan::policy(s, t, cx),
+        Page::Documents => plan::documents(s, t, cx),
+        Page::Briefing => insights::briefing(s, t, cx),
+        Page::Health => insights::health(s, t),
+        Page::Settings => insights::settings(s, t),
+    };
+    let trend = s
+        .summary
+        .as_ref()
+        .map_or(t.up, |summary| t.change(summary.day_change));
+    let [accent, day] = ui::aurora(t, trend, 12.0);
+    let scroller = col()
+        .key("main")
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(
+            col()
+                .key(format!("page-{}", s.page.key()))
+                .w_full()
+                .padding(24.0)
+                .gap(16.0)
+                .transition(
+                    Transition::offset(0.0, 8.0)
+                        .combined(Transition::blur(3.0))
+                        .combined(Transition::opacity()),
+                )
+                .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
+                .child(page),
+        );
+    let main = col()
+        .key("main-frame")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(accent)
+        .child(day)
+        .child(scroller);
+    let mut split = SplitView::new(main)
+        .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
+        .toolbar(toolbar(s, t))
+        .titlebar_inset(cx.titlebar_inset())
+        .reduced_motion(cx.is_reduced_motion());
+    if let Some(position) = s
+        .selected
+        .and_then(|id| s.positions.iter().find(|position| position.id == id))
+    {
+        split = split.inspector(
+            &s.inspector,
+            |s: &mut State| &mut s.inspector,
+            portfolio::inspector(s, position, t),
+        );
+    }
+    split.build(&t.kit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freshness_never_calls_doubtful_prices_live() {
+        assert_eq!(freshness_label("connected", "complete").0, "Live");
+        assert_eq!(freshness_label("offline", "complete").0, "Offline");
+        assert_eq!(freshness_label("connected", "stale").0, "Stale prices");
+        assert_eq!(freshness_label("partial", "complete").0, "Partial prices");
+        assert_eq!(freshness_label("connected", "partial").0, "Partial prices");
+        assert_eq!(freshness_label("fixture", "complete").0, "Fixture prices");
+    }
+}

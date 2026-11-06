@@ -2,29 +2,65 @@
 
 [![CI](https://github.com/MarkusZoppelt/stahl/actions/workflows/ci.yml/badge.svg)](https://github.com/MarkusZoppelt/stahl/actions/workflows/ci.yml)
 
-A local-first desktop GUI for [`portfolio_rs`](https://github.com/MarkusZoppelt/portfolio_rs) — track
-investment portfolios, run policy-aware reviews, simulate rebalancing, and manage a durable finance
-workspace, all from a native app. Built with [Tauri 2](https://tauri.app), React, and TypeScript.
+A local-first, native desktop app for [`portfolio_rs`](https://github.com/MarkusZoppelt/portfolio_rs):
+track investment portfolios, see how they got here, run policy-aware reviews, and simulate
+rebalancing. Your data stays in plain files on your own machine. Built in Rust on
+[Rune](https://github.com/anomalyco/rune), with no web view, for macOS, Linux, and Windows.
 
-![Performance view](screenshots/performance.png)
+![Overview](screenshots/overview.png)
 
-> **Status:** early prototype. Expect rough edges.
+| | |
+|---|---|
+| ![Holdings](screenshots/holdings.png) | ![Allocation](screenshots/allocation.png) |
+| ![Review](screenshots/review.png) | ![Command palette](screenshots/command-palette.png) |
+
+> **Status:** early. Expect rough edges.
 
 ## Features
 
-- **Dashboard** — total value, day change, and PnL at a glance
-- **Positions** — add, edit, and remove holdings with live quotes
-- **Allocation** — asset-class breakdown with drift visualization
-- **Performance** — historical and daily returns, top movers
-- **Context** — agent-friendly portfolio briefing
-- **Validate** — sanity-check a portfolio file
-- **Workspace mode** — for full finance workspaces (`portfolio_rs init-workspace`):
-  - **Policy** — view and edit your machine-readable investment policy
-  - **Review** — policy-aware drift/violation checks
-  - **Simulate** — rebalancing what-if scenarios (never trades)
-  - **Documents** — generate weekly reports and decision records
-- **Settings** — currency, theme, and AI provider configuration
+- **Overview:** total value, today's change, and value over time at a glance, with what needs attention
+- **Holdings:** a sortable, searchable table with a detail pane for cost basis and purchases
+- **Allocation:** the split today, compared with your policy's targets
+- **Performance:** value over time with time-weighted return, separating market moves from money you added
+- **Review** (workspace): drift, constraint checks, data quality, and suggested actions
+- **Rebalance** (workspace): what-if scenarios. It never trades.
+- **Policy** (workspace): your machine-readable investment policy, in an editor with a readable summary
+- **Documents** (workspace): weekly reports and decision records
+- **Briefing:** the summary an advisor would ask for, with Copy as Markdown to hand it to an AI assistant
+- **Data Health:** file validation, data-quality findings, and workspace checks
 
+And it behaves like a desktop app:
+
+- **Command palette** (`⌘K`) that also finds your holdings, and shortcuts for every page (`⌘1`–`⌘0`).
+  Ctrl stands in for `⌘` on Linux and Windows.
+- **Hide amounts** (`⌘⇧H`) before you share your screen
+- **Drop a file or folder** on the window to open it (not yet on Wayland, where Rune gets no drags)
+- **Unsaved changes** show in the title bar, and quitting offers to save them
+- **A broken positions file** shows the line and column at fault. It is never shown as an empty portfolio, and never overwritten.
+- **Price freshness** in the toolbar: live, stale, partial, or offline
+- **Motion that means something:** digits roll when a price changes, the hero flashes when new
+  prices land, charts draw themselves in and read out the value under the pointer, and rows fly
+  between Overview and the page they belong to. All of it respects the system's reduced-motion
+  setting.
+- **Figures you can read at a glance:** one colour per asset class on every page, your policy's
+  targets as an outer ring around the allocation donut, each holding's weight along its row, a gauge
+  for how much of the portfolio sits within policy, and today against afterwards for a rebalance.
+- **Prices catch up** when you come back to the app after 15 minutes away
+- Light and dark themes, and system file panels. On macOS, native menus, context menus, a Dock
+  menu, and saved reports you can drag out to Finder or Mail.
+
+### History
+
+To chart your portfolio over time, Stahl records one valuation per day when it opens a portfolio or
+refreshes prices, if every position has a price. It uses the same files as `portfolio_rs snapshot`,
+so both add to one history:
+
+- in a workspace, `portfolio/history/main/snapshots.jsonl`
+- otherwise, `$XDG_DATA_HOME/portfolio_rs/main/snapshots.jsonl` (or under `~/.local/share`)
+- anywhere you like, with `PORTFOLIO_RS_DATA_DIR`
+
+Encrypted (`.gpg`) portfolios are never recorded, because that would put their values on disk in
+plaintext.
 
 ## Run
 
@@ -32,13 +68,15 @@ workspace, all from a native app. Built with [Tauri 2](https://tauri.app), React
 nix run github:MarkusZoppelt/stahl
 ```
 
+Pass a positions file to open it: `stahl positions.json`.
+
 ## Install
 
 ```sh
 nix profile install github:MarkusZoppelt/stahl
 ```
 
-Native installers (`.dmg`, `.deb`/`.AppImage`, `.msi`) are attached to
+Installers (`.dmg`, `.deb`, and a Windows `.zip`) are attached to
 [GitHub Releases](https://github.com/MarkusZoppelt/stahl/releases).
 
 ## Building
@@ -48,69 +86,67 @@ Native installers (`.dmg`, `.deb`/`.AppImage`, `.msi`) are attached to
 ```sh
 nix build .#stahl      # ./result/bin/stahl
 nix run .#stahl        # build + run
-nix develop            # cargo, pnpm, cargo-tauri, rust-analyzer, …
-cargo tauri dev
+nix develop            # the pinned Rust toolchain and everything else
+cargo run
 ```
-
-> If `cargo tauri dev` fails with a `dyld`/`libiconv` error, you likely have a stale
-> `cargo-tauri` binary in `~/.cargo/bin` (installed via `cargo install tauri-cli`) that shadows
-> the one provided by the dev shell. Either remove it, or invoke `cargo-tauri dev` directly
-> (skipping cargo's subcommand resolution, which always prefers `$CARGO_HOME/bin`).
 
 ### Without Nix
 
-Requires Rust (stable), Node.js, [pnpm](https://pnpm.io), and the platform prerequisites for
-[Tauri 2](https://v2.tauri.app/start/prerequisites/) (WebKitGTK + GTK3 on Linux; Xcode command line
-tools on macOS).
+Requires [rustup](https://rustup.rs), which picks up the toolchain pinned in `rust-toolchain.toml`.
+On Linux you also need the development packages for xkbcommon and Wayland
+(`libxkbcommon-dev libwayland-dev` on Debian and Ubuntu), and `libxkbcommon-x11-0` plus a Vulkan
+driver to run it. On macOS the Xcode command line tools are enough.
 
 ```sh
-pnpm --dir frontend install
-cargo install tauri-cli --version "^2"
-cd src-tauri
-cargo tauri dev     # development
-cargo tauri build   # release bundle
+cargo run
 ```
 
 ## Development
 
-Frontend linting and formatting use [Oxlint](https://oxc.rs/docs/guide/usage/linter.html) and
-[Oxfmt](https://oxc.rs/docs/guide/usage/formatter.html) — fast, Rust-based drop-ins for ESLint and
-Prettier:
-
 ```sh
-pnpm --dir frontend lint        # oxlint
-pnpm --dir frontend fmt         # oxfmt (writes)
-pnpm --dir frontend fmt:check   # oxfmt --check
+cargo test
+cargo run --example demo                                        # a made-up portfolio, no network
+cargo run --example demo -- --list-scenes
+cargo run --example demo -- --snap out.png --scene holdings --at 2   # any screen, no window
 ```
 
-`nix flake check` runs the full suite in one shot: the release build, `cargo clippy --deny warnings`,
-`cargo fmt --check`, and the frontend lint/format/typecheck. `nix fmt` formats the Nix code itself
-(via [Alejandra](https://github.com/kamadorueda/alejandra)). CI (`.github/workflows/ci.yml`) runs
-`nix flake check` on Linux and macOS for every push and pull request.
+`tests/e2e.rs` drives the real views and handlers in Rune's headless runtime, with clicks, keys and
+shortcuts, on real `portfolio_rs` data and fixture quotes. To try the app itself without the
+network, set `PORTFOLIO_RS_QUOTES=offline` or `fixture:<path>`.
+
+`nix flake check` runs the release build, `cargo clippy --deny warnings`, `cargo fmt --check`, and
+all the tests. `nix fmt` formats the Nix code. CI (`.github/workflows/ci.yml`) runs it on Linux and
+macOS for every push and pull request. It also runs clippy and the tests with plain cargo on Linux,
+macOS, and Windows, renders the screens with the real renderer (the images are attached to the run),
+and opens a real window.
 
 ## Releases
 
-Pushing a tag matching `v*` (e.g. `v0.1.0`) triggers `.github/workflows/release.yml`, which builds
-native installers with [`tauri-action`](https://github.com/tauri-apps/tauri-action) — macOS (Apple
-Silicon) `.dmg`/`.app`, Linux `.deb`/`.AppImage`, and Windows `.msi`/`.exe` — and attaches them to a
-draft GitHub Release. This is a separate, non-Nix pipeline: `nix build` produces binaries dynamically
-linked against `/nix/store` paths (fine for machines with Nix, not for end-user distribution), so
-releases are built with each OS's native toolchain instead, the same way as the "Without Nix" section
-above. macOS builds are ad-hoc signed (`signingIdentity: "-"` in `tauri.conf.json`) since there's no
-Apple Developer certificate configured; users will still need to right-click → Open (or clear the
-quarantine attribute) on first launch.
+Pushing a tag matching `v*` (e.g. `v0.3.0`) triggers `.github/workflows/release.yml`, which builds
+installers with each OS's native toolchain and attaches them to a draft GitHub Release. This is
+separate from Nix: `nix build` produces binaries linked against `/nix/store` paths, which is fine for
+machines with Nix but not for distribution. macOS builds are ad-hoc signed, as there is no Apple
+Developer certificate configured, so users need to right-click → Open (or clear the quarantine
+attribute) on first launch.
 
 ## Project structure
 
 ```
-src-tauri/    Rust backend (Tauri commands, AppState wiring, config)
-frontend/     React + TypeScript + Tailwind UI
-flake.nix     Reproducible build for macOS, Linux, and NixOS
+src/backend.rs   The bridge to portfolio_rs, which runs on Tokio beside Rune
+src/state.rs     All state, and everything that changes it
+src/app.rs       Window chrome, menus, and how it starts
+src/view/        Pure functions from state to elements, one module per area
+src/theme.rs     Tokyo Night, dark and light
+src/icons.rs     Lucide icons
+src/demo.rs      The made-up portfolio for the tests and the demo
+examples/demo.rs The demo, and a named scene for every screen
+assets/          App icons
+tests/e2e.rs     End-to-end tests on the real UI
+flake.nix        Reproducible build for macOS, Linux, and NixOS
 ```
 
-The Rust side is a thin layer: `src-tauri/src/commands.rs` exposes `portfolio_rs::state::AppState`
-methods as Tauri commands; almost all domain logic (portfolio math, policy review, simulation,
-reports) lives in the `portfolio_rs` library.
+Almost all domain logic (portfolio math, policy review, simulation, reports) lives in the
+`portfolio_rs` library.
 
 ## License
 
