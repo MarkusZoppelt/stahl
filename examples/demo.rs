@@ -85,6 +85,14 @@ fn main() {
                 form.quantity.replace_text("1,000");
                 s.submit_form();
             }),
+            ("edit-position", |s| {
+                scene(s, Page::Holdings);
+                s.open_form(Some(4));
+            }),
+            ("edit-position-purchases", |s| {
+                scene(s, Page::Holdings);
+                s.open_form(Some(0));
+            }),
             ("welcome", |s| {
                 s.reset();
                 s.settle();

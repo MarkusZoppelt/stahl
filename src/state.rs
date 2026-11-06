@@ -169,6 +169,8 @@ impl<T> Loadable<T> {
 /// The add/edit position form.
 pub struct PositionForm {
     pub existing: Option<usize>,
+    /// Purchases on the position being edited. If it has any, their total is its amount.
+    pub purchases: usize,
     pub name: TextEdit,
     pub ticker: TextEdit,
     pub asset_class: TextEdit,
@@ -209,6 +211,7 @@ impl PositionForm {
         name.focused = true;
         PositionForm {
             existing: existing.map(|p| p.id),
+            purchases: existing.map_or(0, |p| p.purchases.len()),
             name,
             ticker: edit(existing.and_then(|p| p.ticker.clone()).unwrap_or_default()),
             asset_class: edit(
@@ -252,6 +255,11 @@ impl PositionForm {
             }),
             number => Ok(number),
         }
+    }
+
+    /// `portfolio_rs` takes the amount from the purchases, so an edit to it would have no effect.
+    pub fn amount_from_purchases(&self) -> bool {
+        self.purchases > 0
     }
 
     /// Amount, quantity and price. Quantity and price only exist on a new position.
@@ -492,6 +500,25 @@ fn editable_number(number: f64) -> String {
         Err(BadNumber::Ambiguous { .. }) => text + "0",
         _ => text,
     }
+}
+
+/// Whether applying `request` would leave `position` any different.
+fn changes(request: &UpdatePositionRequest, position: &PositionDto) -> bool {
+    request
+        .name
+        .as_ref()
+        .is_some_and(|name| position.name.as_ref() != Some(name))
+        || request
+            .ticker
+            .as_ref()
+            .is_some_and(|ticker| position.ticker.as_ref() != Some(ticker))
+        || request
+            .asset_class
+            .as_ref()
+            .is_some_and(|class| *class != position.asset_class)
+        || request
+            .amount
+            .is_some_and(|amount| amount != position.amount)
 }
 
 fn text_or_none(text: &str) -> Option<String> {
@@ -1091,16 +1118,21 @@ impl State {
         let name = text_or_none(&form.name.text);
         let ticker = text_or_none(&form.ticker.text);
         let asset_class = text_or_none(&form.asset_class.text);
+        let amount_from_purchases = form.amount_from_purchases();
         match form.existing {
             Some(id) => {
                 let request = UpdatePositionRequest {
                     name,
                     ticker,
                     asset_class,
-                    amount: Some(amount),
+                    amount: (!amount_from_purchases).then_some(amount),
                     purchases: None,
                 };
                 self.form = None;
+                let current = self.positions.iter().find(|p| p.id == id);
+                if current.is_some_and(|position| !changes(&request, position)) {
+                    return;
+                }
                 self.change_and_reload(
                     false,
                     |state| state.dirty = true,
