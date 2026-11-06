@@ -6,7 +6,7 @@
 
 use std::{
     mem,
-    path::Path,
+    path::{Path, PathBuf},
     sync::mpsc::{Receiver, Sender, channel},
     time::{Duration, Instant},
 };
@@ -31,6 +31,7 @@ use rune_kit::shell::PaneState;
 use crate::{
     backend::{Backend, BackendResult, Briefing, History, OpenDocument, Period, Snapshot},
     format,
+    update::{self, Installed, Release, Updater},
 };
 
 /// How long a chart takes to draw itself in.
@@ -218,6 +219,7 @@ pub enum Command {
     Sidebar,
     AddPosition,
     CopyBriefing,
+    CheckForUpdates,
 }
 
 pub struct Palette {
@@ -248,6 +250,31 @@ pub struct DocumentsPage {
     pub loading: bool,
     pub message: Option<String>,
     pub error: Option<String>,
+}
+
+/// How far installing an update has got.
+#[derive(Clone, PartialEq, Debug)]
+pub enum UpdatePhase {
+    Idle,
+    Installing,
+    /// The new version is in place, and starts on the next launch.
+    Installed,
+    /// A verified package is here, for someone with the rights to install it.
+    Saved(PathBuf),
+    Failed(String),
+}
+
+pub struct Updates {
+    pub updater: Updater,
+    /// The newest release this copy could move to.
+    pub available: Option<Release>,
+    /// Asked not to hear about it again until the next launch.
+    pub dismissed: bool,
+    pub dialog: bool,
+    pub phase: UpdatePhase,
+    pub checking: bool,
+    /// The update worked, but the restart didn't.
+    pub restart_error: Option<String>,
 }
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
@@ -325,6 +352,7 @@ pub struct State {
     pub documents: DocumentsPage,
     pub settings: SettingsForm,
     pub has_api_key: bool,
+    pub updates: Updates,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -428,7 +456,22 @@ impl State {
                 error: None,
             },
             has_api_key: false,
+            updates: Updates {
+                updater: Updater::disabled(),
+                available: None,
+                dismissed: false,
+                dialog: false,
+                phase: UpdatePhase::Idle,
+                checking: false,
+                restart_error: None,
+            },
         }
+    }
+
+    /// Off by default, so only the app itself ever reaches GitHub or replaces anything.
+    pub fn with_updater(mut self, updater: Updater) -> State {
+        self.updates.updater = updater;
+        self
     }
 
     pub fn set_waker(&mut self, waker: Waker) {
@@ -625,6 +668,9 @@ impl State {
                 }
             },
         );
+        if self.updates.updater.checks_on_startup() {
+            self.check_for_updates(true);
+        }
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
@@ -1091,6 +1137,7 @@ impl State {
                 self.open_form(None);
             }
             Command::CopyBriefing => self.copy_briefing(tx),
+            Command::CheckForUpdates => self.check_for_updates(false),
         }
     }
 
@@ -1113,6 +1160,167 @@ impl State {
         }
         // Not loaded yet: open the page, which has the button once it is.
         self.navigate(Page::Briefing);
+    }
+
+    // --- Updates ---
+
+    /// Ask GitHub for a newer version. A `quiet` check is the one at startup: nobody asked for it,
+    /// so it says nothing unless there is something to say, and failing is not news.
+    pub fn check_for_updates(&mut self, quiet: bool) {
+        if !self.updates.updater.is_enabled() {
+            if !quiet {
+                self.show_toast("Updates are turned off in this build");
+            }
+            return;
+        }
+        if self.updates.checking {
+            return;
+        }
+        self.updates.checking = true;
+        let updater = self.updates.updater.clone();
+        self.run(
+            move |_| updater.check(),
+            move |state, result| state.finish_update_check(quiet, result),
+        );
+    }
+
+    fn finish_update_check(&mut self, quiet: bool, result: BackendResult<Option<Release>>) {
+        let updates = &mut self.updates;
+        updates.checking = false;
+        match result {
+            Ok(Some(release)) => {
+                // What's installed or installing stays the release in the dialog.
+                if matches!(updates.phase, UpdatePhase::Idle | UpdatePhase::Failed(_)) {
+                    updates.available = Some(release);
+                    updates.phase = UpdatePhase::Idle;
+                }
+                if !quiet {
+                    updates.dismissed = false;
+                    updates.dialog = true;
+                }
+            }
+            Ok(None) if !quiet => {
+                let current = updates.updater.current().clone();
+                self.show_toast(format!("You're up to date ({current})"));
+            }
+            Err(_) if !quiet => {
+                self.show_toast("Couldn't check for updates. Try again later.");
+            }
+            Ok(None) | Err(_) => {}
+        }
+    }
+
+    pub fn open_update_dialog(&mut self) {
+        self.updates.dialog = true;
+    }
+
+    /// Close the dialog, unless something is happening in it. True if it was open.
+    pub fn close_update_dialog(&mut self) -> bool {
+        if !self.updates.dialog {
+            return false;
+        }
+        if self.updates.phase != UpdatePhase::Installing {
+            self.updates.dialog = false;
+        }
+        true
+    }
+
+    /// Don't mention it again until the next launch. An on-demand check can still find it.
+    pub fn dismiss_update(&mut self) {
+        if self.updates.phase != UpdatePhase::Installing {
+            self.updates.dialog = false;
+            self.updates.dismissed = true;
+        }
+    }
+
+    /// The update button itself. Nothing else calls this.
+    pub fn install_update(&mut self) {
+        if matches!(
+            self.updates.phase,
+            UpdatePhase::Installing | UpdatePhase::Installed | UpdatePhase::Saved(_)
+        ) {
+            return;
+        }
+        let Some(release) = self.updates.available.clone() else {
+            return;
+        };
+        self.updates.phase = UpdatePhase::Installing;
+        self.updates.restart_error = None;
+        let updater = self.updates.updater.clone();
+        self.run(
+            move |_| updater.install(release),
+            |state, result| {
+                state.updates.phase = match result {
+                    Ok(Installed::Replaced) => UpdatePhase::Installed,
+                    Ok(Installed::Saved(path)) => UpdatePhase::Saved(path),
+                    Err(error) => UpdatePhase::Failed(format!("The update failed: {error}")),
+                };
+            },
+        );
+    }
+
+    /// Start the new version and quit this one, saving first. A failed save keeps this one open,
+    /// because quitting would lose what's unsaved.
+    pub fn restart_after_update(&mut self) {
+        if self.updates.phase != UpdatePhase::Installed {
+            return;
+        }
+        self.updates.restart_error = None;
+        if !self.dirty {
+            self.relaunch();
+            return;
+        }
+        self.loading = true;
+        self.run(
+            |backend| async move { backend.save_portfolio().await },
+            |state, result| {
+                state.loading = false;
+                match result {
+                    Ok(()) => {
+                        state.dirty = false;
+                        state.relaunch();
+                    }
+                    Err(error) => {
+                        state.updates.restart_error =
+                            Some(format!("Couldn't save your changes: {error}"));
+                    }
+                }
+            },
+        );
+    }
+
+    fn relaunch(&mut self) {
+        match self.updates.updater.relaunch() {
+            Ok(()) => self.quit_requested = true,
+            Err(error) => {
+                self.updates.restart_error = Some(format!(
+                    "The update is installed, but {error}. Quit and open Stahl Capital again."
+                ));
+            }
+        }
+    }
+
+    /// The release's page, for reading more or installing by hand.
+    pub fn open_release_page(&mut self, tx: &mut Tx) {
+        let page = self
+            .updates
+            .available
+            .as_ref()
+            .map_or(update::RELEASES_PAGE, |release| release.page.as_str());
+        if tx.open_url(page).is_err() {
+            self.show_toast("Couldn't open the release page");
+        }
+    }
+
+    /// A link in the release notes. Only ever a web page, and only when someone clicks it.
+    pub fn open_notes_link(&mut self, url: &str, tx: &mut Tx) {
+        if !url.starts_with("https://") || tx.open_url(url).is_err() {
+            self.show_toast("Couldn't open that link");
+        }
+    }
+
+    pub fn is_quitting(&self) -> bool {
+        self.quit_requested
     }
 
     // --- Settings ---

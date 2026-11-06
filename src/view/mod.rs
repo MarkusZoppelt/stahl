@@ -23,6 +23,7 @@ mod overlays;
 mod plan;
 mod portfolio;
 pub mod ui;
+mod updates;
 
 pub fn page_icon(page: Page) -> &'static Icon {
     match page {
@@ -47,10 +48,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
-        if s.palette.take().is_some() || s.form.take().is_some() || s.confirm.take().is_some() {
-            return true;
-        }
-        return false;
+        return s.palette.take().is_some()
+            || s.form.take().is_some()
+            || s.confirm.take().is_some()
+            || s.close_update_dialog();
     }
     let Key::Command(key) = event.key else {
         return false;

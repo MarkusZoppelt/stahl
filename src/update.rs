@@ -473,6 +473,9 @@ impl Updater {
             Plan::SavePackage { package, checksum } => (package, checksum),
             Plan::Link { why } => return Err(why.to_string()),
         };
+        if !trusted_download(&asset.url) || !trusted_download(&checksum.url) {
+            return Err(format!("refusing to download from {}", asset.url));
+        }
         // Private to this user, so nothing can swap the file between verifying and using it.
         let scratch = Builder::new()
             .prefix("stahl-update-")
@@ -642,11 +645,16 @@ fn verify(file: &Path, name: &str, size: u64, sums: &Path) -> Result<(), String>
 /// goes back, and so nothing has changed.
 pub fn swap_into_place(new: &Path, target: &Path, parked: &Path) -> io::Result<()> {
     fs::rename(target, parked)?;
-    if let Err(error) = fs::rename(new, target) {
-        fs::rename(parked, target)?;
-        return Err(error);
+    let Err(error) = fs::rename(new, target) else {
+        return Ok(());
+    };
+    match fs::rename(parked, target) {
+        Ok(()) => Err(error),
+        Err(restoring) => Err(io::Error::other(format!(
+            "{error}, and the previous copy couldn't be put back ({restoring}). It is at {}",
+            parked.display()
+        ))),
     }
-    Ok(())
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -836,8 +844,13 @@ fn install_mac_app(dmg: &Path, bundle: &Path, version: &Version) -> Result<(), S
     )?;
     drop(mounted);
     check_mac_app(&new, version)?;
-    swap_into_place(&new, bundle, &stage.path().join("old.app"))
-        .map_err(|error| format!("can't replace {}: {error}", bundle.display()))
+    let swapped = swap_into_place(&new, bundle, &stage.path().join("old.app"))
+        .map_err(|error| format!("can't replace {}: {error}", bundle.display()));
+    // The old bundle is the only copy left, so it must outlive this folder.
+    if swapped.is_err() && !bundle.exists() {
+        let _ = stage.keep();
+    }
+    swapped
 }
 
 /// Where a browser would save it. Never overwritten until the copy is complete.

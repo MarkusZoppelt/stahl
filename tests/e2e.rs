@@ -4,18 +4,30 @@
 //! These never touch the user's config: the backend points at a temp directory, and opening goes
 //! through `startup`, which doesn't write it.
 
-use std::{env, fs, path::Path, sync::Once, thread, time::Duration};
+use std::{
+    env, fs,
+    io::{Cursor, Write},
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Once,
+        atomic::{AtomicUsize, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 
 use chrono::Local;
 use rune::{Key, KeyEvent, Mods, Runtime};
 use stahl::{
     app,
     backend::{Backend, Period},
-    demo,
-    state::{Confirm, Page, State},
+    demo::{self, FakeReleases},
+    state::{Confirm, Page, State, UpdatePhase},
+    update::{self, Installation, Updater},
 };
 use tempfile::TempDir;
 use tokio::runtime::Runtime as Tokio;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 struct Harness {
     rt: Runtime<State>,
@@ -32,6 +44,10 @@ fn offline() {
 
 impl Harness {
     fn boot(workspace: bool, file: Option<&str>) -> Harness {
+        Self::boot_with(workspace, file, Updater::disabled())
+    }
+
+    fn boot_with(workspace: bool, file: Option<&str>, updater: Updater) -> Harness {
         offline();
         let tokio = Tokio::new().unwrap();
         let dir = TempDir::new().unwrap();
@@ -49,7 +65,7 @@ impl Harness {
             workspace.then_some(root.as_path()),
             tokio.handle().clone(),
         );
-        let rt = app::headless(backend, initial, (1320.0, 860.0));
+        let rt = app::headless_with_updater(backend, initial, (1320.0, 860.0), updater);
         let mut harness = Harness {
             rt,
             dir,
@@ -470,4 +486,458 @@ fn the_same_position_and_class_fly_between_pages_without_clashing() {
     app.click(Page::Allocation.key());
     assert!(app.exists("allocation-0"));
     assert!(!app.exists("legend-0"));
+}
+
+// --- Updates. A fake release source and temp files: no network, and the running binary is safe. ---
+
+const ZIP: &str = "stahl-capital-windows-x64.zip";
+
+fn windows_zip(exe: &[u8]) -> Vec<u8> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer
+        .start_file("stahl.exe", SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(exe).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+/// A release with an installer, and a checksum for `published`, which may not be what's served.
+fn windows_release(served: &[u8], published: &[u8]) -> Arc<FakeReleases> {
+    Arc::new(FakeReleases::offering(
+        demo::next_version(),
+        vec![
+            (ZIP.to_string(), served.to_vec()),
+            (
+                format!("{ZIP}.sha256"),
+                demo::checksum_line(ZIP, published).into_bytes(),
+            ),
+        ],
+    ))
+}
+
+/// A throwaway "installed" copy of the app, standing in for the real one.
+struct FakeInstall {
+    _dir: TempDir,
+    exe: PathBuf,
+    downloads: PathBuf,
+    relaunches: Arc<AtomicUsize>,
+}
+
+impl FakeInstall {
+    fn new() -> FakeInstall {
+        let dir = TempDir::new().unwrap();
+        let exe = dir.path().join("stahl.exe");
+        fs::write(&exe, b"MZ old").unwrap();
+        let downloads = dir.path().join("Downloads");
+        fs::create_dir(&downloads).unwrap();
+        FakeInstall {
+            _dir: dir,
+            exe,
+            downloads,
+            relaunches: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn windows(&self, source: Arc<FakeReleases>) -> Updater {
+        self.updater(
+            source,
+            Installation::WindowsExe {
+                exe: self.exe.clone(),
+            },
+        )
+    }
+
+    fn updater(&self, source: Arc<FakeReleases>, installation: Installation) -> Updater {
+        let relaunches = self.relaunches.clone();
+        Updater::new(
+            source,
+            installation,
+            update::current_version(),
+            self.downloads.clone(),
+        )
+        .relaunch_with(Arc::new(move |_| {
+            relaunches.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }))
+    }
+
+    fn exe_contents(&self) -> Vec<u8> {
+        fs::read(&self.exe).unwrap()
+    }
+
+    fn relaunches(&self) -> usize {
+        self.relaunches.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn startup_mentions_a_new_version_and_changes_nothing_until_asked() {
+    let install = FakeInstall::new();
+    let source = windows_release(&windows_zip(b"MZ new"), &windows_zip(b"MZ new"));
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.windows(source.clone()),
+    );
+
+    let next = demo::next_version();
+    assert!(app.exists("update-banner"));
+    assert!(app.has_text(&format!("Stahl Capital {next} is available")));
+    assert!(!app.exists("update-install"), "installing takes a decision");
+    assert_eq!(source.downloads(), 0, "and nothing is fetched before one");
+    assert_eq!(install.exe_contents(), b"MZ old");
+
+    app.click("update-view");
+    assert!(app.has_text("What's Changed"), "the dialog has the notes");
+    assert_eq!(source.downloads(), 0, "reading about it fetches nothing");
+
+    app.press(Key::Escape);
+    assert!(!app.rt.state.updates.dialog);
+    assert!(app.exists("update-banner"), "closing isn't dismissing");
+    assert_eq!(install.exe_contents(), b"MZ old");
+}
+
+#[test]
+fn a_dismissed_update_stays_away_until_asked_for() {
+    let install = FakeInstall::new();
+    let source = windows_release(b"", b"");
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-dismiss");
+    assert!(!app.exists("update-banner"));
+    assert!(!app.exists("update-dialog"));
+
+    app.rt.state.navigate(Page::Holdings);
+    app.settle();
+    assert!(!app.exists("update-banner"), "it stays dismissed");
+
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    assert!(app.exists("update-install"), "asking brings it back");
+}
+
+#[test]
+fn the_banner_also_shows_without_a_portfolio() {
+    let install = FakeInstall::new();
+    let source = windows_release(b"", b"");
+    let app = Harness::boot_with(false, None, install.windows(source));
+    assert!(app.exists("welcome-workspace"));
+    assert!(app.exists("update-banner"));
+}
+
+#[test]
+fn a_failed_check_at_startup_is_silent_and_a_requested_one_says_so() {
+    let install = FakeInstall::new();
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.windows(Arc::new(FakeReleases::failing())),
+    );
+    assert!(!app.exists("update-banner"));
+    assert!(app.rt.state.toast.is_none());
+    assert!(app.rt.state.error.is_none());
+    assert!(!app.rt.state.updates.checking);
+    assert_eq!(app.rt.state.positions.len(), 5, "and the app works");
+
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    assert!(app.has_text("Couldn't check for updates"));
+    assert!(!app.exists("update-banner"));
+    assert!(app.rt.state.error.is_none());
+}
+
+#[test]
+fn being_up_to_date_is_only_mentioned_when_asked() {
+    let install = FakeInstall::new();
+    let current = update::current_version();
+    let source = Arc::new(FakeReleases::offering(current.clone(), Vec::new()));
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    assert!(!app.exists("update-banner"), "the same version isn't news");
+    assert!(app.rt.state.toast.is_none());
+
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    assert!(app.has_text(&format!("You're up to date ({current})")));
+}
+
+#[test]
+fn the_palette_and_settings_can_check_for_updates() {
+    let install = FakeInstall::new();
+    let source = windows_release(b"", b"");
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-dismiss");
+
+    app.command('k', false);
+    app.type_text("check for updates");
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert!(app.exists("update-install"), "the dialog opens");
+    app.click("update-later");
+
+    app.command(',', false);
+    assert!(app.exists("settings-updates"));
+    assert!(app.has_text("Updates replace stahl.exe"));
+    // It's further down the page.
+    app.rt.wheel(800.0, 400.0, -2000.0);
+    app.settle();
+    app.click("settings-check-updates");
+    assert!(app.exists("update-install"));
+}
+
+#[test]
+fn installing_swaps_the_app_and_restarts_only_when_told_to() {
+    let install = FakeInstall::new();
+    let archive = windows_zip(b"MZ new");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.windows(source.clone()),
+    );
+    app.click("update-view");
+    app.click("update-install");
+
+    assert_eq!(app.rt.state.updates.phase, UpdatePhase::Installed);
+    assert_eq!(install.exe_contents(), b"MZ new");
+    assert_eq!(source.downloads(), 2, "the installer and its checksum");
+    assert_eq!(install.relaunches(), 0, "installing doesn't restart");
+    assert!(!app.rt.state.is_quitting());
+
+    // Later leaves it installed, and it's still reachable.
+    app.click("update-later");
+    assert_eq!(install.relaunches(), 0);
+    assert_eq!(install.exe_contents(), b"MZ new");
+    app.command('k', false);
+    app.type_text("check for updates");
+    app.press(Key::Enter);
+    assert_eq!(
+        app.rt.state.updates.phase,
+        UpdatePhase::Installed,
+        "checking again doesn't lose it"
+    );
+
+    app.click("update-restart");
+    assert_eq!(install.relaunches(), 1);
+    assert!(app.rt.state.is_quitting());
+}
+
+#[test]
+fn restarting_saves_first_and_a_failed_save_stays_open() {
+    let install = FakeInstall::new();
+    let archive = windows_zip(b"MZ new");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-dismiss");
+    app.command('n', false);
+    app.type_text("Apple");
+    app.click("form-submit");
+    assert!(app.rt.state.dirty);
+
+    app.rt.state.check_for_updates(false);
+    app.settle();
+    app.click("update-install");
+    assert!(app.has_text("Save and Restart"), "it says what will happen");
+
+    // A save that can't work: the portfolio's file is now a directory.
+    let path = app.dir.path().join("portfolio.json");
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    app.click("update-restart");
+    assert_eq!(install.relaunches(), 0, "no restart without the save");
+    assert!(!app.rt.state.is_quitting());
+    assert!(app.rt.state.dirty);
+    assert!(app.has_text("Couldn't save your changes"));
+
+    fs::remove_dir(&path).unwrap();
+    app.click("update-restart");
+    assert!(fs::read_to_string(&path).unwrap().contains("Apple"));
+    assert_eq!(install.relaunches(), 1);
+    assert!(app.rt.state.is_quitting());
+}
+
+#[test]
+fn a_download_that_fails_its_checksum_is_never_installed() {
+    let install = FakeInstall::new();
+    let source = windows_release(&windows_zip(b"MZ evil"), &windows_zip(b"MZ new"));
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-view");
+    app.click("update-install");
+
+    assert!(matches!(
+        &app.rt.state.updates.phase,
+        UpdatePhase::Failed(error) if error.contains("doesn't match")
+    ));
+    assert_eq!(install.exe_contents(), b"MZ old");
+    assert!(app.has_text("Nothing was changed"));
+    assert!(!app.exists("update-restart"));
+    assert!(app.exists("update-page"), "there's still a way forward");
+    assert_eq!(install.relaunches(), 0);
+}
+
+#[test]
+fn a_failure_after_verifying_leaves_the_old_copy_working_and_can_be_retried() {
+    let install = FakeInstall::new();
+    // A correctly checksummed archive holding the wrong thing.
+    let archive = windows_zip(b"#!/bin/sh");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-view");
+    app.click("update-install");
+    assert!(matches!(app.rt.state.updates.phase, UpdatePhase::Failed(_)));
+    assert_eq!(install.exe_contents(), b"MZ old");
+
+    app.click("update-retry");
+    assert!(matches!(app.rt.state.updates.phase, UpdatePhase::Failed(_)));
+    assert_eq!(install.exe_contents(), b"MZ old");
+}
+
+#[test]
+fn a_release_without_a_checksum_only_gets_a_link() {
+    let install = FakeInstall::new();
+    let source = Arc::new(FakeReleases::offering(
+        demo::next_version(),
+        vec![(ZIP.to_string(), windows_zip(b"MZ new"))],
+    ));
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.windows(source.clone()),
+    );
+    app.click("update-view");
+    assert!(!app.exists("update-install"));
+    assert!(app.has_text("can't be verified"));
+
+    // Even a stray call can't get around the dialog.
+    app.rt.state.install_update();
+    app.settle();
+    assert!(matches!(app.rt.state.updates.phase, UpdatePhase::Failed(_)));
+    assert_eq!(source.downloads(), 0);
+    assert_eq!(install.exe_contents(), b"MZ old");
+}
+
+#[test]
+fn nix_gets_told_about_updates_but_is_never_touched() {
+    let install = FakeInstall::new();
+    let archive = windows_zip(b"MZ new");
+    let source = windows_release(&archive, &archive);
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.updater(source.clone(), Installation::Nix),
+    );
+    assert!(app.exists("update-banner"));
+    app.click("update-view");
+    assert!(!app.exists("update-install"));
+    assert!(app.has_text("Nix manages this copy"));
+
+    app.click("update-page");
+    let opened = app.rt.take_url_requests();
+    assert_eq!(opened.len(), 1);
+    assert!(
+        opened[0].starts_with(update::RELEASES_PAGE),
+        "{}",
+        opened[0]
+    );
+
+    app.rt.state.install_update();
+    app.settle();
+    assert_eq!(source.downloads(), 0, "a stray call fetches nothing");
+    assert_eq!(install.relaunches(), 0);
+}
+
+#[test]
+fn a_deb_is_verified_and_saved_never_installed() {
+    let install = FakeInstall::new();
+    let deb = "stahl_9.9.9_amd64.deb";
+    let source = Arc::new(FakeReleases::offering(
+        demo::next_version(),
+        vec![
+            (deb.to_string(), b"package".to_vec()),
+            (
+                format!("{deb}.sha256"),
+                demo::checksum_line(deb, b"package").into_bytes(),
+            ),
+        ],
+    ));
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.updater(source, Installation::Deb),
+    );
+    app.click("update-view");
+    assert!(app.has_text("Download Package"));
+    app.click("update-install");
+
+    let saved = install.downloads.join(deb);
+    assert_eq!(
+        app.rt.state.updates.phase,
+        UpdatePhase::Saved(saved.clone())
+    );
+    assert_eq!(fs::read(&saved).unwrap(), b"package");
+    assert!(app.has_text("sudo apt install"));
+    assert!(!app.exists("update-restart"), "dpkg's job, not ours");
+    assert_eq!(install.relaunches(), 0);
+    assert_eq!(install.exe_contents(), b"MZ old");
+}
+
+#[test]
+fn a_tampered_deb_is_not_saved() {
+    let install = FakeInstall::new();
+    let deb = "stahl_9.9.9_amd64.deb";
+    let source = Arc::new(FakeReleases::offering(
+        demo::next_version(),
+        vec![
+            (deb.to_string(), b"evil".to_vec()),
+            (
+                format!("{deb}.sha256"),
+                demo::checksum_line(deb, b"package").into_bytes(),
+            ),
+        ],
+    ));
+    let mut app = Harness::boot_with(
+        false,
+        Some(demo::POSITIONS),
+        install.updater(source, Installation::Deb),
+    );
+    app.click("update-view");
+    app.click("update-install");
+    assert!(matches!(app.rt.state.updates.phase, UpdatePhase::Failed(_)));
+    assert_eq!(fs::read_dir(&install.downloads).unwrap().count(), 0);
+}
+
+#[test]
+fn the_dialog_cannot_be_closed_mid_install() {
+    let install = FakeInstall::new();
+    let source = windows_release(b"", b"");
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), install.windows(source));
+    app.click("update-view");
+    app.rt.state.updates.phase = UpdatePhase::Installing;
+    app.press(Key::Escape);
+    assert!(app.rt.state.updates.dialog);
+    app.rt.state.dismiss_update();
+    assert!(app.rt.state.updates.dialog);
+    assert!(!app.rt.state.updates.dismissed);
+}
+
+#[test]
+fn the_demos_release_can_never_install_anything() {
+    let install = FakeInstall::new();
+    let updater = demo::updater(Installation::WindowsExe {
+        exe: install.exe.clone(),
+    });
+    let mut app = Harness::boot_with(false, Some(demo::POSITIONS), updater);
+    app.click("update-view");
+    app.click("update-install");
+    assert!(matches!(app.rt.state.updates.phase, UpdatePhase::Failed(_)));
+    assert_eq!(install.exe_contents(), b"MZ old");
+}
+
+#[test]
+fn the_default_updater_never_checks_anything() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    assert!(!app.rt.state.updates.updater.is_enabled());
+    assert!(!app.rt.state.updates.checking);
+    app.command('k', false);
+    app.type_text("check for updates");
+    app.press(Key::Enter);
+    assert!(app.has_text("Updates are turned off"));
 }
