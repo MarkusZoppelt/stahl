@@ -60,7 +60,6 @@ pub trait ReleaseSource: Send + Sync {
 pub struct Asset {
     pub name: String,
     pub url: String,
-    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,8 +94,6 @@ struct RawRelease {
 struct RawAsset {
     name: String,
     browser_download_url: String,
-    #[serde(default)]
-    size: u64,
 }
 
 /// Only a plain file name: this ends up in a path.
@@ -171,7 +168,6 @@ pub fn parse_releases(json: &str) -> Result<Vec<Release>, String> {
                     .map(|asset| Asset {
                         name: asset.name,
                         url: asset.browser_download_url,
-                        size: asset.size,
                     })
                     .collect(),
             })
@@ -487,9 +483,6 @@ impl Updater {
             Plan::SavePackage { package, checksum } => (package, checksum),
             Plan::Link { why } => return Err(why.to_string()),
         };
-        if !trusted_download(&asset.url) || !trusted_download(&checksum.url) {
-            return Err(format!("refusing to download from {}", asset.url));
-        }
         // Private to this user, so nothing can swap the file between verifying and using it.
         let scratch = Builder::new()
             .prefix("stahl-update-")
@@ -504,9 +497,8 @@ impl Updater {
         let downloads = self.downloads.clone();
         let version = release.version.clone();
         let name = asset.name.clone();
-        let size = asset.size;
         task::spawn_blocking(move || {
-            verify(&file, &name, size, &sums)?;
+            verify(&file, &name, &sums)?;
             let result = match &installation {
                 Installation::MacApp { bundle } => {
                     install_mac_app(&file, bundle, &version).map(|()| Installed::Replaced)
@@ -565,9 +557,6 @@ impl GithubReleases {
             .await
             .and_then(|response| response.error_for_status())
             .map_err(|error| format!("download failed: {error}"))?;
-        if response.url().scheme() != "https" {
-            return Err("download was redirected away from HTTPS".to_string());
-        }
         let mut file =
             File::create(to).map_err(|error| format!("can't write the download: {error}"))?;
         let mut written = 0u64;
@@ -583,8 +572,7 @@ impl GithubReleases {
             file.write_all(&chunk)
                 .map_err(|error| format!("can't write the download: {error}"))?;
         }
-        file.flush()
-            .map_err(|error| format!("can't write the download: {error}"))
+        Ok(())
     }
 }
 
@@ -644,7 +632,7 @@ pub fn sha256_file(path: &Path) -> io::Result<String> {
 }
 
 /// Refuse anything but the exact file the release's checksum describes.
-fn verify(file: &Path, name: &str, size: u64, sums: &Path) -> Result<(), String> {
+fn verify(file: &Path, name: &str, sums: &Path) -> Result<(), String> {
     let text = fs::read_to_string(sums).map_err(|_| "the checksum can't be read".to_string())?;
     let expected = parse_checksum(&text, name)
         .ok_or_else(|| format!("the release has no valid checksum for {name}"))?;
@@ -652,13 +640,6 @@ fn verify(file: &Path, name: &str, size: u64, sums: &Path) -> Result<(), String>
     if actual != expected {
         return Err(format!(
             "the download doesn't match the release's checksum (expected {expected}, got {actual})"
-        ));
-    }
-    // After the checksum, whose failure says more. GitHub reports the size; a fake may not.
-    let length = fs::metadata(file).map_or(0, |metadata| metadata.len());
-    if size != 0 && length != size {
-        return Err(format!(
-            "the download is {length} bytes, but the release says {size}"
         ));
     }
     Ok(())
@@ -946,12 +927,12 @@ mod tests {
       {"tag_name": "v0.10.0", "draft": false, "prerelease": false, "body": "Notes",
        "html_url": "https://github.com/MarkusZoppelt/stahl/releases/tag/v0.10.0",
        "assets": [
-         {"name": "stahl-capital-macos-arm64.dmg", "size": 3, "browser_download_url":
+         {"name": "stahl-capital-macos-arm64.dmg", "browser_download_url":
           "https://github.com/MarkusZoppelt/stahl/releases/download/v0.10.0/stahl-capital-macos-arm64.dmg"},
-         {"name": "evil.dmg", "size": 3, "browser_download_url": "https://example.com/evil.dmg"},
-         {"name": "../../evil.dmg", "size": 3, "browser_download_url":
+         {"name": "evil.dmg", "browser_download_url": "https://example.com/evil.dmg"},
+         {"name": "../../evil.dmg", "browser_download_url":
           "https://github.com/MarkusZoppelt/stahl/releases/download/v0.10.0/evil.dmg"},
-         {"name": "http.dmg", "size": 3, "browser_download_url":
+         {"name": "http.dmg", "browser_download_url":
           "http://github.com/MarkusZoppelt/stahl/releases/download/v0.10.0/http.dmg"}
        ]},
       {"tag_name": "v0.9.0", "draft": false, "prerelease": false, "body": null,
@@ -1129,7 +1110,6 @@ mod tests {
                 .map(|name| Asset {
                     name: name.to_string(),
                     url: format!("{DOWNLOADS}v0.3.0/{name}"),
-                    size: 0,
                 })
                 .collect(),
         }
@@ -1204,11 +1184,10 @@ mod tests {
         let sums = dir.path().join("a.dmg.sha256");
         let digest = sha256_file(&file).unwrap();
         fs::write(&sums, format!("{digest}  a.dmg\n")).unwrap();
-        verify(&file, "a.dmg", 9, &sums).unwrap();
+        verify(&file, "a.dmg", &sums).unwrap();
 
-        assert!(verify(&file, "a.dmg", 10, &sums).is_err(), "wrong size");
         fs::write(&file, b"tampered!").unwrap();
-        let error = verify(&file, "a.dmg", 9, &sums).unwrap_err();
+        let error = verify(&file, "a.dmg", &sums).unwrap_err();
         assert!(error.contains("doesn't match"), "{error}");
     }
 

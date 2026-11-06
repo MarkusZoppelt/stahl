@@ -179,10 +179,9 @@ impl FakeReleases {
     pub fn offering(version: Version, files: Vec<(String, Vec<u8>)>) -> FakeReleases {
         let assets = files
             .iter()
-            .map(|(name, contents)| Asset {
+            .map(|(name, _)| Asset {
                 name: name.clone(),
                 url: format!("{}/download/v{version}/{name}", update::RELEASES_PAGE),
-                size: contents.len() as u64,
             })
             .collect();
         FakeReleases {
