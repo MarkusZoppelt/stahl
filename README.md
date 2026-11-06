@@ -122,8 +122,8 @@ and opens a real window.
 
 ## Releases
 
-To release, bump the version in `Cargo.toml`, merge it, and push a matching tag (`v0.3.0` for version
-`0.3.0`). `.github/workflows/release.yml` then builds installers with each OS's native toolchain and
+To release, bump the version in `Cargo.toml`, merge it, and push a matching tag (`v0.2.0` for version
+`0.2.0`). `.github/workflows/release.yml` then builds installers with each OS's native toolchain and
 publishes a GitHub Release with them, once all three have built. This is
 separate from Nix: `nix build` produces binaries linked against `/nix/store` paths, which is fine for
 machines with Nix but not for distribution. macOS builds are ad-hoc signed, as there is no Apple

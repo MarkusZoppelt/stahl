@@ -5159,7 +5159,7 @@ dependencies = [
 
 [[package]]
 name = "stahl"
-version = "0.3.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "portfolio_rs",
