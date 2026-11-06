@@ -327,12 +327,43 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
 
 // --- Holdings ---
 
+/// Which columns fit a table in `width` points of the content area. The details pane has them all.
+#[derive(Clone, Copy)]
+struct Columns {
+    class: bool,
+    pnl: bool,
+    today: bool,
+}
+
+impl Columns {
+    fn for_width(width: f32) -> Columns {
+        Columns {
+            class: width >= 720.0,
+            pnl: width >= 560.0,
+            today: width >= 400.0,
+        }
+    }
+
+    /// With a column gone, the name takes more of what's left.
+    fn name_grow(self) -> f32 {
+        if self.class { 1.0 } else { 1.5 }
+    }
+}
+
+/// Whether the Holdings table still works beside the details pane in a content area this wide:
+/// less than this and the details take the table's place.
+pub const TABLE_BESIDE_PANE: f32 = 300.0;
+
+/// Below this, the search takes the row above the table, without the count beside it.
+const ROOM_FOR_COUNT: f32 = 480.0;
+
 fn header_cell(
     s: &State,
     key: &'static str,
     label: &'static str,
     sort: SortBy,
     right: bool,
+    grow: f32,
     t: &Theme,
 ) -> El {
     let k = &t.kit;
@@ -343,7 +374,7 @@ fn header_cell(
         .role("button")
         .label(format!("Sort by {label}"))
         .focusable(true)
-        .grow(1.0)
+        .grow(grow)
         .w(0.0)
         .min_w(0.0)
         .gap(4.0)
@@ -368,18 +399,26 @@ fn header_cell(
     if right { cell.justify_end() } else { cell }
 }
 
-fn holding_row(s: &State, position: &PositionDto, first: bool, last: bool, t: &Theme) -> El {
+fn holding_row(
+    s: &State,
+    position: &PositionDto,
+    columns: Columns,
+    first: bool,
+    last: bool,
+    t: &Theme,
+) -> El {
     let k = &t.kit;
     let id = position.id;
     let selected = s.selected == Some(id);
-    let cell = |content: El, right: bool| {
-        let cell = row().center_y().grow(1.0).w(0.0).min_w(0.0);
+    let cell = |content: El, right: bool, grow: f32| {
+        let cell = row().center_y().grow(grow).w(0.0).min_w(0.0);
         if right {
             cell.justify_end().child(content)
         } else {
             cell.child(content)
         }
     };
+    let number = |value: String, color| ui::number(value, color).truncate().shrink();
     let name = display_name(position);
     let context_name = name.clone();
     let class_color = t.class_color(&position.asset_class);
@@ -478,6 +517,7 @@ fn holding_row(s: &State, position: &PositionDto, first: bool, last: bool, t: &T
                 .center_y()
                 .gap(10.0)
                 .min_w(0.0)
+                .shrink()
                 .child(
                     col()
                         .size(30.0, 30.0)
@@ -506,29 +546,42 @@ fn holding_row(s: &State, position: &PositionDto, first: bool, last: bool, t: &T
                         ),
                 ),
             false,
+            columns.name_grow(),
         ))
+        .children(columns.class.then(|| {
+            cell(
+                ui::muted(position.asset_class.clone(), t)
+                    .truncate()
+                    .shrink(),
+                false,
+                1.0,
+            )
+        }))
         .child(cell(
-            ui::muted(position.asset_class.clone(), t).truncate(),
-            false,
-        ))
-        .child(cell(
-            ui::number(s.money(position.value), k.c.text_base),
+            number(s.money(position.value), k.c.text_base),
             true,
+            1.0,
         ))
-        .child(cell(
-            ui::number(
-                format::optional_percent(position.pnl_percent),
-                t.optional_change(position.pnl_percent),
-            ),
-            true,
-        ))
-        .child(cell(
-            ui::number(
-                format::optional_percent(position.day_change_percent),
-                t.optional_change(position.day_change_percent),
-            ),
-            true,
-        ))
+        .children(columns.pnl.then(|| {
+            cell(
+                number(
+                    format::optional_percent(position.pnl_percent),
+                    t.optional_change(position.pnl_percent),
+                ),
+                true,
+                1.0,
+            )
+        }))
+        .children(columns.today.then(|| {
+            cell(
+                number(
+                    format::optional_percent(position.day_change_percent),
+                    t.optional_change(position.day_change_percent),
+                ),
+                true,
+                1.0,
+            )
+        }))
 }
 
 fn search_input(s: &State) -> TextInput {
@@ -608,91 +661,102 @@ pub fn holdings_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     true
 }
 
-pub fn holdings(s: &State, t: &Theme) -> El {
+pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
     let rows = holding_rows(s);
     let end = rows.len().saturating_sub(1);
-    col()
-        .w_full()
-        .gap(16.0)
-        .child(
-            row()
-                .center_y()
-                .w_full()
-                .justify_between()
-                .gap(16.0)
-                .child(ui::muted(format!("{} positions", s.positions.len()), t))
-                .child(
-                    row()
-                        .center_y()
-                        .gap(8.0)
-                        .child(
-                            search_input(s)
-                                .width(Some(240.0))
-                                .on_edit(|s: &mut State| &mut s.search)
-                                .build(k)
-                                .key("holdings-search"),
-                        )
-                        .child(
-                            Button::new("Add")
-                                .variant(ButtonVariant::Submit)
-                                .icon(&icons::PLUS)
-                                .shortcut(ui::chord(false, "N"))
-                                .on_press(|s: &mut State| s.open_form(None))
-                                .build(k)
-                                .key("add-position"),
-                        ),
-                ),
-        )
-        .child(
-            ui::card(t)
-                .padding(8.0)
-                .pt(12.0)
-                .gap(0.0)
-                .child(
-                    row()
-                        .center_y()
-                        .w_full()
-                        .gap(12.0)
-                        .px(12.0)
-                        .pb(8.0)
-                        .child(header_cell(s, "sort-name", "Name", SortBy::Name, false, t))
-                        .child(header_cell(
-                            s,
-                            "sort-class",
-                            "Class",
-                            SortBy::Class,
-                            false,
-                            t,
-                        ))
-                        .child(header_cell(
-                            s,
-                            "sort-value",
-                            "Value",
-                            SortBy::Value,
-                            true,
-                            t,
-                        ))
-                        .child(header_cell(s, "sort-pnl", "PnL", SortBy::Pnl, true, t))
-                        .child(header_cell(s, "sort-day", "Today", SortBy::Day, true, t)),
-                )
-                .children(
-                    rows.is_empty()
-                        .then(|| ui::muted("No holdings match.", t).padding(12.0)),
-                )
-                .child(
-                    col()
-                        .key("holdings-rows")
-                        .role("list")
-                        .label("Holdings")
-                        .focus_group()
-                        .focus_follows()
-                        .w_full()
-                        .children(rows.into_iter().enumerate().map(|(index, position)| {
-                            holding_row(s, position, index == 0, index == end, t)
-                        })),
-                ),
-        )
+    let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
+    let columns = Columns::for_width(width);
+    let roomy = width >= ROOM_FOR_COUNT;
+    let search = search_input(s)
+        .width(roomy.then_some(240.0))
+        .on_edit(|s: &mut State| &mut s.search)
+        .build(k)
+        .key("holdings-search");
+    let add = Button::new("Add")
+        .variant(ButtonVariant::Submit)
+        .icon(&icons::PLUS)
+        .shortcut(ui::chord(false, "N"))
+        .on_press(|s: &mut State| s.open_form(None))
+        .build(k)
+        .key("add-position");
+    let top = if roomy {
+        row()
+            .center_y()
+            .w_full()
+            .justify_between()
+            .gap(16.0)
+            .child(ui::muted(format!("{} positions", s.positions.len()), t))
+            .child(row().center_y().gap(8.0).child(search).child(add))
+    } else {
+        row()
+            .center_y()
+            .w_full()
+            .gap(8.0)
+            .child(search.grow(1.0).min_w(0.0))
+            .child(add)
+    };
+    col().w_full().gap(16.0).child(top).child(
+        ui::card(t)
+            .padding(8.0)
+            .pt(12.0)
+            .gap(0.0)
+            .child(
+                row()
+                    .center_y()
+                    .w_full()
+                    .gap(12.0)
+                    .px(12.0)
+                    .pb(8.0)
+                    .child(header_cell(
+                        s,
+                        "sort-name",
+                        "Name",
+                        SortBy::Name,
+                        false,
+                        columns.name_grow(),
+                        t,
+                    ))
+                    .children(columns.class.then(|| {
+                        header_cell(s, "sort-class", "Class", SortBy::Class, false, 1.0, t)
+                    }))
+                    .child(header_cell(
+                        s,
+                        "sort-value",
+                        "Value",
+                        SortBy::Value,
+                        true,
+                        1.0,
+                        t,
+                    ))
+                    .children(
+                        columns
+                            .pnl
+                            .then(|| header_cell(s, "sort-pnl", "PnL", SortBy::Pnl, true, 1.0, t)),
+                    )
+                    .children(
+                        columns.today.then(|| {
+                            header_cell(s, "sort-day", "Today", SortBy::Day, true, 1.0, t)
+                        }),
+                    ),
+            )
+            .children(
+                rows.is_empty()
+                    .then(|| ui::muted("No holdings match.", t).padding(12.0)),
+            )
+            .child(
+                col()
+                    .key("holdings-rows")
+                    .role("list")
+                    .label("Holdings")
+                    .focus_group()
+                    .focus_follows()
+                    .w_full()
+                    .children(rows.into_iter().enumerate().map(|(index, position)| {
+                        holding_row(s, position, columns, index == 0, index == end, t)
+                    })),
+            ),
+    )
 }
 
 fn detail(label: &'static str, value: String, t: &Theme) -> El {
@@ -842,6 +906,15 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                         .key("delete-position"),
                 ),
         )
+}
+
+/// The details in place of the table, for a window too narrow to show both.
+pub fn details_page(s: &State, position: &PositionDto, t: &Theme) -> El {
+    ui::card(t)
+        .padding(0.0)
+        .gap(0.0)
+        .clip_rounded(14.0)
+        .child(inspector(s, position, t))
 }
 
 // --- Allocation ---

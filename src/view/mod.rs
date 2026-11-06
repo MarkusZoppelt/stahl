@@ -451,11 +451,27 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
         .trailing(trailing)
 }
 
+/// Whether the details pane leaves the Holdings table enough room. It goes by the pane's usual
+/// width, so that dragging the pane wider can't swap the layout under the pointer.
+fn pane_fits(s: &State, cx: &Cx<State>) -> bool {
+    cx.layout_size("window").is_none_or(|[width, _]| {
+        width - s.sidebar.shown_width() - s.inspector.default_width()
+            >= portfolio::TABLE_BESIDE_PANE
+    })
+}
+
 fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
     let _ = &layer;
+    let selected = s
+        .selected
+        .and_then(|id| s.positions.iter().find(|position| position.id == id));
+    let pane_fits = pane_fits(s, cx);
     let page = match s.page {
         Page::Overview => portfolio::overview(s, t, cx),
-        Page::Holdings => portfolio::holdings(s, t),
+        Page::Holdings => match selected {
+            Some(position) if !pane_fits => portfolio::details_page(s, position, t),
+            _ => portfolio::holdings(s, t, cx),
+        },
         Page::Allocation => portfolio::allocation(s, t, cx),
         Page::Performance => portfolio::performance(s, t, cx),
         Page::Review => plan::review(s, t),
@@ -506,17 +522,18 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .toolbar(toolbar(s, t))
         .titlebar_inset(cx.titlebar_inset())
         .reduced_motion(cx.is_reduced_motion());
-    if let Some(position) = s
-        .selected
-        .and_then(|id| s.positions.iter().find(|position| position.id == id))
-    {
+    if let Some(position) = selected.filter(|_| pane_fits) {
         split = split.inspector(
             &s.inspector,
             |s: &mut State| &mut s.inspector,
             portfolio::inspector(s, position, t),
         );
     }
-    split.build(&t.kit)
+    col()
+        .key("window")
+        .w_full()
+        .h_full()
+        .child(split.build(&t.kit))
 }
 
 #[cfg(test)]

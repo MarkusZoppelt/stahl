@@ -633,3 +633,73 @@ fn tab_stops_once_in_the_table_and_space_still_toggles() {
         "Tab left the table, so the arrows no longer move it"
     );
 }
+
+fn narrowed_to(app: &mut Harness, width: f32, height: f32) {
+    app.rt.set_viewport((width, height), 2.0);
+    app.settle();
+}
+
+fn columns_of(app: &Harness) -> Vec<&'static str> {
+    [
+        "sort-name",
+        "sort-class",
+        "sort-value",
+        "sort-pnl",
+        "sort-day",
+    ]
+    .into_iter()
+    .filter(|key| app.exists(key))
+    .collect()
+}
+
+#[test]
+fn the_table_drops_columns_rather_than_overlap_them() {
+    let mut app = on_holdings();
+    assert_eq!(columns_of(&app).len(), 5, "a wide window has them all");
+
+    // The smallest window Stahl allows, with the pane open beside the table.
+    narrowed_to(&mut app, 960.0, 640.0);
+    assert_eq!(columns_of(&app).len(), 5, "no pane yet");
+    app.click("holding-0");
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value", "sort-day"]);
+    assert!(app.exists("edit-position"), "the details show beside it");
+    assert!(app.exists("add-position"));
+    let add = app.rt.presented("add-position").unwrap().0;
+    let pane = app.rt.presented("inspector").unwrap().0;
+    assert!(
+        add[0] + add[2] <= pane[0],
+        "the Add button stays clear of the pane"
+    );
+}
+
+#[test]
+fn a_window_too_narrow_for_both_shows_the_details_in_place_of_the_table() {
+    let mut app = on_holdings();
+    narrowed_to(&mut app, 646.0, 450.0);
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value", "sort-day"]);
+
+    app.click("holding-1");
+    assert!(!app.exists("holding-1"), "the details replace the table");
+    assert!(app.exists("edit-position"));
+
+    // The arrows still work, and Edit is still a key away.
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(4));
+    app.press(Key::Enter);
+    assert!(app.rt.state.form.is_some());
+    app.press(Key::Escape);
+
+    app.click("close-inspector");
+    assert!(app.rt.state.selected.is_none());
+    assert!(
+        app.exists("holding-1"),
+        "closing them brings the table back"
+    );
+
+    // With the sidebar out of the way, both fit.
+    app.click("holding-1");
+    app.command('b', true);
+    assert!(app.exists("holding-1"));
+    assert!(app.exists("edit-position"));
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value"]);
+}
