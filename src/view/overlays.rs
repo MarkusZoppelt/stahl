@@ -282,14 +282,19 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .px(10.0)
                 .radius(6.0)
                 .center_y()
-                .fill(if index == selected {
-                    k.c.layer_03
-                } else {
-                    k.c.layer_03.alpha(0.0)
-                })
-                .motion(LEAD)
                 .reveal_selected(index == selected)
                 .on_press_tx(move |s: &mut State, tx: &mut Tx| s.run_command(command.clone(), tx))
+                // One highlight, which slides from row to row.
+                .children((index == selected).then(|| {
+                    el().key("palette-highlight")
+                        .matched("palette-highlight")
+                        .absolute(0.0, 0.0)
+                        .w_full()
+                        .h_full()
+                        .radius(7.0)
+                        .fill(k.c.text_base.alpha(0.1))
+                        .motion(LEAD)
+                }))
                 .child(icon(entry.icon, 15.0).color(k.c.icon_muted))
                 .child(
                     text(entry.label)
@@ -308,12 +313,17 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
         .w_full()
         .max_w(560.0)
         .h(440.0)
-        .radius(12.0)
-        .fill(k.c.layer_01.alpha(0.82))
-        .backdrop_blur(18.0)
-        .border(1.0, k.c.border_base)
-        .shadow(18.0, 48.0, Color::BLACK.alpha(0.4))
-        .transition(Transition::scale(0.97).combined(Transition::opacity()))
+        .radius(14.0)
+        .fill(k.c.layer_01.alpha(0.62))
+        .backdrop_blur(30.0)
+        .continuous_corners()
+        .border_gradient(1.0, k.c.text_base.alpha(0.22), k.c.text_base.alpha(0.06))
+        .shadow(22.0, 60.0, Color::BLACK.alpha(0.45))
+        .transition(
+            Transition::scale(0.96)
+                .combined(Transition::blur(4.0))
+                .combined(Transition::opacity()),
+        )
         .modal(true, |s: &mut State| s.palette = None)
         .child(col().w_full().padding(6.0).child(input))
         .child(el().w_full().h(1.0).fill(k.c.border_muted))

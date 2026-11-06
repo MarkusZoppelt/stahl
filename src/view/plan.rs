@@ -35,18 +35,50 @@ pub fn review(s: &State, t: &Theme) -> El {
     let Some(review) = &s.review.data else {
         return page;
     };
+    let within = review
+        .allocations
+        .iter()
+        .filter(|allocation| allocation.within_tolerance)
+        .count();
+    let classes = review.allocations.len();
+    let fit = if classes == 0 {
+        1.0
+    } else {
+        within as f32 / classes as f32
+    };
+    let fit_color = if within == classes {
+        t.up
+    } else if fit >= 0.5 {
+        t.warn
+    } else {
+        t.down
+    };
     page = page.child(
         row()
             .center_y()
             .w_full()
             .justify_between()
             .gap(16.0)
-            .child(ui::stat(
-                format!("Against “{}”", review.policy_name),
-                s.money(review.portfolio_value),
-                None,
-                t,
-            ))
+            .child(
+                row()
+                    .center_y()
+                    .gap(16.0)
+                    .child(ui::gauge(fit, format!("{within}/{classes}"), fit_color, t))
+                    .child(
+                        col()
+                            .gap(2.0)
+                            .child(ui::stat(
+                                format!("Against “{}”", review.policy_name),
+                                s.money(review.portfolio_value),
+                                None,
+                                t,
+                            ))
+                            .child(ui::caption(
+                                format!("{within} of {classes} asset classes within tolerance"),
+                                t,
+                            )),
+                    ),
+            )
             .child(
                 row()
                     .center_y()
@@ -153,6 +185,19 @@ fn scenario_card(s: &State, scenario: &RebalanceScenario, t: &Theme) -> El {
         .iter()
         .map(|item| (item.percent, t.class_color(&item.asset_class)))
         .collect();
+    // In the same order as afterwards, so a class that moves stays in its place.
+    let today: Vec<_> = scenario
+        .new_allocation
+        .iter()
+        .map(|item| {
+            let percent = s
+                .allocation
+                .iter()
+                .find(|current| current.asset_class == item.asset_class)
+                .map_or(0.0, |current| current.percent);
+            (percent, t.class_color(&item.asset_class))
+        })
+        .collect();
     let trades = if scenario.trades.is_empty() {
         text("No trades needed.").font(k.ty.ui).color(t.up)
     } else {
@@ -195,7 +240,9 @@ fn scenario_card(s: &State, scenario: &RebalanceScenario, t: &Theme) -> El {
             col()
                 .w_full()
                 .gap(8.0)
-                .child(ui::caption("Allocation afterwards", t))
+                .child(ui::caption("Allocation today", t))
+                .child(ui::stacked_bar(&today, t))
+                .child(ui::caption("Allocation afterwards", t).mt(4.0))
                 .child(ui::stacked_bar(&shares, t))
                 .child(row().center_y().flex_wrap().gaps(4.0, 12.0).children(
                     scenario.new_allocation.iter().map(|item| {

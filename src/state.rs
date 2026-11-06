@@ -281,6 +281,8 @@ pub struct State {
     pub starting: bool,
     pub error: Option<String>,
     pub updated_at: Option<String>,
+    /// How many times prices have landed, to mark the moment on screen.
+    pub price_updates: u64,
     refreshed: Option<Instant>,
 
     // The window.
@@ -371,6 +373,7 @@ impl State {
             starting: true,
             error: None,
             updated_at: None,
+            price_updates: 0,
             refreshed: None,
             page: Page::Overview,
             privacy: false,
@@ -494,7 +497,8 @@ impl State {
             self.draw_started = now;
             changed = true;
         }
-        if now - self.draw_started < DRAW_IN {
+        // One frame past the end, or the last rebuild can land just short of finished.
+        if now - self.draw_started < DRAW_IN + 0.1 {
             changed = true;
         }
         if self.toast_armed {
@@ -881,7 +885,10 @@ impl State {
         let record = !self.dirty;
         self.change_and_reload(
             record,
-            |state| state.show_toast("Prices updated"),
+            |state| {
+                state.price_updates += 1;
+                state.show_toast("Prices updated");
+            },
             |backend| async move {
                 backend.refresh_prices().await;
                 Ok(())

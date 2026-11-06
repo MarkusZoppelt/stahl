@@ -111,13 +111,15 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 fn splash(t: &Theme) -> El {
+    let [accent, trend] = ui::aurora(t, t.up, 0.0);
     col()
         .w_full()
         .h_full()
         .center()
         .gap(16.0)
-        .child(ui::mark(48.0))
-        .child(Spinner::new().build(&t.kit))
+        .child(accent)
+        .child(trend)
+        .child(ui::orbiting_mark(48.0, t))
         .child(ui::muted("Loading your portfolio…", t))
 }
 
@@ -128,18 +130,27 @@ fn drops_work() -> bool {
 
 fn welcome(s: &State, t: &Theme) -> El {
     let k = &t.kit;
-    let choice =
-        |key: &'static str, glyph: &'static Icon, primary: bool, title: &str, detail: &str| {
+    let choice = |key: &'static str,
+                  glyph: &'static Icon,
+                  primary: bool,
+                  title: &str,
+                  detail: &str,
+                  index: usize| {
+        ui::entering(
             ui::card(t)
                 .key(key)
                 .role("button")
                 .focusable(true)
                 .grow(1.0)
+                .fill(t.card.alpha(0.55))
+                .backdrop_blur(20.0)
                 .hover(k.c.hover)
+                .press_scale(0.98)
                 .child(
                     col()
                         .size(40.0, 40.0)
                         .radius(10.0)
+                        .continuous_corners()
                         .center()
                         .fill(if primary { t.accent } else { k.c.layer_03 })
                         .child(icon(glyph, 20.0).color(if primary {
@@ -153,21 +164,26 @@ fn welcome(s: &State, t: &Theme) -> El {
                         .font(k.ty.ui_medium)
                         .color(k.c.text_base),
                 )
-                .child(ui::muted(detail, t).wrap())
-        };
+                .child(ui::muted(detail, t).wrap()),
+            index,
+        )
+    };
+    let [accent, trend] = ui::aurora(t, t.up, 0.0);
     col()
         .w_full()
         .h_full()
         .center()
         .gap(8.0)
         .padding(24.0)
-        .child(ui::mark(64.0).mb(16.0))
+        .child(accent)
+        .child(trend)
+        .child(ui::orbiting_mark(64.0, t).mb(8.0))
         .child(
             text("Welcome to Stahl Capital")
-                .font(TextStyle::new(28.0, 600.0))
+                .font(TextStyle::new(30.0, 650.0).tracking(-0.4))
                 .color(k.c.text_base),
         )
-        .child(ui::muted("Your local-first portfolio, on your own machine.", t).mb(24.0))
+        .child(ui::muted("Your portfolio, in plain files, on your own machine.", t).mb(24.0))
         .child(
             row()
                 .center_y()
@@ -182,6 +198,7 @@ fn welcome(s: &State, t: &Theme) -> El {
                         true,
                         "Open a workspace",
                         "Recommended. Holds your portfolio, policy, diary, decisions, and reports.",
+                        0,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx)),
                 )
@@ -192,6 +209,7 @@ fn welcome(s: &State, t: &Theme) -> El {
                         false,
                         "Open a positions file",
                         "Quick start with just a positions.json. You can create a workspace later.",
+                        1,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_file(tx)),
                 ),
@@ -322,7 +340,14 @@ fn freshness(s: &State, t: &Theme) -> El {
         .role("status")
         .gap(6.0)
         .center_y()
-        .child(el().size(6.0, 6.0).radius(3.0).fill(color).motion(LEAD))
+        .child(
+            el().key(format!("freshness-{label}"))
+                .size(6.0, 6.0)
+                .radius(3.0)
+                .fill(color)
+                .motion(LEAD)
+                .cycle(ui::BREATHE),
+        )
         .child(
             RollingText::new("freshness-text", format!("{label} · {time}"))
                 .font(t.kit.ty.text_xsmall)
@@ -438,10 +463,15 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         Page::Health => insights::health(s, t),
         Page::Settings => insights::settings(s, t),
     };
-    let main = col()
+    let trend = s
+        .summary
+        .as_ref()
+        .map_or(t.up, |summary| t.change(summary.day_change));
+    let [accent, day] = ui::aurora(t, trend, 12.0);
+    let scroller = col()
         .key("main")
         .w_full()
-        .grow(1.0)
+        .h_full()
         .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -452,10 +482,22 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
                 .w_full()
                 .padding(24.0)
                 .gap(16.0)
-                .transition(Transition::offset(0.0, 6.0).combined(Transition::opacity()))
+                .transition(
+                    Transition::offset(0.0, 8.0)
+                        .combined(Transition::blur(3.0))
+                        .combined(Transition::opacity()),
+                )
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
                 .child(page),
         );
+    let main = col()
+        .key("main-frame")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .child(accent)
+        .child(day)
+        .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
         .toolbar(toolbar(s, t))

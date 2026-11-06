@@ -1,12 +1,12 @@
 //! Layout pieces shared by the pages.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use rune::{
-    Color, Cx, El, Shape, Transition, canvas, col, el, icon, row, text, theme::hex,
-    tok::motion::LEAD,
+    Color, Cx, Cycle, El, LoopSpec, Shape, Transition, canvas, col, el, icon, row, text,
+    theme::hex, tok::motion::LEAD,
 };
-use rune_kit::{Button, ButtonVariant, Spinner};
+use rune_kit::{Button, ButtonVariant};
 
 use crate::{
     icons,
@@ -47,19 +47,130 @@ pub fn mark(size: f32) -> El {
 }
 
 pub fn card(t: &Theme) -> El {
+    let ink = t.kit.c.text_base;
     col()
-        .fill(t.card)
-        .radius(12.0)
-        .border(1.0, t.kit.c.border_muted)
+        .fill(t.card.alpha(0.78))
+        // Lit from above, like everything else on a desk.
+        .gradient(ink.alpha(0.025), ink.alpha(0.0))
+        .radius(14.0)
+        .continuous_corners()
+        .border_gradient(1.0, ink.alpha(0.13), ink.alpha(0.04))
+        .shadow(
+            6.0,
+            22.0,
+            Color::BLACK.alpha(if t.dark { 0.18 } else { 0.05 }),
+        )
         .padding(20.0)
         .gap(12.0)
         .min_w(0.0)
 }
 
-/// A card that slides in after the ones before it.
+/// A card that sharpens into place after the ones before it.
 pub fn entering(card: El, index: usize) -> El {
-    card.enter_delay(index as f32 * 0.04)
-        .transition(Transition::offset(0.0, 10.0).combined(Transition::opacity()))
+    card.enter_delay(index as f32 * 0.05).transition(
+        Transition::offset(0.0, 12.0)
+            .combined(Transition::blur(5.0))
+            .combined(Transition::opacity()),
+    )
+}
+
+/// Soft colour behind a page. It sits under the translucent cards, so they pick it up.
+/// `radius` follows whatever it fills: the rounded main pane, or a whole window.
+pub fn aurora(t: &Theme, trend: Color, radius: f32) -> [El; 2] {
+    let strength = if t.dark { 0.16 } else { 0.10 };
+    let layer = |key: &'static str, center: [f32; 2], extent: [f32; 2], color: Color| {
+        el().key(key)
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .radius(radius)
+            .a11y_hidden()
+            .radial_gradient(
+                center,
+                extent,
+                [(0.0, color.alpha(strength)), (1.0, color.alpha(0.0))],
+            )
+    };
+    [
+        layer("aurora-accent", [0.92, 0.0], [720.0, 460.0], t.accent),
+        layer("aurora-trend", [0.08, 0.04], [620.0, 420.0], trend),
+    ]
+}
+
+/// Something alive: fades gently in and out, and holds still under reduced motion.
+pub const BREATHE: Cycle = Cycle {
+    period: 2.6,
+    phase: 0.0,
+    stops: &[(0.0, 0.25), (0.5, 1.0), (1.0, 0.25)],
+    still: 1.0,
+    fps: 30.0,
+};
+
+/// The mark, with a light orbiting it. For the moments when the app has the whole window.
+pub fn orbiting_mark(size: f32, t: &Theme) -> El {
+    let frame = size * 1.5;
+    let center = frame / 2.0;
+    let orbit = |radius: f32, from: f32, to: f32| -> Vec<[f32; 2]> {
+        (0..=40)
+            .map(|i| {
+                let angle = from + (to - from) * i as f32 / 40.0;
+                [center + radius * angle.cos(), center + radius * angle.sin()]
+            })
+            .collect()
+    };
+    let radius = center - 2.0;
+    el().size(frame, frame)
+        .center()
+        .a11y_hidden()
+        .child(
+            el().absolute(0.0, 0.0)
+                .size(frame, frame)
+                .radial_gradient(
+                    [0.5, 0.5],
+                    center,
+                    [(0.0, t.accent.alpha(0.28)), (1.0, t.accent.alpha(0.0))],
+                )
+                .cycle(BREATHE),
+        )
+        .child(
+            canvas(
+                Shape::new()
+                    .stroke(orbit(radius, 0.0, TAU), 1.0, t.kit.c.text_base.alpha(0.07))
+                    .stroke(orbit(radius, 0.0, 1.2), 2.0, t.accent)
+                    .stroke(orbit(radius, 3.1, 3.5), 2.0, t.accent.alpha(0.5)),
+            )
+            .absolute(0.0, 0.0)
+            .size(frame, frame)
+            .looping(LoopSpec::rotation(7.0)),
+        )
+        .child(mark(size))
+}
+
+/// A ring filled to `fraction`, with a figure in the middle.
+pub fn gauge(fraction: f32, figure: impl Into<String>, color: Color, t: &Theme) -> El {
+    const SIZE: f32 = 64.0;
+    let center = SIZE / 2.0;
+    let arc = |to: f32| -> Vec<[f32; 2]> {
+        (0..=64)
+            .map(|i| {
+                let angle = -FRAC_PI_2 + to * TAU * i as f32 / 64.0;
+                [center + 27.0 * angle.cos(), center + 27.0 * angle.sin()]
+            })
+            .collect()
+    };
+    el().size(SIZE, SIZE)
+        .center()
+        .role("img")
+        .child(
+            canvas(Shape::new().stroke(arc(1.0), 6.0, t.kit.c.layer_03).stroke(
+                arc(fraction.clamp(0.0, 1.0)),
+                6.0,
+                color,
+            ))
+            .absolute(0.0, 0.0)
+            .size(SIZE, SIZE),
+        )
+        .child(text(figure.into()).font(NUMBER).color(t.kit.c.text_base))
 }
 
 pub fn title(value: impl Into<String>, t: &Theme) -> El {
@@ -277,13 +388,17 @@ pub fn status<T>(state: &Loadable<T>, label: &'static str, t: &Theme) -> Option<
     match &state.error {
         Some(error) => Some(danger(error.clone(), t)),
         None if state.loading && state.data.is_none() => Some(
-            card(t).h(160.0).center().child(
-                row()
-                    .center_y()
-                    .gap(8.0)
-                    .child(Spinner::new().size(14.0).build(&t.kit))
-                    .child(muted(label, t)),
-            ),
+            card(t)
+                .role("status")
+                .label(label)
+                .gap(14.0)
+                .children([0.45, 0.9, 0.7, 0.8].map(|width| {
+                    el().w_frac(width)
+                        .h(12.0)
+                        .radius(6.0)
+                        .fill(t.kit.c.layer_03)
+                        .cycle(BREATHE)
+                })),
         ),
         None => None,
     }

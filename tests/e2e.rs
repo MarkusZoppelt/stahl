@@ -137,7 +137,7 @@ fn every_page_opens_on_a_real_workspace() {
 
     for (page, wanted) in [
         (Page::Holdings, "Bitcoin"),
-        (Page::Allocation, "Compared with your policy targets"),
+        (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Performance, "Time-weighted return"),
         (Page::Review, "Allocation vs target"),
         (Page::Rebalance, "Full Rebalance to Targets"),

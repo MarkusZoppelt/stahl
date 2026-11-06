@@ -7,7 +7,8 @@ use portfolio_rs::{
     state::{PositionDto, TopMoverDto},
 };
 use rune::{
-    Cx, El, PopupItem, PopupMenu, Tx, col, icon, popup_menu_supported, row, text,
+    Beat, Cx, El, PopupItem, PopupMenu, Sequence, Tx, col, el, icon, popup_menu_supported, row,
+    text,
     tok::{TextStyle, motion::LEAD},
 };
 use rune_kit::{
@@ -61,6 +62,12 @@ pub fn matches_search(position: &PositionDto, query: &str) -> bool {
 
 // --- Overview ---
 
+const FLASH: &[Beat] = &[
+    Beat::new(0.0).opacity(0.0),
+    Beat::new(0.12).opacity(1.0),
+    Beat::new(0.9).opacity(0.0),
+];
+
 fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
     let Some(summary) = &s.summary else {
@@ -75,6 +82,22 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .key("hero")
         .padding(0.0)
         .gap(0.0)
+        .radial_gradient(
+            [0.0, 0.0],
+            [640.0, 300.0],
+            [(0.0, day.alpha(0.13)), (1.0, day.alpha(0.0))],
+        )
+        .child(
+            // A new key each refresh, which replays it: the numbers just changed, look here.
+            el().key(format!("hero-flash-{}", s.price_updates))
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .radius(14.0)
+                .fill(day.alpha(0.1))
+                .a11y_hidden()
+                .sequence(Sequence::new(FLASH)),
+        )
         .child(
             row()
                 .center_y()
@@ -359,6 +382,20 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
     };
     let name = display_name(position);
     let context_name = name.clone();
+    let class_color = t.class_color(&position.asset_class);
+    let total = s
+        .summary
+        .as_ref()
+        .map_or(0.0, |summary| summary.total_value);
+    let weight = if total > 0.0 {
+        (position.value / total).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    let initial = name
+        .chars()
+        .next()
+        .map_or_else(String::new, |initial| initial.to_uppercase().to_string());
     row()
         .center_y()
         .key(format!("holding-{id}"))
@@ -369,7 +406,7 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         .w_full()
         .gap(12.0)
         .px(12.0)
-        .py(8.0)
+        .h(54.0)
         .radius(6.0)
         .center_y()
         .fill(if selected {
@@ -379,6 +416,7 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         })
         .hover(k.c.hover)
         .motion(LEAD)
+        .press_scale(0.995)
         .on_press(move |s: &mut State| s.select_position(id))
         .on_secondary_press(move |s: &mut State, press, tx: &mut Tx| {
             // Only macOS has pop-up menus. Elsewhere, the details pane has the same actions.
@@ -404,20 +442,51 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
                 _ => {}
             });
         })
+        // How much of the portfolio this is, along the bottom of the row.
+        .child(
+            el().key(format!("weight-{id}"))
+                .pin(Some(12.0), None, Some(12.0), Some(0.0))
+                .h(2.0)
+                .a11y_hidden()
+                .child(
+                    el().h_full()
+                        .w_frac(weight)
+                        .radius(1.0)
+                        .fill(class_color.alpha(0.75))
+                        .motion(LEAD),
+                ),
+        )
         .child(cell(
-            col()
+            row()
+                .center_y()
+                .gap(10.0)
                 .min_w(0.0)
                 .child(
-                    text(name)
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base)
-                        .truncate(),
+                    col()
+                        .size(30.0, 30.0)
+                        .radius(9.0)
+                        .continuous_corners()
+                        .center()
+                        .fill(class_color.alpha(0.18))
+                        .a11y_hidden()
+                        .child(text(initial).font(k.ty.ui_medium).color(class_color)),
                 )
-                .children(
-                    position
-                        .ticker
-                        .clone()
-                        .map(|ticker| ui::caption(ticker, t).truncate()),
+                .child(
+                    col()
+                        .min_w(0.0)
+                        .shrink()
+                        .child(
+                            text(name)
+                                .font(k.ty.ui_medium)
+                                .color(k.c.text_base)
+                                .truncate(),
+                        )
+                        .children(
+                            position
+                                .ticker
+                                .clone()
+                                .map(|ticker| ui::caption(ticker, t).truncate()),
+                        ),
                 ),
             false,
         ))
@@ -581,6 +650,14 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
         .key("inspector")
         .w_full()
         .h_full()
+        .radial_gradient(
+            [0.5, 0.0],
+            [300.0, 200.0],
+            [
+                (0.0, t.class_color(&position.asset_class).alpha(0.16)),
+                (1.0, t.class_color(&position.asset_class).alpha(0.0)),
+            ],
+        )
         .padding(20.0)
         .gap(16.0)
         .child(
@@ -775,7 +852,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .child(ui::header(
                     "Breakdown",
                     if review.is_some() {
-                        "Compared with your policy targets"
+                        "The outer ring shows your policy targets"
                     } else {
                         "Share of total value"
                     },
