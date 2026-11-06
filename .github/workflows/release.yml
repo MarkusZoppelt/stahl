@@ -5,7 +5,7 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-  # Build the installers when something they depend on changes. Nothing is published.
+  # Build the installers when something they depend on changes. Only a tag publishes anything.
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -14,10 +14,10 @@ on:
       - assets/icons/**
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  publish:
+  build:
     strategy:
       fail-fast: false
       matrix:
@@ -76,13 +76,33 @@ jobs:
             *.zip
           if-no-files-found: error
 
+  # One job after all the builds, so a failed build can't publish a release with installers missing.
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check the tag matches Cargo.toml
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match version $version in Cargo.toml"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: installers
+          merge-multiple: true
+
       - uses: softprops/action-gh-release@v2
-        if: github.event_name != 'pull_request'
         with:
           name: "Stahl Capital ${{ github.ref_name }}"
-          body: "See the assets below to download and install."
-          draft: true
-          files: |
-            *.dmg
-            *.deb
-            *.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: installers/*
