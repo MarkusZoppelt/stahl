@@ -38,30 +38,21 @@ pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         |value: Option<f64>| value.map_or_else(|| "-".to_string(), |value| format!("{value:.2}%"));
     page = page
         .child(
-            row()
-                .center_y()
-                .w_full()
-                .justify_between()
-                .gap(16.0)
-                .child(ui::muted(
-                    "A summary to read yourself, or to hand to an AI assistant.",
-                    t,
-                ))
-                .child(
-                    row()
-                        .center_y()
-                        .gap(4.0)
-                        .child(ui::copy_button(
-                            "copy-briefing",
-                            briefing.markdown.clone(),
-                            t,
-                        ))
-                        .child(ui::refresh_button(
-                            "refresh-briefing",
-                            State::load_briefing,
-                            t,
-                        )),
-                ),
+            row().center_y().w_full().justify_end().gap(16.0).child(
+                row()
+                    .center_y()
+                    .gap(4.0)
+                    .child(ui::copy_button(
+                        "copy-briefing",
+                        briefing.markdown.clone(),
+                        t,
+                    ))
+                    .child(ui::refresh_button(
+                        "refresh-briefing",
+                        State::load_briefing,
+                        t,
+                    )),
+            ),
         )
         .child(
             ui::columns(ui::is_wide(cx), 4, 2, 12.0)
@@ -360,7 +351,8 @@ pub fn settings(s: &State, t: &Theme) -> El {
                 .gap(16.0)
                 .child(ui::header(
                     "AI provider",
-                    "An Anthropic or OpenAI-compatible endpoint for portfolio_rs.",
+                    "An Anthropic or OpenAI-compatible endpoint, saved in the config Stahl shares \
+                     with portfolio_rs. Stahl itself doesn't use it yet.",
                     t,
                 ))
                 .child(field(
@@ -404,7 +396,8 @@ pub fn settings(s: &State, t: &Theme) -> El {
             ui::card(t)
                 .child(ui::header(
                     "Workspace tools",
-                    "A workspace adds a policy, reviews, decisions, and reports.",
+                    "A workspace adds a policy, reviews, decisions and reports. An agent skill \
+                     is a file that tells an AI agent how to use portfolio_rs on your data.",
                     t,
                 ))
                 .child(

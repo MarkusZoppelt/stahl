@@ -31,6 +31,7 @@ use stahl::{
     demo::{self, FakeReleases},
     state::{Confirm, Page, State, UpdatePhase},
     update::{self, Installation, Updater},
+    view::guide,
 };
 use tempfile::TempDir;
 use tokio::runtime::Runtime as Tokio;
@@ -832,6 +833,95 @@ fn the_first_steps_lead_to_a_first_position_and_a_policy() {
         "{:?}",
         app.rt.state.review.error
     );
+}
+
+#[test]
+fn the_guide_opens_from_anywhere_and_never_on_its_own() {
+    let mut app = Harness::boot(false, None);
+    assert!(!app.rt.state.guide, "not forced on a first run");
+    app.click("welcome-guide");
+    assert!(app.exists("guide-body"));
+    assert!(app.has_text("Valuation history"), "explains the terms");
+    assert!(app.has_text("Getting started"));
+    app.press(Key::Escape);
+    assert!(!app.rt.state.guide);
+
+    let mut app = Harness::boot(true, None);
+    assert!(!app.rt.state.guide, "not forced on a returning user");
+    app.command('2', false);
+    assert!(
+        app.has_text("one row per position"),
+        "the page says what it is"
+    );
+
+    app.command('/', false);
+    assert!(app.rt.state.guide);
+    assert!(app.has_text("You're on Holdings"), "starts where you are");
+    app.command('/', false);
+    assert!(!app.rt.state.guide);
+
+    app.click("guide");
+    assert!(app.rt.state.guide);
+    app.press(Key::Escape);
+
+    app.command('k', false);
+    app.type_text("guide");
+    app.press(Key::Enter);
+    assert!(app.rt.state.guide, "the palette reaches it");
+}
+
+#[test]
+fn the_end_of_the_guide_can_be_scrolled_to_in_the_smallest_window() {
+    offline();
+    let tokio = Tokio::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let backend = demo::backend(dir.path(), None, tokio.handle().clone());
+    let mut rt = app::headless(backend, None, (960.0, 640.0));
+    rt.state.toggle_guide();
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let body = rt.presented("guide-body").expect("the guide is laid out").0;
+    assert!(
+        body[1] >= 0.0 && body[1] + body[3] <= 640.0,
+        "the guide fits the window: {body:?}"
+    );
+    let last = "guide-shortcut-Hide amounts";
+    let (x, y) = rt.find("guide-body").unwrap();
+    for _ in 0..40 {
+        rt.wheel(x, y, -200.0);
+        rt.frame(1.0 / 60.0);
+    }
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let row = rt.presented(last).expect("the last row is laid out").0;
+    assert!(
+        row[1] + row[3] <= body[1] + body[3] + 1.0,
+        "the last row scrolls into view: {row:?} in {body:?}"
+    );
+}
+
+#[test]
+fn a_german_keyboard_reaches_the_guide_too() {
+    let mut app = Harness::boot(true, None);
+    app.command('/', true);
+    assert!(app.rt.state.guide, "Shift is how some layouts type a slash");
+}
+
+#[test]
+fn every_page_has_its_own_explanation() {
+    let pages: Vec<Page> = Page::PORTFOLIO
+        .into_iter()
+        .chain(Page::PLAN)
+        .chain(Page::INSIGHTS)
+        .chain([Page::Settings])
+        .collect();
+    let about: Vec<&str> = pages.iter().map(|page| guide::about(*page)).collect();
+    let mut unique = about.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), pages.len(), "{about:?}");
 }
 
 #[test]

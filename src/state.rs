@@ -311,6 +311,7 @@ pub enum Command {
     OpenFile,
     OpenWorkspace,
     NewWorkspace,
+    Guide,
     Privacy,
     Theme,
     Sidebar,
@@ -423,6 +424,7 @@ pub struct State {
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
     pub new_workspace: Option<NewWorkspaceForm>,
+    pub guide: bool,
     pub confirm: Option<Confirm>,
     pub toast: Option<(String, Instant)>,
     toast_armed: bool,
@@ -614,6 +616,7 @@ impl State {
             palette: None,
             form: None,
             new_workspace: None,
+            guide: false,
             confirm: None,
             toast: None,
             toast_armed: false,
@@ -1511,6 +1514,7 @@ impl State {
             Command::OpenFile => self.ask_for_file(tx),
             Command::OpenWorkspace => self.ask_for_workspace(tx),
             Command::NewWorkspace => self.open_new_workspace(),
+            Command::Guide => self.toggle_guide(),
             Command::Privacy => self.privacy = !self.privacy,
             Command::Theme => self.toggle_theme(),
             Command::Sidebar => self.sidebar.toggle(),
@@ -1521,6 +1525,11 @@ impl State {
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
         }
+    }
+
+    pub fn toggle_guide(&mut self) {
+        self.palette = None;
+        self.guide = !self.guide;
     }
 
     pub fn open_palette(&mut self) {

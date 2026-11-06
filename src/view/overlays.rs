@@ -11,7 +11,7 @@ use crate::{
     icons,
     state::{Command, Confirm, FormField, Page, State, file_name},
     theme::Theme,
-    view::{page_icon, portfolio::matches_search, ui, updates},
+    view::{guide, page_icon, portfolio::matches_search, ui, updates},
 };
 
 pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
@@ -23,6 +23,9 @@ pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
     }
     if s.new_workspace.is_some() {
         new_workspace(s, t, layer);
+    }
+    if s.guide {
+        guide::dialog(s, t, layer);
     }
     if let Some(confirm) = &s.confirm {
         confirmation(confirm, t, layer);
@@ -166,6 +169,12 @@ pub fn entries(s: &State) -> Vec<Entry> {
         ]);
     }
     all.extend([
+        action(
+            "Guide",
+            &icons::CIRCLE_HELP,
+            Some((false, "/")),
+            Command::Guide,
+        ),
         action(
             "New Workspace…",
             &icons::FOLDER_PLUS,

@@ -54,7 +54,7 @@ fn main() {
         s.settle();
         s.starting = false;
     }
-    /// A form that shows no real path, and whose name is left out to show the problem.
+    /// A form that shows no real path, with no name yet.
     fn example_form(s: &mut State) {
         if let Some(form) = &mut s.new_workspace {
             form.location.replace_text("/Users/you/Documents");
@@ -141,6 +141,9 @@ fn main() {
                 first_run(s);
                 s.open_new_workspace();
                 example_form(s);
+                if let Some(form) = &mut s.new_workspace {
+                    form.name.replace_text("My Portfolio");
+                }
             }),
             ("new-workspace-problem", |s| {
                 first_run(s);
@@ -148,6 +151,14 @@ fn main() {
                 example_form(s);
                 s.submit_new_workspace();
                 s.settle();
+            }),
+            ("guide", |s| {
+                scene(s, Page::Holdings);
+                s.toggle_guide();
+            }),
+            ("guide-first-run", |s| {
+                first_run(s);
+                s.toggle_guide();
             }),
             ("parse-failure", |s| {
                 s.startup();

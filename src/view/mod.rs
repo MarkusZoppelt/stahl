@@ -1,6 +1,6 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::env;
+use std::{env, mem};
 
 use rune::{
     Align, Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod charts;
+pub mod guide;
 mod insights;
 mod overlays;
 mod plan;
@@ -52,6 +53,7 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             || s.form.take().is_some()
             || s.new_workspace.take().is_some()
             || s.confirm.take().is_some()
+            || mem::take(&mut s.guide)
             || s.close_update_dialog();
     }
     if portfolio::holdings_key(s, event, tx) {
@@ -74,6 +76,8 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         ('h', true) => s.privacy = !s.privacy,
         ('n', false) if s.has_portfolio() => s.open_form(None),
         ('n', true) => s.open_new_workspace(),
+        // Some layouts need Shift to type a slash, so it doesn't matter here.
+        ('/' | '?', _) => s.toggle_guide(),
         ('q', false) => s.quit_or_ask(tx),
         (key, false) => match Page::from_shortcut(key) {
             Some(page) if s.has_portfolio() => s.navigate(page),
@@ -241,6 +245,16 @@ fn welcome(s: &State, t: &Theme) -> El {
                 ui::caption("or drop a file or folder anywhere on this window", t).mt(24.0)
             }),
         )
+        .child(
+            Button::new("What's in Stahl?")
+                .variant(ButtonVariant::Ghost)
+                .icon(&icons::CIRCLE_HELP)
+                .shortcut(ui::chord(false, "/"))
+                .on_press(|s: &mut State| s.toggle_guide())
+                .build(k)
+                .key("welcome-guide")
+                .mt(8.0),
+        )
         .children(
             s.error
                 .as_ref()
@@ -369,7 +383,7 @@ fn freshness(s: &State, t: &Theme) -> El {
                 .color(t.kit.c.text_muted)
                 .build(&t.kit),
         )
-        .help("How current these prices are")
+        .help(guide::FRESHNESS)
 }
 
 fn tool(icon: &'static Icon, label: &str, t: &Theme) -> IconButton {
@@ -406,6 +420,13 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
                 .mr(6.0)
                 .transition(Transition::scale(0.9).combined(Transition::opacity()))
         }))
+        .child(
+            tool(&icons::CIRCLE_HELP, "Guide", t)
+                .shortcut(ui::chord(false, "/"))
+                .on_press(|s: &mut State| s.toggle_guide())
+                .build(k)
+                .key("guide"),
+        )
         .child(
             tool(&icons::SEARCH, "Command Palette", t)
                 .shortcut(ui::chord(false, "K"))
@@ -534,6 +555,11 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
                 )
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
                 .child(page_heading(s, t))
+                .child(
+                    ui::caption(guide::about(s.page), t)
+                        .key("page-about")
+                        .wrap(),
+                )
                 .child(page),
         );
     let main = col()

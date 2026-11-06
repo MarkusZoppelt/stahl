@@ -8,7 +8,7 @@ use crate::{
     format, icons,
     state::{Page, State},
     theme::Theme,
-    view::ui,
+    view::{guide, ui},
 };
 
 fn tone(severity: &Severity, t: &Theme) -> Color {
@@ -146,7 +146,12 @@ pub fn review(s: &State, t: &Theme) -> El {
     }
     page = page.child(ui::entering(
         ui::card(t)
-            .child(ui::title("Allocation vs target", t))
+            .child(ui::header(
+                "Allocation vs target",
+                "Drift is how far a class is from its target. A cross means it's past the \
+                 tolerance you set.",
+                t,
+            ))
             .child(ui::table(
                 &["Asset class", "Target", "Actual", "Drift", "Status"],
                 review
@@ -299,10 +304,13 @@ fn scenario_card(s: &State, scenario: &RebalanceScenario, t: &Theme) -> El {
                     }),
                 ))
         }))
-        .child(ui::caption(
-            format!("Cash impact: {}", s.signed_money(scenario.cash_impact)),
-            t,
-        ))
+        .child(
+            ui::caption(
+                format!("Cash impact: {}", s.signed_money(scenario.cash_impact)),
+                t,
+            )
+            .help(guide::CASH_IMPACT),
+        )
 }
 
 pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {

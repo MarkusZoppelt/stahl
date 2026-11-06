@@ -19,7 +19,7 @@ use crate::{
     format, icons,
     state::{Confirm, Page, SortBy, State, file_name},
     theme::{HERO, HOLDING_TITLE, NUMBER, Theme},
-    view::{charts, ui},
+    view::{charts, guide, ui},
 };
 
 fn display_name(position: &PositionDto) -> String {
@@ -137,12 +137,15 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .center_y()
                         .gap(36.0)
                         .pb(2.0)
-                        .child(ui::stat(
-                            "Unrealized PnL",
-                            s.signed_money(summary.total_pnl),
-                            Some(t.change(summary.total_pnl)),
-                            t,
-                        ))
+                        .child(
+                            ui::stat(
+                                "Unrealized PnL",
+                                s.signed_money(summary.total_pnl),
+                                Some(t.change(summary.total_pnl)),
+                                t,
+                            )
+                            .help(guide::UNREALIZED_PNL),
+                        )
                         .child(ui::stat(
                             "Securities",
                             s.money(summary.securities_value),
@@ -1115,6 +1118,8 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     "Breakdown",
                     if review.is_some() {
                         "The outer ring shows your policy targets"
+                    } else if s.is_workspace() {
+                        "Share of total value. Set a policy to see your targets here."
                     } else {
                         "Share of total value"
                     },
@@ -1222,24 +1227,28 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                             change.map(|v| t.change(v)),
                             t,
                         ))
-                        .child(ui::stat(
-                            "Time-weighted return",
-                            twr.map_or_else(|| "-".to_string(), format::percent),
-                            twr.map(|v| t.change(v)),
-                            t,
-                        ))
-                        .child(ui::stat(
-                            "Net contributions",
-                            optional(contributions),
-                            None,
-                            t,
-                        ))
-                        .child(ui::stat(
-                            "Market effect",
-                            optional(market),
-                            market.map(|v| t.change(v)),
-                            t,
-                        )),
+                        .child(
+                            ui::stat(
+                                "Time-weighted return",
+                                twr.map_or_else(|| "-".to_string(), format::percent),
+                                twr.map(|v| t.change(v)),
+                                t,
+                            )
+                            .help(guide::TWR),
+                        )
+                        .child(
+                            ui::stat("Net contributions", optional(contributions), None, t)
+                                .help(guide::NET_CONTRIBUTIONS),
+                        )
+                        .child(
+                            ui::stat(
+                                "Market effect",
+                                optional(market),
+                                market.map(|v| t.change(v)),
+                                t,
+                            )
+                            .help(guide::MARKET_EFFECT),
+                        ),
                 )
                 .child(charts::value_chart(
                     s,
@@ -1259,24 +1268,28 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         )
         .child(
             ui::columns(wide, 4, 2, 12.0)
-                .child(ui::stat_card(
-                    "Invested",
-                    s.money(performance.invested),
-                    None,
-                    t,
-                ))
-                .child(ui::stat_card(
-                    "Unrealized PnL",
-                    s.signed_money(performance.unrealized_pnl),
-                    Some(t.change(performance.unrealized_pnl)),
-                    t,
-                ))
-                .child(ui::stat_card(
-                    "Total return",
-                    format::percent(performance.pnl_percent),
-                    Some(t.change(performance.pnl_percent)),
-                    t,
-                ))
+                .child(
+                    ui::stat_card("Invested", s.money(performance.invested), None, t)
+                        .help(guide::INVESTED),
+                )
+                .child(
+                    ui::stat_card(
+                        "Unrealized PnL",
+                        s.signed_money(performance.unrealized_pnl),
+                        Some(t.change(performance.unrealized_pnl)),
+                        t,
+                    )
+                    .help(guide::UNREALIZED_PNL),
+                )
+                .child(
+                    ui::stat_card(
+                        "Total return",
+                        format::percent(performance.pnl_percent),
+                        Some(t.change(performance.pnl_percent)),
+                        t,
+                    )
+                    .help(guide::TOTAL_RETURN),
+                )
                 .child(ui::stat_card(
                     "Today",
                     format!(
