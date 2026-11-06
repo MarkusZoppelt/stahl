@@ -21,7 +21,7 @@ use std::{
     time::Duration,
 };
 
-use reqwest::Client;
+use reqwest::{Client, Url, redirect};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -32,7 +32,7 @@ use zip::ZipArchive;
 /// The releases page, and the only place a release may send anyone.
 pub const RELEASES_PAGE: &str = "https://github.com/MarkusZoppelt/stahl/releases";
 const RELEASES_API: &str = "https://api.github.com/repos/MarkusZoppelt/stahl/releases?per_page=30";
-/// The only place anything is downloaded from.
+/// Where a download must start. It may only be redirected to [`github_host`].
 const DOWNLOADS: &str = "https://github.com/MarkusZoppelt/stahl/releases/download/";
 /// Far larger than any installer, so a bad server can't fill the disk.
 const MAX_DOWNLOAD: u64 = 500 * 1024 * 1024;
@@ -108,13 +108,27 @@ fn safe_asset_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// Whether `url` is under `prefix`, after parsing has resolved `..` however it's spelled.
+fn is_under(url: &str, prefix: &str) -> bool {
+    Url::parse(url).is_ok_and(|url| url.as_str().starts_with(prefix))
+}
+
 fn trusted_download(url: &str) -> bool {
-    url.starts_with(DOWNLOADS) && !url.contains("..")
+    is_under(url, DOWNLOADS)
+}
+
+/// GitHub's own hosts: downloads redirect from `github.com` to `*.githubusercontent.com`.
+fn github_host(url: &Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str().is_some_and(|host| {
+            matches!(host, "github.com" | "api.github.com")
+                || host.ends_with(".githubusercontent.com")
+        })
 }
 
 /// A release's page, or the list of releases if it claims to be anywhere else.
 fn trusted_page(url: Option<String>) -> String {
-    url.filter(|url| url.starts_with(RELEASES_PAGE) && !url.contains(".."))
+    url.filter(|url| is_under(url, RELEASES_PAGE))
         .unwrap_or_else(|| RELEASES_PAGE.to_string())
 }
 
@@ -523,6 +537,15 @@ impl GithubReleases {
     pub fn new() -> Result<GithubReleases, String> {
         let client = Client::builder()
             .https_only(true)
+            .redirect(redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 10 {
+                    attempt.error("too many redirects")
+                } else if github_host(attempt.url()) {
+                    attempt.follow()
+                } else {
+                    attempt.error("redirected away from GitHub")
+                }
+            }))
             .user_agent(concat!("stahl-updater/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(30))
@@ -934,6 +957,34 @@ mod tests {
       {"tag_name": "v0.9.0", "draft": false, "prerelease": false, "body": null,
        "html_url": "https://example.com/phish", "assets": []}
     ]"#;
+
+    #[test]
+    fn a_download_cant_climb_out_of_the_release_folder() {
+        assert!(trusted_download(&format!("{DOWNLOADS}v1.0.0/a.dmg")));
+        for path in [
+            "../../../evil/a.dmg",
+            "%2e%2e/%2E%2E/%2e%2e/evil/a.dmg",
+            ".%2e/.%2e/a.dmg",
+        ] {
+            let url = format!("{DOWNLOADS}{path}");
+            assert!(!trusted_download(&url), "{url}");
+        }
+        assert_eq!(
+            trusted_page(Some(format!("{RELEASES_PAGE}/%2e%2e/%2e%2e/evil"))),
+            RELEASES_PAGE
+        );
+    }
+
+    #[test]
+    fn redirects_stay_on_github() {
+        let host = |url: &str| github_host(&Url::parse(url).unwrap());
+        assert!(host("https://github.com/a"));
+        assert!(host("https://release-assets.githubusercontent.com/a"));
+        assert!(!host("http://release-assets.githubusercontent.com/a"));
+        assert!(!host("https://evilgithubusercontent.com/a"));
+        assert!(!host("https://github.com.evil.example/a"));
+        assert!(!host("https://githubusercontent.com.evil.example/a"));
+    }
 
     #[test]
     fn only_published_stable_versions_count() {
