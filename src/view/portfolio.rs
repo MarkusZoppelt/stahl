@@ -614,7 +614,7 @@ pub fn holdings(s: &State, t: &Theme) -> El {
         )
 }
 
-fn detail(label: &'static str, value: String, t: &Theme) -> El {
+fn detail(label: impl Into<String>, value: String, t: &Theme) -> El {
     col()
         .min_w(0.0)
         .gap(2.0)
@@ -638,7 +638,7 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
         None => position.asset_class.clone(),
     };
     let price = if position.price > 0.0 {
-        s.money(position.price)
+        s.unit_money(position, position.price)
     } else {
         "-".to_string()
     };
@@ -692,9 +692,16 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .flex_wrap()
                 .child(detail("Quantity", format!("{:.4}", position.amount), t))
                 .child(detail("Price", price, t))
+                .children(
+                    s.base_price(position).map(|price| {
+                        detail(format!("Price ({})", s.currency()), s.money(price), t)
+                    }),
+                )
                 .child(detail(
                     "Average cost",
-                    s.optional_money(position.average_cost),
+                    position
+                        .average_cost
+                        .map_or_else(|| "-".to_string(), |cost| s.unit_money(position, cost)),
                     t,
                 ))
                 .child(detail("Invested", s.optional_money(position.invested), t))
@@ -715,7 +722,7 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .children(position.purchases.iter().map(|purchase| {
                     let price = purchase
                         .price
-                        .map_or_else(|| "-".to_string(), |price| s.money(price));
+                        .map_or_else(|| "-".to_string(), |price| s.unit_money(position, price));
                     row()
                         .center_y()
                         .w_full()

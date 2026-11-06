@@ -29,7 +29,7 @@ use rune::{ClipboardContent, FileDialogOptions, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
-    backend::{Backend, BackendResult, Briefing, History, OpenDocument, Period, Snapshot},
+    backend::{Backend, BackendResult, Briefing, History, OpenDocument, Period, Quote, Snapshot},
     format,
 };
 
@@ -270,6 +270,8 @@ pub struct State {
     pub open: OpenDocument,
     pub summary: Option<PortfolioSummaryDto>,
     pub positions: Vec<PositionDto>,
+    /// What [`Self::positions`] leaves out, at the index that is the position's id.
+    pub quotes: Vec<Quote>,
     pub allocation: Vec<AllocationItemDto>,
     pub performance: Option<PerformanceDto>,
     pub findings: Vec<Finding>,
@@ -364,6 +366,7 @@ impl State {
             open: OpenDocument::default(),
             summary: None,
             positions: Vec::new(),
+            quotes: Vec::new(),
             allocation: Vec::new(),
             performance: None,
             findings: Vec::new(),
@@ -567,6 +570,34 @@ impl State {
         value.map_or_else(|| "-".to_string(), |value| self.money(value))
     }
 
+    fn quote(&self, position: &PositionDto) -> Option<&Quote> {
+        // The positions and quotes are read one after the other, so check they still line up:
+        // better no currency than another holding's.
+        self.quotes
+            .get(position.id)
+            .filter(|quote| quote.ticker == position.ticker)
+    }
+
+    /// A holding's price, average cost or purchase price, in its own currency. Without a known
+    /// currency it's a bare number: never one with the wrong symbol.
+    pub fn unit_money(&self, position: &PositionDto, value: f64) -> String {
+        if self.privacy {
+            return format::HIDDEN.to_string();
+        }
+        match self
+            .quote(position)
+            .and_then(|quote| quote.currency.as_ref())
+        {
+            Some(currency) => format::currency(value, currency),
+            None => format::amount(value),
+        }
+    }
+
+    /// A holding's price in the base currency, when its quote is in another.
+    pub fn base_price(&self, position: &PositionDto) -> Option<f64> {
+        self.quote(position).and_then(|quote| quote.base_price)
+    }
+
     // --- Opening ---
 
     pub fn is_workspace(&self) -> bool {
@@ -630,6 +661,7 @@ impl State {
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
         self.summary = Some(snapshot.summary);
         self.positions = snapshot.positions;
+        self.quotes = snapshot.quotes;
         self.allocation = snapshot.allocation;
         self.performance = Some(snapshot.performance);
         self.findings = snapshot.findings;
@@ -758,6 +790,7 @@ impl State {
                     state.open = OpenDocument::default();
                     state.summary = None;
                     state.positions.clear();
+                    state.quotes.clear();
                     state.allocation.clear();
                     state.performance = None;
                     state.findings.clear();
