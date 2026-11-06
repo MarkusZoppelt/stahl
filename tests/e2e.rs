@@ -7,6 +7,7 @@
 use std::{env, fs, path::Path, sync::Once, thread, time::Duration};
 
 use chrono::Local;
+use portfolio_rs::state::PositionDto;
 use rune::{Key, KeyEvent, Mods, Runtime};
 use stahl::{
     app,
@@ -296,6 +297,123 @@ fn an_invalid_amount_keeps_the_form_open_and_changes_nothing() {
     assert!(app.has_text("Amount must be a number."));
     assert_eq!(app.rt.state.positions.len(), 5);
     assert!(!app.rt.state.dirty);
+}
+
+/// Type into the real dialog through pointer and keys. Amount starts out holding its default `0`,
+/// and the caret lands after it, as it does for someone clicking the field.
+fn fill_position_form(app: &mut Harness, amount: &str, quantity: &str, price: &str) {
+    app.command('n', false);
+    app.type_text("Zed");
+    for (key, text) in [
+        ("form-amount", amount),
+        ("form-quantity", quantity),
+        ("form-price", price),
+    ] {
+        if !text.is_empty() {
+            app.click(key);
+            app.type_text(text);
+        }
+    }
+    app.click("form-submit");
+}
+
+fn added_position(app: &Harness) -> Option<&PositionDto> {
+    app.rt
+        .state
+        .positions
+        .iter()
+        .find(|position| position.name.as_deref() == Some("Zed"))
+}
+
+#[test]
+fn numbers_with_a_decimal_comma_or_thousands_separators_are_read() {
+    for (typed, wanted) in [
+        ("1,5", 1.5),
+        ("150,00", 150.0),
+        ("1,000.50", 1000.5),
+        ("1.000,50", 1000.5),
+        ("1.000.000", 1_000_000.0),
+        ("1 000", 1000.0),
+        ("0,125", 0.125),
+        ("1.5", 1.5),
+    ] {
+        let mut app = Harness::boot(true, None);
+        fill_position_form(&mut app, typed, "", "");
+        let added = added_position(&app);
+        assert_eq!(added.map(|p| p.amount), Some(wanted), "amount {typed:?}");
+    }
+
+    let mut app = Harness::boot(true, None);
+    fill_position_form(&mut app, "", "2,5", "150,50");
+    let added = added_position(&app).expect("the position was added");
+    assert_eq!(added.amount, 2.5);
+    assert_eq!(added.average_cost, Some(150.5));
+}
+
+#[test]
+fn a_number_that_could_be_off_by_a_thousand_is_refused() {
+    for (amount, quantity, price, wanted) in [
+        (
+            "1.000",
+            "",
+            "",
+            "Amount \"01.000\" could mean 1000 or 1.000",
+        ),
+        (
+            "1,000",
+            "",
+            "",
+            "Amount \"01,000\" could mean 1000 or 1.000",
+        ),
+        (
+            "",
+            "1,000",
+            "",
+            "Quantity \"1,000\" could mean 1000 or 1.000",
+        ),
+        (
+            "",
+            "",
+            "12.345",
+            "Price \"12.345\" could mean 12345 or 12.345",
+        ),
+    ] {
+        let mut app = Harness::boot(true, None);
+        fill_position_form(&mut app, amount, quantity, price);
+        assert!(app.rt.state.form.is_some(), "the form stays open");
+        assert!(app.has_text(wanted), "should explain {wanted:?}");
+        assert_eq!(app.rt.state.positions.len(), 5, "nothing was added");
+    }
+}
+
+#[test]
+fn a_bad_number_is_blamed_on_its_own_field() {
+    for (quantity, price, wanted) in [
+        ("abc", "", "Quantity \"abc\" isn't a number."),
+        ("", "\u{20ac}150", "Price \"\u{20ac}150\" isn't a number."),
+        ("-3", "100", "Quantity can't be negative."),
+        ("3", "-100", "Price can't be negative."),
+    ] {
+        let mut app = Harness::boot(true, None);
+        fill_position_form(&mut app, "", quantity, price);
+        assert!(app.has_text(wanted), "should say {wanted:?}");
+        assert_eq!(app.rt.state.positions.len(), 5, "nothing was added");
+    }
+}
+
+#[test]
+fn editing_saves_an_amount_with_three_decimals_unchanged() {
+    let mut app = Harness::boot(true, None);
+    fill_position_form(&mut app, "12.3450", "", "");
+    let id = added_position(&app).expect("the position was added").id;
+    assert_eq!(added_position(&app).map(|p| p.amount), Some(12.345));
+
+    app.command('2', false);
+    app.click(&format!("holding-{id}"));
+    app.click("edit-position");
+    app.click("form-submit");
+    assert!(app.rt.state.form.is_none(), "saved without complaint");
+    assert_eq!(added_position(&app).map(|p| p.amount), Some(12.345));
 }
 
 #[test]
