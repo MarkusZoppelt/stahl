@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, Dialog, Keybind, TextInput, Toast, ToastRe
 
 use crate::{
     icons,
-    state::{Command, Confirm, Page, State},
+    state::{Command, Confirm, FormField, Page, State},
     theme::Theme,
     view::{page_icon, portfolio::matches_search, ui},
 };
@@ -381,6 +381,11 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
     };
     let is_new = form.existing.is_none();
     let currency = s.currency();
+    let invalid = |field| {
+        form.error
+            .as_ref()
+            .is_some_and(|error| error.field == field)
+    };
     macro_rules! access {
         ($field:ident) => {
             |s: &mut State| &mut s.form.as_mut().expect("form is open").$field
@@ -444,7 +449,7 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         TextInput::new(&form.amount)
                             .label("Amount")
                             .placeholder("0")
-                            .invalid(form.error.is_some()),
+                            .invalid(invalid(FormField::Amount)),
                         "form-amount",
                         t,
                         access!(amount),
@@ -473,7 +478,8 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                             labelled(
                                 TextInput::new(&form.quantity)
                                     .label("Quantity")
-                                    .placeholder("0"),
+                                    .placeholder("0")
+                                    .invalid(invalid(FormField::Quantity)),
                                 "form-quantity",
                                 t,
                                 access!(quantity),
@@ -485,7 +491,8 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                             labelled(
                                 TextInput::new(&form.price)
                                     .label(format!("Price ({currency})"))
-                                    .placeholder("0.00"),
+                                    .placeholder("0.00")
+                                    .invalid(invalid(FormField::Price)),
                                 "form-price",
                                 t,
                                 access!(price),
@@ -494,7 +501,11 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         )),
                 )
         }))
-        .children(form.error.map(|error| ui::danger(error, t)))
+        .children(
+            form.error
+                .as_ref()
+                .map(|error| ui::danger(error.message.clone(), t)),
+        )
         .child(
             row()
                 .center_y()

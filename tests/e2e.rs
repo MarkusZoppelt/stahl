@@ -294,7 +294,7 @@ fn an_invalid_amount_keeps_the_form_open_and_changes_nothing() {
     app.click("form-submit");
 
     assert!(app.rt.state.form.is_some(), "the form stays open");
-    assert!(app.has_text("Amount must be a number."));
+    assert!(app.has_text("Amount \"abc\" isn't a number."));
     assert_eq!(app.rt.state.positions.len(), 5);
     assert!(!app.rt.state.dirty);
 }
