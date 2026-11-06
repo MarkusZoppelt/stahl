@@ -1,8 +1,6 @@
 //! Stahl Capital, the executable. See the library for everything else.
 
-use std::env;
-#[cfg(target_os = "linux")]
-use std::process;
+use std::{env, process};
 
 use tokio::runtime::Builder;
 
@@ -32,5 +30,9 @@ fn main() {
         .expect("failed to start the Tokio runtime");
     let backend = Backend::load(runtime.handle().clone());
 
-    app::run(backend, file, rune_args);
+    if let Err(error) = app::run(backend, file, rune_args) {
+        eprintln!("error: {error}");
+        // Not a return: dropping Tokio would wait for whatever startup left running.
+        process::exit(1);
+    }
 }

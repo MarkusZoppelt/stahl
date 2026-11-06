@@ -47,7 +47,7 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
-    app::run_with_scenes(
+    let result = app::run_with_scenes(
         backend,
         env::args().skip(1).collect(),
         &[
@@ -107,4 +107,8 @@ fn main() {
         ],
     );
     let _ = fs::remove_dir_all(&dir);
+    if let Err(error) = result {
+        eprintln!("error: {error}");
+        process::exit(1);
+    }
 }
