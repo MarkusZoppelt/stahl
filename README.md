@@ -19,6 +19,31 @@ See it at [zoppelt.net/stahl](https://zoppelt.net/stahl/).
 
 > **Status:** early. Expect rough edges.
 
+## Getting started
+
+Open Stahl and choose **Create a workspace**, give it a name and a location, and you land in it,
+ready to add your first position. Add what you own, save, then set a policy to see where you stand
+in Review.
+
+| | |
+|---|---|
+| ![Welcome](screenshots/welcome.png) | ![New workspace](screenshots/new-workspace.png) |
+| ![First steps](screenshots/first-steps.png) | ![Guide](screenshots/guide.png) |
+
+A workspace is a folder, in the same format as `portfolio_rs init-workspace`, plus a `positions.json`:
+
+```
+My Portfolio/
+  positions.json         What you own
+  INVESTMENT_POLICY.md   Your policy, in your own words
+  AGENTS.md, CLAUDE.md   Instructions for AI assistants
+  portfolio/             policy.toml, diary, decisions, theses, reports, and your value history
+```
+
+You can also open an existing workspace, or a single positions file. Everything but the Plan pages
+works on a single file, and a workspace you create from one can bring its positions along. **Guide**
+(`⌘/`) explains every page and term, whenever you want it.
+
 ## Features
 
 - **Overview:** total value, today's change, and value over time at a glance, with what needs attention
@@ -38,6 +63,9 @@ And it behaves like a desktop app:
 
 - **Command palette** (`⌘K`) that also finds your holdings, and shortcuts for every page (`⌘1`–`⌘0`).
   Ctrl stands in for `⌘` on Linux and Windows.
+- **New workspace** (`⌘⇧N`) from anywhere, with the palette, the File menu, or Settings
+- **Guide** (`⌘/`): what each page does and what its words mean. Pages say what they're for in a
+  line, empty pages say what fills them, and the less obvious figures explain themselves on hover.
 - **Hide amounts** (`⌘⇧H`) before you share your screen
 - **Drop a file or folder** on the window to open it (not yet on Wayland, where Rune gets no drags)
 - **Unsaved changes** show in the title bar, and quitting offers to save them
@@ -59,7 +87,7 @@ And it behaves like a desktop app:
 ### History
 
 To chart your portfolio over time, Stahl records one valuation per day when it opens a portfolio or
-refreshes prices, if every position has a price. It uses the same files as `portfolio_rs snapshot`,
+refreshes prices, if it has positions and every one has a price. It uses the same files as `portfolio_rs snapshot`,
 so both add to one history:
 
 - in a workspace, `portfolio/history/main/snapshots.jsonl`
@@ -180,6 +208,7 @@ src/state.rs     All state, and everything that changes it
 src/update.rs    Finding, verifying, and installing new releases
 src/app.rs       Window chrome, menus, and how it starts
 src/view/        Pure functions from state to elements, one module per area
+src/view/guide.rs What each page and term means, and the guide
 src/theme.rs     Steel and paper, dark and light
 src/icons.rs     Lucide icons
 src/demo.rs      The made-up portfolio for the tests and the demo
