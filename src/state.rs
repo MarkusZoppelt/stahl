@@ -219,7 +219,8 @@ impl PositionForm {
             name,
             ticker: edit(existing.and_then(|p| p.ticker.clone()).unwrap_or_default()),
             asset_class: edit(
-                existing.map_or_else(|| "Stock".to_string(), |p| p.asset_class.clone()),
+                // As the policy templates spell it: Review matches asset classes by exact name.
+                existing.map_or_else(|| "Stocks".to_string(), |p| p.asset_class.clone()),
             ),
             amount: edit(existing.map_or_else(|| "0".to_string(), |p| editable_number(p.amount))),
             quantity: TextEdit::new(""),
@@ -1818,7 +1819,12 @@ impl State {
 
     pub fn use_strategy(&mut self, strategy: &str) {
         match Backend::policy_from_strategy(strategy) {
-            Ok(policy) => self.show_policy(policy),
+            Ok(policy) => {
+                self.show_policy(policy);
+                self.policy.message =
+                    Some("Template loaded. Press Save to Workspace to keep it.".to_string());
+                self.policy.error = None;
+            }
             Err(error) => self.policy.error = Some(error),
         }
     }

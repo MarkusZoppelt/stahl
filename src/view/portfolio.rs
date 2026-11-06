@@ -17,7 +17,7 @@ use rune_kit::{
 use crate::{
     backend::Period,
     format, icons,
-    state::{Confirm, Page, SortBy, State},
+    state::{Confirm, Page, SortBy, State, file_name},
     theme::{HERO, HOLDING_TITLE, NUMBER, Theme},
     view::{charts, ui},
 };
@@ -308,7 +308,121 @@ fn attention_card(s: &State, t: &Theme) -> El {
         )
 }
 
+/// One thing to do next, with the button that does it.
+fn step(number: usize, heading: &str, detail: String, action: Option<El>, t: &Theme) -> El {
+    let k = &t.kit;
+    row()
+        .center_y()
+        .w_full()
+        .gap(14.0)
+        .py(10.0)
+        .child(
+            col()
+                .size(26.0, 26.0)
+                .radius(13.0)
+                .center()
+                .fill(k.c.layer_03)
+                .a11y_hidden()
+                .child(ui::number(number.to_string(), k.c.text_base)),
+        )
+        .child(
+            col()
+                .grow(1.0)
+                .w(0.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(ui::title(heading, t))
+                .child(ui::caption(detail, t).wrap()),
+        )
+        .children(action)
+}
+
+/// Overview before there's anything to add up: what to do, in order.
+fn first_steps(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let plan = if s.is_workspace() {
+        (!s.has_policy).then(|| {
+            (
+                "Set a policy",
+                "Say how you want your money split. Review and Rebalance measure against it.",
+                Button::new("Open Policy")
+                    .on_press(|s: &mut State| s.navigate(Page::Policy))
+                    .build(k)
+                    .key("first-steps-policy"),
+            )
+        })
+    } else {
+        Some((
+            "Create a workspace",
+            "A single file can't hold a policy, reports or decisions. A workspace can.",
+            Button::new("New Workspace…")
+                .on_press(|s: &mut State| s.open_new_workspace())
+                .build(k)
+                .key("first-steps-workspace"),
+        ))
+    };
+    let file = s
+        .open
+        .file_path
+        .as_deref()
+        .map_or("your positions file", file_name);
+    let mut steps = vec![
+        step(
+            1,
+            "Add your first position",
+            "A share, a fund, crypto or a cash balance. Add the rest the same way.".to_string(),
+            Some(ui::add_position_button("first-steps-add", t)),
+            t,
+        ),
+        step(
+            2,
+            "Save",
+            format!(
+                "Positions reach {file} when you save, with {}.",
+                ui::chord(false, "S")
+            ),
+            None,
+            t,
+        ),
+    ];
+    if let Some((heading, detail, action)) = plan {
+        steps.push(step(3, heading, detail.to_string(), Some(action), t));
+    }
+    steps.push(step(
+        steps.len() + 1,
+        "Check your currency",
+        format!(
+            "Totals are shown in {}. Stahl converts other currencies for you.",
+            s.currency()
+        ),
+        Some(
+            Button::new("Open Settings")
+                .on_press(|s: &mut State| s.navigate(Page::Settings))
+                .build(k)
+                .key("first-steps-settings"),
+        ),
+        t,
+    ));
+    ui::entering(
+        ui::card(t)
+            .key("first-steps")
+            .w_full()
+            .gap(4.0)
+            .child(ui::header(
+                "Your portfolio is empty",
+                "Once it has positions, this page shows their total value, how it has moved, and \
+                 anything that needs a look.",
+                t,
+            ))
+            .child(col().w_full().mt(8.0).children(steps)),
+        0,
+    )
+}
+
 pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+    if s.positions.is_empty() {
+        return first_steps(s, t);
+    }
     col().w_full().gap(28.0).child(hero(s, t, cx)).child(
         ui::columns(ui::is_wide(cx), 3, 2, 32.0)
             .child(ui::entering(allocation_card(s, t), 0))
@@ -642,6 +756,17 @@ pub fn holdings_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
 
 pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "holdings-empty",
+            &icons::WALLET,
+            "No positions yet",
+            "A position is one thing you own: a share, a fund, crypto or a cash balance. Each one \
+             gets a row here with its value and gain or loss.",
+            ui::add_position_button("holdings-empty-add", t),
+            t,
+        );
+    }
     let rows = holding_rows(s);
     let end = rows.len().saturating_sub(1);
     let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
@@ -894,6 +1019,17 @@ pub fn details_page(s: &State, position: &PositionDto, t: &Theme) -> El {
 
 pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "allocation-empty",
+            &icons::CHART_PIE,
+            "Nothing to split yet",
+            "This page shows how your money divides across asset classes such as stocks, bonds \
+             and cash. Add a position to see it.",
+            ui::add_position_button("allocation-empty-add", t),
+            t,
+        );
+    }
     let review = s.review.data.as_ref();
     let rows = s.allocation.iter().enumerate().map(|(index, item)| {
         let target = review.and_then(|review| {
@@ -971,7 +1107,6 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ))
     });
     let rows: Vec<El> = rows.collect();
-    let empty = rows.is_empty();
     ui::columns(ui::is_wide(cx), 2, 1, 16.0)
         .child(ui::card(t).center().child(charts::donut(s, t, cx)))
         .child(
@@ -985,7 +1120,6 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     },
                     t,
                 ))
-                .children(empty.then(|| ui::muted("No allocation data.", t)))
                 .child(col().w_full().gap(4.0).children(rows)),
         )
 }
@@ -1030,6 +1164,17 @@ fn movers(
 }
 
 pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "performance-empty",
+            &icons::TRENDING_UP,
+            "No history yet",
+            "Once you have positions, Stahl records their total value once a day while you use \
+             it, and charts it here.",
+            ui::add_position_button("performance-empty-add", t),
+            t,
+        );
+    }
     let Some(performance) = &s.performance else {
         return col();
     };

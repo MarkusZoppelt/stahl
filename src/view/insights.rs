@@ -15,6 +15,17 @@ use crate::{
 
 pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "briefing-empty",
+            &icons::CLIPBOARD_LIST,
+            "Nothing to summarize yet",
+            "A briefing is one page on your whole portfolio, to read yourself or paste into an AI \
+             assistant. Add a position to get one.",
+            ui::add_position_button("briefing-empty-add", t),
+            t,
+        );
+    }
     let mut page =
         col()
             .w_full()

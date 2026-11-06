@@ -3,7 +3,7 @@
 use std::env;
 
 use rune::{
-    Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
     tok::motion::LEAD,
 };
 use rune_kit::{
@@ -184,27 +184,43 @@ fn welcome(s: &State, t: &Theme) -> El {
                 .color(k.c.text_base),
         )
         .child(
-            ui::muted(
-                "You. Your portfolio, in plain files, on your own machine.",
-                t,
-            )
-            .mb(26.0),
+            col().w_full().max_w(620.0).items_center().mb(26.0).child(
+                ui::muted(
+                    "Track what you own, see how it has done, and check it against your plan. \
+                     Your portfolio stays in plain files on this computer. Looking up prices \
+                     sends only the ticker symbols.",
+                    t,
+                )
+                .wrap()
+                .align(Align::Center),
+            ),
         )
         .child(
             row()
-                .center_y()
                 .w_full()
-                .max_w(672.0)
+                .max_w(880.0)
                 .gap(16.0)
-                .equal_columns(2)
+                .items_stretch()
+                .equal_columns(3)
+                .child(
+                    choice(
+                        "welcome-create",
+                        &icons::FOLDER_PLUS,
+                        true,
+                        "Create a workspace",
+                        "Start here if you're new. A folder for your positions, policy, reports and decisions.",
+                        0,
+                    )
+                    .on_press(|s: &mut State| s.open_new_workspace()),
+                )
                 .child(
                     choice(
                         "welcome-workspace",
                         &icons::FOLDER_OPEN,
-                        true,
+                        false,
                         "Open a workspace",
-                        "Recommended. Holds your portfolio, policy, diary, decisions, and reports.",
-                        0,
+                        "Pick up a folder you made here or with the portfolio_rs command line.",
+                        1,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx)),
                 )
@@ -214,8 +230,8 @@ fn welcome(s: &State, t: &Theme) -> El {
                         &icons::FILE_BRACES,
                         false,
                         "Open a positions file",
-                        "Quick start with just a positions.json. You can create a workspace later.",
-                        1,
+                        "Have a positions.json already? See it right away. Planning needs a workspace.",
+                        2,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_file(tx)),
                 ),
@@ -228,7 +244,7 @@ fn welcome(s: &State, t: &Theme) -> El {
         .children(
             s.error
                 .as_ref()
-                .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(672.0)),
+                .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(880.0)),
         )
 }
 
@@ -431,7 +447,14 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
             .key("toggle-theme"),
         )
         .child(refresh);
-    Toolbar::new().leading(freshness(s, t)).trailing(trailing)
+    // With nothing to price, there's nothing to say about prices.
+    Toolbar::new()
+        .leading(if s.positions.is_empty() {
+            el()
+        } else {
+            freshness(s, t)
+        })
+        .trailing(trailing)
 }
 
 /// Where you are: the section in small type, the page in large.

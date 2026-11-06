@@ -745,10 +745,113 @@ fn quitting_with_unsaved_changes_asks() {
 
 #[test]
 fn no_portfolio_lands_on_the_welcome_screen() {
-    let app = Harness::boot(false, None);
+    let mut app = Harness::boot(false, None);
+    assert!(app.has_text("Track what you own"), "says what this is");
     assert!(app.exists("welcome-workspace"));
     assert!(app.exists("welcome-file"));
     assert!(!app.exists(Page::Overview.key()));
+
+    app.click("welcome-create");
+    assert!(app.exists("workspace-create"));
+}
+
+/// A workspace with nothing in it, open as it is right after creating one.
+fn new_workspace() -> Harness {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("My Portfolio");
+    app.click("workspace-create");
+    assert!(app.rt.state.is_workspace(), "{}", app.problem());
+    app
+}
+
+#[test]
+fn every_empty_page_says_what_belongs_there() {
+    let mut app = new_workspace();
+    assert_eq!(app.rt.state.page, Page::Overview);
+    assert!(app.has_text("Your portfolio is empty"));
+    assert!(app.exists("first-steps-add"));
+    assert!(!app.has_text("€0.00"), "no zeros standing in for a value");
+
+    for (page, wanted, action) in [
+        (Page::Holdings, "No positions yet", "holdings-empty-add"),
+        (
+            Page::Allocation,
+            "Nothing to split yet",
+            "allocation-empty-add",
+        ),
+        (Page::Performance, "No history yet", "performance-empty-add"),
+        (
+            Page::Briefing,
+            "Nothing to summarize yet",
+            "briefing-empty-add",
+        ),
+        (Page::Review, "No policy yet", "review-set-policy"),
+        (Page::Rebalance, "No policy yet", "rebalance-set-policy"),
+    ] {
+        app.click(page.key());
+        assert_eq!(app.rt.state.page, page);
+        assert!(app.has_text(wanted), "{page:?} should show {wanted:?}");
+        assert!(app.exists(action), "{page:?} should offer {action}");
+        assert!(
+            !app.has_text("no investment policy"),
+            "{page:?} shows a raw error"
+        );
+    }
+}
+
+#[test]
+fn the_first_steps_lead_to_a_first_position_and_a_policy() {
+    let mut app = new_workspace();
+    app.click("first-steps-add");
+    assert!(app.rt.state.form.is_some());
+    app.type_text("Apple");
+    app.click("form-submit");
+    assert_eq!(app.rt.state.positions.len(), 1);
+    assert!(
+        !app.exists("first-steps"),
+        "done with once there's a position"
+    );
+    assert!(app.exists("hero"));
+
+    app.click(Page::Review.key());
+    app.click("review-set-policy");
+    assert_eq!(app.rt.state.page, Page::Policy);
+    app.click("strategy-balanced-growth");
+    assert!(
+        app.has_text("Press Save to Workspace"),
+        "says it isn't kept yet"
+    );
+    app.click("policy-save");
+    assert!(app.rt.state.has_policy, "{:?}", app.rt.state.policy.error);
+
+    app.click(Page::Review.key());
+    assert!(
+        app.has_text("Allocation vs target"),
+        "{:?}",
+        app.rt.state.review.error
+    );
+}
+
+#[test]
+fn a_search_with_no_results_is_not_mistaken_for_an_empty_portfolio() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('2', false);
+    app.click("holdings-search");
+    app.type_text("nothing like this");
+    assert!(app.has_text("No holdings match."));
+    assert!(!app.exists("holdings-empty"));
+}
+
+#[test]
+fn a_new_position_defaults_to_the_class_the_templates_use() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('n', false);
+    assert_eq!(
+        app.rt.state.form.as_ref().unwrap().asset_class.text,
+        "Stocks"
+    );
 }
 
 #[test]

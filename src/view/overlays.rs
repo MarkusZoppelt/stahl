@@ -443,14 +443,24 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 ))
                 .child(ui::field(
                     "Ticker",
-                    labelled(
-                        TextInput::new(&form.ticker)
-                            .label("Ticker")
-                            .placeholder("AAPL"),
-                        "form-ticker",
-                        t,
-                        access!(ticker),
-                    ),
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(labelled(
+                            TextInput::new(&form.ticker)
+                                .label("Ticker")
+                                .placeholder("AAPL"),
+                            "form-ticker",
+                            t,
+                            access!(ticker),
+                        ))
+                        .child(
+                            ui::caption(
+                                "Its Yahoo Finance symbol. Blank for cash, or anything without a market price.",
+                                t,
+                            )
+                            .wrap(),
+                        ),
                     t,
                 )),
         )
@@ -461,28 +471,50 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .items_start()
                 .child(ui::field(
                     "Asset class",
-                    labelled(
-                        TextInput::new(&form.asset_class)
-                            .label("Asset class")
-                            .placeholder("Stock"),
-                        "form-class",
-                        t,
-                        access!(asset_class),
-                    ),
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(labelled(
+                            TextInput::new(&form.asset_class)
+                                .label("Asset class")
+                                .placeholder("Stocks"),
+                            "form-class",
+                            t,
+                            access!(asset_class),
+                        ))
+                        .child(
+                            ui::caption(
+                                "Stocks, Bonds, Gold, Crypto, Cash… Spell it as your policy does.",
+                                t,
+                            )
+                            .wrap(),
+                        ),
                     t,
                 ))
                 .child(ui::field(
                     "Amount",
-                    labelled(
-                        TextInput::new(&form.amount)
-                            .label("Amount")
-                            .placeholder("0")
-                            .disabled(form.amount_from_purchases())
-                            .invalid(invalid(FormField::Amount)),
-                        "form-amount",
-                        t,
-                        access!(amount),
-                    ),
+                    col()
+                        .w_full()
+                        .gap(4.0)
+                        .child(labelled(
+                            TextInput::new(&form.amount)
+                                .label("Amount")
+                                .placeholder("0")
+                                .disabled(form.amount_from_purchases())
+                                .invalid(invalid(FormField::Amount)),
+                            "form-amount",
+                            t,
+                            access!(amount),
+                        ))
+                        .children((!form.amount_from_purchases()).then(|| {
+                            ui::caption(
+                                format!(
+                                    "Shares or units you hold. Without a ticker, the value in {currency}."
+                                ),
+                                t,
+                            )
+                            .wrap()
+                        })),
                     t,
                 )),
         )
@@ -502,7 +534,7 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .radius(8.0)
                 .border(1.0, k.c.border_muted)
                 .child(ui::caption(
-                    "Initial purchase (optional, sets cost basis)",
+                    "Optional: what you paid, so Stahl can show your gain or loss.",
                     t,
                 ))
                 .child(

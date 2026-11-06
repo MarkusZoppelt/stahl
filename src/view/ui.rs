@@ -6,8 +6,8 @@ use std::{
 };
 
 use rune::{
-    Color, Cx, Cycle, El, Image, ImageCache, LoopSpec, Shape, Transition, canvas, col, el, icon,
-    row, text, theme::hex, tok::motion::LEAD,
+    Align, Color, Cx, Cycle, El, Icon, Image, ImageCache, LoopSpec, Shape, Transition, canvas, col,
+    el, icon, row, text, theme::hex, tok::motion::LEAD,
 };
 use rune_kit::{Button, ButtonVariant};
 
@@ -499,6 +499,57 @@ pub fn field(label: impl Into<String>, input: El, t: &Theme) -> El {
         .gap(6.0)
         .child(caption(label, t))
         .child(input)
+}
+
+/// What a page shows while it has nothing to show: what belongs there, and how to get it there.
+pub fn empty_state(
+    key: &'static str,
+    glyph: &'static Icon,
+    heading: &str,
+    detail: &str,
+    action: El,
+    t: &Theme,
+) -> El {
+    let k = &t.kit;
+    entering(
+        card(t)
+            .key(key)
+            .w_full()
+            .items_center()
+            .gap(8.0)
+            .py(40.0)
+            .child(
+                col()
+                    .size(40.0, 40.0)
+                    .mb(4.0)
+                    .radius(10.0)
+                    .continuous_corners()
+                    .center()
+                    .fill(k.c.layer_03)
+                    .child(icon(glyph, 20.0).color(k.c.text_base)),
+            )
+            .child(title(heading, t))
+            .child(
+                col()
+                    .w_full()
+                    .max_w(480.0)
+                    .items_center()
+                    .child(muted(detail, t).wrap().align(Align::Center)),
+            )
+            .child(row().center_y().gap(8.0).mt(12.0).child(action)),
+        0,
+    )
+}
+
+/// The button that starts the Add Position form. `key` tells apart the places it appears.
+pub fn add_position_button(key: &'static str, t: &Theme) -> El {
+    Button::new("Add Position")
+        .variant(ButtonVariant::Submit)
+        .icon(&icons::PLUS)
+        .shortcut(chord(false, "N"))
+        .on_press(|s: &mut State| s.open_form(None))
+        .build(&t.kit)
+        .key(key)
 }
 
 /// A visible label over a field that has its whole row.
