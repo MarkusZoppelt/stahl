@@ -98,7 +98,7 @@ jobs:
             test -s "renders/$scene.png"
           done
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: renders-${{ matrix.os }}
@@ -126,7 +126,7 @@ jobs:
           kill -0 "$app"
           kill "$app"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: window-${{ matrix.os }}
