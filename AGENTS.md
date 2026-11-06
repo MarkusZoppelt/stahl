@@ -73,6 +73,12 @@ Tests must not touch the user's config. `AppState::load_workspace` and
 `load_simple_file` save it to the default location whatever `Backend` was given,
 so tests open portfolios through `Backend::startup`, on a backend from `demo::backend`.
 
+Updates are off unless given an `Updater`: `State::new` has a disabled one, and only `app::run` uses
+`Updater::github()`. Tests use `app::headless_with_updater` with `demo::FakeReleases` and paths in a
+temp directory, so they can't reach the network or replace the running binary. The macOS flow needs
+`hdiutil`, so its test is ignored by default. After changing it, run it by hand:
+`cargo test --lib -- --ignored mac_flow`.
+
 When running the app by hand, use the demo, or isolate it from real data: set `HOME` to a temp
 directory and `PORTFOLIO_RS_QUOTES=offline`. Opening a portfolio records a valuation in its history.
 
