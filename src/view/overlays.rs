@@ -449,6 +449,7 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         TextInput::new(&form.amount)
                             .label("Amount")
                             .placeholder("0")
+                            .disabled(form.amount_from_purchases())
                             .invalid(invalid(FormField::Amount)),
                         "form-amount",
                         t,
@@ -457,6 +458,14 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                     t,
                 )),
         )
+        .children(form.amount_from_purchases().then(|| {
+            ui::caption(
+                "Amount is the total of this position's purchases. Change them in the portfolio file.",
+                t,
+            )
+            .wrap()
+            .key("form-amount-note")
+        }))
         .children(is_new.then(|| {
             col()
                 .w_full()
