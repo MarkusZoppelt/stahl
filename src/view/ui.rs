@@ -1,21 +1,36 @@
 //! Layout pieces shared by the pages.
 
-use std::f32::consts::{FRAC_PI_2, PI, TAU};
+use std::{
+    f32::consts::{FRAC_PI_2, PI, TAU},
+    sync::Arc,
+};
 
 use rune::{
-    Color, Cx, Cycle, El, LoopSpec, Shape, Transition, canvas, col, el, icon, row, text,
-    theme::hex, tok::motion::LEAD,
+    Color, Cx, Cycle, El, Image, ImageCache, LoopSpec, Shape, Transition, canvas, col, el, icon,
+    row, text, theme::hex, tok::motion::LEAD,
 };
 use rune_kit::{Button, ButtonVariant};
 
 use crate::{
     icons,
     state::{Loadable, State},
-    theme::{FIGURE, NUMBER, Theme},
+    theme::{FIGURE, NUMBER, SECTION, Theme},
 };
 
-/// The Stahl mark: concentric rings, each lit from the left.
-pub fn mark(size: f32) -> El {
+thread_local! {
+    /// The door, decoded and mipmapped the first time a view shows it. Views all run on the UI
+    /// thread, and the cache's worker is idle after that one image.
+    static DOOR: (ImageCache, Image) = {
+        let cache = ImageCache::new(Arc::new(|| {}));
+        let image = cache.load(Arc::<[u8]>::from(&include_bytes!("../../assets/door.png")[..]));
+        // Once, and only a few milliseconds: the welcome screen shouldn't open on an empty frame.
+        let _ = image.wait();
+        (cache, image)
+    };
+}
+
+/// The icon's rings, flat. What the door stands in for if it can't be shown.
+pub fn rings(size: f32) -> El {
     const RINGS: [(f32, &str, &str); 5] = [
         (254.0, "#26333B", "#11212C"),
         (204.0, "#3C5260", "#1C3547"),
@@ -46,23 +61,58 @@ pub fn mark(size: f32) -> El {
         .a11y_hidden()
 }
 
+/// The Stahl mark: the icon's rings as a steel door, rendered by the landing page's shader.
+/// Mipmapped, so it holds from the sidebar's 28 points to the welcome screen's 168.
+pub fn door(size: f32) -> El {
+    DOOR.with(|(_, image)| {
+        if image.is_ready() && image.error().is_none() {
+            el().size(size, size).pixels(image.pixels()).a11y_hidden()
+        } else {
+            rings(size)
+        }
+    })
+}
+
+/// A box, for what has to hold together: a table, a form.
 pub fn card(t: &Theme) -> El {
-    let ink = t.kit.c.text_base;
     col()
-        .fill(t.card.alpha(0.78))
-        // Lit from above, like everything else on a desk.
-        .gradient(ink.alpha(0.025), ink.alpha(0.0))
-        .radius(14.0)
+        .fill(t.card)
+        .radius(12.0)
         .continuous_corners()
-        .border_gradient(1.0, ink.alpha(0.13), ink.alpha(0.04))
-        .shadow(
-            6.0,
-            22.0,
-            Color::BLACK.alpha(if t.dark { 0.18 } else { 0.05 }),
-        )
+        .border(1.0, t.kit.c.border_muted)
         .padding(20.0)
         .gap(12.0)
         .min_w(0.0)
+}
+
+/// Something that floats over the page: the command palette, a chart's readout, a menu.
+/// The only surfaces with a shadow and a blur behind them.
+pub fn floating(t: &Theme) -> El {
+    col()
+        .fill(t.card.alpha(0.86))
+        .backdrop_blur(24.0)
+        .radius(12.0)
+        .continuous_corners()
+        .border(1.0, t.kit.c.border_base)
+        .shadow(
+            18.0,
+            48.0,
+            Color::BLACK.alpha(if t.dark { 0.45 } else { 0.16 }),
+        )
+}
+
+/// A section with a rule over it and no box, like a line in a ledger.
+pub fn ledger(t: &Theme) -> El {
+    col()
+        .pt(16.0)
+        .gap(12.0)
+        .min_w(0.0)
+        .child(rule(t).absolute(0.0, 0.0))
+}
+
+/// A hairline across its parent.
+pub fn rule(t: &Theme) -> El {
+    el().w_full().h(1.0).fill(t.kit.c.border_base).a11y_hidden()
 }
 
 /// A card that sharpens into place after the ones before it.
@@ -74,27 +124,25 @@ pub fn entering(card: El, index: usize) -> El {
     )
 }
 
-/// Soft colour behind a page. It sits under the translucent cards, so they pick it up.
+/// One soft light from above, on the wall behind a page.
 /// `radius` follows whatever it fills: the rounded main pane, or a whole window.
-pub fn aurora(t: &Theme, trend: Color, radius: f32) -> [El; 2] {
-    let strength = if t.dark { 0.16 } else { 0.10 };
-    let layer = |key: &'static str, center: [f32; 2], extent: [f32; 2], color: Color| {
-        el().key(key)
-            .absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-            .radius(radius)
-            .a11y_hidden()
-            .radial_gradient(
-                center,
-                extent,
-                [(0.0, color.alpha(strength)), (1.0, color.alpha(0.0))],
-            )
+pub fn wash(t: &Theme, radius: f32) -> El {
+    let light = if t.dark {
+        Color::WHITE.alpha(0.055)
+    } else {
+        Color::WHITE.alpha(0.42)
     };
-    [
-        layer("aurora-accent", [0.92, 0.0], [720.0, 460.0], t.accent),
-        layer("aurora-trend", [0.08, 0.04], [620.0, 420.0], trend),
-    ]
+    el().key("wash")
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(radius)
+        .a11y_hidden()
+        .radial_gradient(
+            [0.5, 0.0],
+            [900.0, 520.0],
+            [(0.0, light), (1.0, light.alpha(0.0))],
+        )
 }
 
 /// Something alive: fades gently in and out, and holds still under reduced motion.
@@ -128,7 +176,7 @@ pub fn orbiting_mark(size: f32, t: &Theme) -> El {
                 .radial_gradient(
                     [0.5, 0.5],
                     center,
-                    [(0.0, t.accent.alpha(0.28)), (1.0, t.accent.alpha(0.0))],
+                    [(0.0, t.accent.alpha(0.12)), (1.0, t.accent.alpha(0.0))],
                 )
                 .cycle(BREATHE),
         )
@@ -143,7 +191,7 @@ pub fn orbiting_mark(size: f32, t: &Theme) -> El {
             .size(frame, frame)
             .looping(LoopSpec::rotation(7.0)),
         )
-        .child(mark(size))
+        .child(door(size))
 }
 
 /// A ring filled to `fraction`, with a figure in the middle.
@@ -174,9 +222,7 @@ pub fn gauge(fraction: f32, figure: impl Into<String>, color: Color, t: &Theme) 
 }
 
 pub fn title(value: impl Into<String>, t: &Theme) -> El {
-    text(value.into())
-        .font(t.kit.ty.ui_medium)
-        .color(t.kit.c.text_base)
+    text(value.into()).font(SECTION).color(t.kit.c.text_base)
 }
 
 pub fn muted(value: impl Into<String>, t: &Theme) -> El {
@@ -253,7 +299,7 @@ pub fn badge(value: impl Into<String>, color: Color) -> El {
 }
 
 pub fn dot(color: Color) -> El {
-    el().size(8.0, 8.0).radius(4.0).fill(color)
+    el().size(7.0, 7.0).radius(3.5).fill(color)
 }
 
 pub fn danger(message: impl Into<String>, t: &Theme) -> El {
@@ -300,10 +346,9 @@ pub fn finding(color: Color, heading: impl Into<String>, detail: Option<String>,
         .w_full()
         .items_start()
         .gap(12.0)
-        .padding(12.0)
-        .radius(8.0)
-        .fill(color.alpha(0.1))
-        .child(dot(color).mt(4.0))
+        .py(10.0)
+        .child(rule(t).absolute(0.0, 0.0))
+        .child(dot(color).mt(5.0))
         .child(
             col()
                 .shrink()
@@ -323,12 +368,12 @@ pub fn share_bar(key: String, percent: f64, target: Option<f64>, color: Color, t
     let fraction = |value: f64| (value / 100.0).clamp(0.0, 1.0) as f32;
     el().key(key)
         .w_full()
-        .h(6.0)
-        .radius(3.0)
+        .h(4.0)
+        .radius(2.0)
         .fill(t.kit.c.layer_03)
         .child(
             el().h_full()
-                .radius(3.0)
+                .radius(2.0)
                 .fill(color)
                 .w_frac(fraction(percent))
                 .motion(LEAD),
@@ -336,7 +381,7 @@ pub fn share_bar(key: String, percent: f64, target: Option<f64>, color: Color, t
         .children(target.map(|target| {
             row()
                 .center_y()
-                .pin(Some(0.0), Some(-3.0), Some(0.0), None)
+                .pin(Some(0.0), Some(-4.0), Some(0.0), None)
                 .h(12.0)
                 .child(el().h_full().w_frac(fraction(target)))
                 .child(el().size(2.0, 12.0).radius(1.0).fill(t.kit.c.text_base))
@@ -493,4 +538,14 @@ pub fn table(headers: &[&str], rows: Vec<Vec<El>>, t: &Theme) -> El {
                     ),
             ]
         }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_door_decodes() {
+        DOOR.with(|(_, image)| assert_eq!(image.wait(), Ok([512, 512])));
+    }
 }

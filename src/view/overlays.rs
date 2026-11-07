@@ -1,7 +1,7 @@
 //! What floats above the window: the command palette, dialogs, toasts, and the parse failure.
 
 use rune::{
-    Color, El, Icon, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text,
+    El, Icon, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text,
     tok::motion::LEAD,
 };
 use rune_kit::{Button, ButtonVariant, Dialog, Keybind, TextInput, Toast, ToastRegion};
@@ -298,7 +298,7 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         .absolute(0.0, 0.0)
                         .w_full()
                         .h_full()
-                        .radius(7.0)
+                        .radius(6.0)
                         .fill(k.c.text_base.alpha(0.1))
                         .motion(LEAD)
                 }))
@@ -313,19 +313,13 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .children((!entry.keys.is_empty()).then(|| Keybind::new(&entry.keys).build(k))),
         );
     }
-    let panel = col()
+    let panel = ui::floating(t)
         .key("palette-panel")
         .role("dialog")
         .label("Command Palette")
         .w_full()
         .max_w(560.0)
         .h(440.0)
-        .radius(14.0)
-        .fill(k.c.layer_01.alpha(0.62))
-        .backdrop_blur(30.0)
-        .continuous_corners()
-        .border_gradient(1.0, k.c.text_base.alpha(0.22), k.c.text_base.alpha(0.06))
-        .shadow(22.0, 60.0, Color::BLACK.alpha(0.45))
         .transition(
             Transition::scale(0.96)
                 .combined(Transition::blur(4.0))

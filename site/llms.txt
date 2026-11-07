@@ -1,0 +1,37 @@
+# Stahl Capital
+
+> A local-first, native desktop app for tracking investment portfolios, built on portfolio_rs and written in Rust on Rune, with no web view. For macOS, Linux and Windows. Free and MIT licensed. It is an early alpha, so expect rough edges.
+
+Stahl Capital is software, not a bank, a broker or an adviser. The page's private bank voice is a joke about having one client: you. Nothing it shows is investment advice.
+
+## What it does
+
+- Overview: total value, today's change and value over time
+- Holdings: a sortable, searchable table with cost basis and purchases
+- Allocation: today's split against your policy's targets
+- Performance: time-weighted return, separating market moves from money you added
+- Review, in a workspace: drift, constraint checks, data quality and suggested actions
+- Rebalance, in a workspace: what-if scenarios. It never trades.
+- Policy, in a workspace: a machine-readable investment policy
+- Documents, in a workspace: weekly reports and decision records
+- Briefing: a summary with Copy as Markdown, to hand to an AI assistant
+- Data Health: file validation, data-quality findings and workspace checks
+
+## Your data
+
+Positions are in a plain JSON file on your machine, shared with the portfolio_rs CLI. A file that doesn't parse shows its line and column. It is never shown as an empty portfolio and never overwritten.
+
+Two things can leave the machine: tickers sent to Yahoo Finance to fetch prices (set `PORTFOLIO_RS_QUOTES=offline` to stop that), and whatever you send an AI provider, if you add one in Settings. There's no account and no telemetry.
+
+## Install
+
+- Run without installing: `nix run github:MarkusZoppelt/stahl`
+- Install with Nix: `nix profile install github:MarkusZoppelt/stahl`
+- Installers (.dmg for Apple silicon, .deb for x64, .zip for Windows x64): https://github.com/MarkusZoppelt/stahl/releases
+- macOS builds are ad-hoc signed, so right-click the app and choose Open on first launch.
+
+## Links
+
+- Source: https://github.com/MarkusZoppelt/stahl
+- portfolio_rs: https://github.com/MarkusZoppelt/portfolio_rs
+- Rune: https://github.com/anomalyco/rune

@@ -34,6 +34,12 @@ Guidance for AI agents (and humans) working on this repo.
 - `cargo clippy --all-targets -- --deny warnings` must be clean (also
   enforced by `nix flake check` → `stahl-clippy`).
 
+## Design
+
+The look is decided: read [DESIGN.md](DESIGN.md) before changing a screen. Colours, type, shadows and
+gradients come from `src/theme.rs` and the primitives in `src/view/ui.rs`, never from a page.
+`tests/design.rs` fails on a page that reaches past them.
+
 ## Rune
 
 The UI is [Rune](https://github.com/anomalyco/rune) and `rune-kit`, pinned to one git revision in
@@ -80,6 +86,24 @@ temp directory, so they can't reach the network or replace the running binary. T
 
 When running the app by hand, use the demo, or isolate it from real data: set `HOME` to a temp
 directory and `PORTFOLIO_RS_QUOTES=offline`. Opening a portfolio records a valuation in its history.
+
+## Landing page
+
+`site/` is the landing page: plain HTML, CSS and JavaScript with no build step, deployed by
+`.github/workflows/pages.yml`. Paths stay relative, because it's served from `/stahl/`.
+
+- Its images and video come from the real app. When the UI changes, run
+  `nix develop -c site/render-media.sh`. The tour's input is in `site/media/tour.json`, and its
+  chapter times are repeated in `CHAPTERS` in `site/app.js`, so change them together.
+- The sketches in `site/app.js` use the prices and targets in `src/demo.rs`, so its totals match the
+  footage. Change them together.
+- The page makes specific claims about what the app does, including everything that leaves the
+  machine (the letter in `site/index.html`, and `site/llms.txt`). A change that makes one false, like
+  a new network request, has to update them.
+- Its content security policy forbids contacting any other origin, and the letter says so. Keep it
+  that way: no analytics, and no fonts or scripts from anywhere else.
+
+To preview it, serve `site/` on loopback with `python3 -m http.server --bind 127.0.0.1 -d site`.
 
 ## Nix flake maintenance
 

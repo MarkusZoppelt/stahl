@@ -1,0 +1,87 @@
+# Design language
+
+Stahl Capital looks like the landing page at [zoppelt.net/stahl](https://zoppelt.net/stahl/): a private
+bank with one client. That means steel, paper, a serif for the things worth announcing, and very
+little decoration. This file is the reference for new screens. `tests/design.rs` enforces the parts
+a test can check.
+
+## Principles
+
+1. **Steel and paper.** Dark is a steel-blue wall (`#0a0f13`). Light is the landing page's letter
+   paper (`#e9e6dd`) with dark ink. Both themes are first class, so check every screen in both.
+2. **One serif voice.** Newsreader is for names and big numbers: page titles, section titles, the
+   total, key figures, the welcome sentence. Everything you read or operate (labels, tables,
+   buttons, captions) is Inter. Never set running text in the serif.
+3. **Rules, not boxes.** Group related things with a hairline above them (`ui::ledger`). A box
+   (`ui::card`) is for things that must hold together: a table, a form, a list of findings. A box
+   inside a box is a smell.
+4. **Colour carries meaning, never decoration.** Teal means a gain or all clear, red a loss or a
+   failure, amber a warning, cyan information. Each asset class keeps one colour on every page.
+   Everything else is steel greys. No coloured backgrounds behind pages or cards.
+5. **Depth only for what floats.** The palette, a chart readout and menus get a shadow and a blur
+   (`ui::floating`). Nothing that sits on the page does.
+6. **Quiet motion that means something.** Digits roll when a value changes, charts draw in once,
+   a refresh flashes the total. All of it respects reduced motion. Nothing loops for attention,
+   except the single breathing dot showing that prices are live.
+7. **Plain words.** Say what it is and what happens. The private bank joke belongs on the welcome
+   screen and the landing page, not in labels or errors.
+
+## Tokens
+
+All of these live in `src/theme.rs`. A page never defines its own.
+
+| Token | Use |
+|---|---|
+| `HERO` | The total value. Newsreader 60, light, tabular figures |
+| `STATEMENT` | The welcome screen's sentence. Newsreader 46 |
+| `PAGE_TITLE` | Every page's name, with its section in a caption above. Newsreader 32 |
+| `HOLDING_TITLE` | A holding's name in the details pane. Newsreader 24 |
+| `FIGURE` | Key figures beside a label (`ui::stat`). Newsreader 24, tabular |
+| `SECTION` | A section's name (`ui::title`). Newsreader 18 |
+| `WORDMARK` | "Stahl Capital" in the sidebar. Newsreader 16 |
+| `NUMBER` | Numbers in tables and badges. Inter 13, medium, tabular |
+| `kit.ty.*` | Every other piece of text, from rune-kit, in Inter |
+| `Theme::up/down/warn/info` | Gain, loss, warning, information. Nothing else |
+| `Theme::class_color` | An asset class, the same on every page |
+| `Theme::card`, `kit.c.border_*` | Boxes and hairlines |
+
+Corner radii come from one scale: 1 to 3 for bars and dots, 6 for controls and rows, 8 for inner
+panels, 12 for cards and floating panels. Spacing steps are 2, 4, 6, 8, 12, 16, 24 and 32. A page
+has 32 points of side margin and 24 between its sections, and its content stops at 1240 points.
+
+## Primitives
+
+From `src/view/ui.rs`. Reach for these before writing layout.
+
+| Primitive | What it is |
+|---|---|
+| `ui::door(size)` | The mark: the icon as a steel door. The sidebar has 28, the welcome screen 168 |
+| `ui::wash(t, radius)` | The one soft light from above, behind a page |
+| `ui::card(t)` | A flat box with a hairline border |
+| `ui::ledger(t)` | A section with a rule over it and no box |
+| `ui::rule(t)` | A hairline |
+| `ui::floating(t)` | A surface over the page, with a shadow and a blur |
+| `ui::title`, `ui::caption`, `ui::muted` | Section title, small label, secondary text |
+| `ui::stat`, `ui::badge`, `ui::finding` | A labelled figure, a coloured value, a finding with its dot |
+| `ui::share_bar`, `ui::stacked_bar`, `ui::gauge` | Shares of a whole, and progress against a target |
+
+A new kind of thing on more than one page becomes a primitive here, with its look decided once.
+
+## The icon
+
+The icon is the steel door, rendered by the landing page's shader in `site/door.js` from the
+flat rings in `assets/icons/icon.svg`. `site/render-icons.sh` regenerates every size from it:
+`assets/icons/*`, `assets/door.png` (the mark inside the app), and the page's favicon and logo.
+Change the shader, not the PNGs.
+
+## Checking a screen
+
+Tests can't judge looks. Render what you changed in both themes and look at it:
+
+```sh
+cargo run --example demo -- --snap /tmp/x.png --scene overview --at 2.5 --size 1320x860
+cargo run --example demo -- --snap /tmp/x.png --scene light --at 2.5 --size 1320x860
+```
+
+Then regenerate `screenshots/` and the landing page's footage with `site/render-media.sh`, so the
+page keeps showing the app as it is.
