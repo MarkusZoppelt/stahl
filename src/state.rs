@@ -175,7 +175,31 @@ pub struct PositionForm {
     pub amount: TextEdit,
     pub quantity: TextEdit,
     pub price: TextEdit,
-    pub error: Option<&'static str>,
+    pub error: Option<FieldError>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FormField {
+    Amount,
+    Quantity,
+    Price,
+}
+
+impl FormField {
+    fn label(self) -> &'static str {
+        match self {
+            FormField::Amount => "Amount",
+            FormField::Quantity => "Quantity",
+            FormField::Price => "Price",
+        }
+    }
+}
+
+/// What's wrong with a form, and which field to mark.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FieldError {
+    pub field: FormField,
+    pub message: String,
 }
 
 impl PositionForm {
@@ -190,11 +214,60 @@ impl PositionForm {
             asset_class: edit(
                 existing.map_or_else(|| "Stock".to_string(), |p| p.asset_class.clone()),
             ),
-            amount: edit(existing.map_or_else(|| "0".to_string(), |p| p.amount.to_string())),
+            amount: edit(existing.map_or_else(|| "0".to_string(), |p| editable_number(p.amount))),
             quantity: TextEdit::new(""),
             price: TextEdit::new(""),
             error: None,
         }
+    }
+
+    fn number(&self, field: FormField) -> Result<Option<f64>, FieldError> {
+        let text = match field {
+            FormField::Amount => &self.amount.text,
+            FormField::Quantity => &self.quantity.text,
+            FormField::Price => &self.price.text,
+        };
+        let label = field.label();
+        parse_number(text).map_err(|error| FieldError {
+            field,
+            message: match error {
+                BadNumber::NotANumber => format!(
+                    "{label} \"{}\" isn't a number. Use digits, like 1234.50, without a currency symbol.",
+                    text.trim()
+                ),
+                BadNumber::Ambiguous { thousands, decimal } => format!(
+                    "{label} \"{}\" could mean {thousands} or {decimal}. Write {thousands}, or {decimal}0 for the smaller number.",
+                    text.trim()
+                ),
+            },
+        })
+    }
+
+    /// A purchase can't have a negative quantity or price.
+    fn purchase_number(&self, field: FormField) -> Result<Option<f64>, FieldError> {
+        match self.number(field)? {
+            Some(number) if number < 0.0 => Err(FieldError {
+                field,
+                message: format!("{} can't be negative.", field.label()),
+            }),
+            number => Ok(number),
+        }
+    }
+
+    /// Amount, quantity and price. Quantity and price only exist on a new position.
+    fn numbers(&self) -> Result<(f64, Option<f64>, Option<f64>), FieldError> {
+        let amount = self.number(FormField::Amount)?.ok_or(FieldError {
+            field: FormField::Amount,
+            message: "Amount is required.".to_string(),
+        })?;
+        if self.existing.is_some() {
+            return Ok((amount, None, None));
+        }
+        Ok((
+            amount,
+            self.purchase_number(FormField::Quantity)?,
+            self.purchase_number(FormField::Price)?,
+        ))
     }
 }
 
@@ -327,18 +400,97 @@ pub struct State {
     pub has_api_key: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct NotANumber;
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum BadNumber {
+    NotANumber,
+    /// `1.000` is one to some readers and a thousand to others. Holds both readings.
+    Ambiguous {
+        thousands: String,
+        decimal: String,
+    },
+}
 
-/// A blank field is `None`; anything else must be a finite number.
-pub fn parse_number(text: &str) -> Result<Option<f64>, NotANumber> {
+/// Marks that only ever separate thousands: `1 000`, `1'000`, and the spaces locales format with.
+fn is_group_mark(mark: char) -> bool {
+    matches!(mark, ' ' | '\u{a0}' | '\u{202f}' | '\'' | '\u{2019}')
+}
+
+/// A blank field is `None`; anything else must be a finite number, in digits.
+///
+/// Both `.` and `,` work as the decimal mark, because the app can't know which one someone means.
+/// This is financial data, so a mark is only ever read one way when no other reading is possible:
+///
+/// - With two different marks, the last one is the decimal: `1,000.50` and `1.000,50`.
+/// - A mark that repeats separates thousands: `1.000.000`. So does a space or an apostrophe.
+/// - A lone `.` or `,` is the decimal, like `1,5`, `0.125` or `1234.567`, unless exactly three
+///   digits follow up to three others. `1.000` and `12,345` could each be off by a thousand, so
+///   those are refused rather than guessed. Leading zeros don't count: the form's default `0` can
+///   turn a typed `1.000` into `01.000`.
+pub fn parse_number(text: &str) -> Result<Option<f64>, BadNumber> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(None);
     }
-    match text.parse::<f64>() {
+    let (sign, body) = match text.strip_prefix('-') {
+        Some(body) => ("-", body),
+        None => ("", text.strip_prefix('+').unwrap_or(text)),
+    };
+    let marks: Vec<char> = body.chars().filter(|c| !c.is_ascii_digit()).collect();
+    let is_mark = |mark: &char| matches!(mark, '.' | ',') || is_group_mark(*mark);
+    if !body.contains(|c: char| c.is_ascii_digit()) || !marks.iter().all(is_mark) {
+        return Err(BadNumber::NotANumber);
+    }
+
+    let decimal = match marks.as_slice() {
+        [] => None,
+        [only] => (!is_group_mark(*only)).then_some(*only),
+        [first, .., last] => (first != last).then_some(*last),
+    };
+    if decimal.is_some_and(is_group_mark) {
+        return Err(BadNumber::NotANumber);
+    }
+    let (whole, fraction) = decimal
+        .and_then(|mark| body.rsplit_once(mark))
+        .unwrap_or((body, ""));
+
+    // Whatever is left in the whole part separates groups of three, and is one kind of mark.
+    let mut group_marks = whole.chars().filter(|c| !c.is_ascii_digit());
+    let digits = match group_marks.next() {
+        None => whole.to_string(),
+        Some(mark) => {
+            let mut groups = whole.split(mark);
+            let first = groups.next().unwrap_or_default();
+            let well_formed = group_marks.all(|other| other == mark)
+                && !first.is_empty()
+                && first.trim_start_matches('0').len() <= 3
+                && groups.all(|group| group.len() == 3);
+            if !well_formed {
+                return Err(BadNumber::NotANumber);
+            }
+            whole.chars().filter(char::is_ascii_digit).collect()
+        }
+    };
+    let digits = digits.trim_start_matches('0');
+
+    if marks.len() == 1 && fraction.len() == 3 && (1..=3).contains(&digits.len()) {
+        return Err(BadNumber::Ambiguous {
+            thousands: format!("{sign}{digits}{fraction}"),
+            decimal: format!("{sign}{digits}.{fraction}"),
+        });
+    }
+    match format!("{sign}0{digits}.{fraction}0").parse::<f64>() {
         Ok(number) if number.is_finite() => Ok(Some(number)),
-        _ => Err(NotANumber),
+        _ => Err(BadNumber::NotANumber),
+    }
+}
+
+/// A number as the form shows it, so that [`parse_number`] reads back exactly that number.
+fn editable_number(number: f64) -> String {
+    let text = number.to_string();
+    match parse_number(&text) {
+        // An extra digit takes `12.345` out of the range that could mean thousands.
+        Err(BadNumber::Ambiguous { .. }) => text + "0",
+        _ => text,
     }
 }
 
@@ -929,9 +1081,12 @@ impl State {
         let Some(form) = &mut self.form else {
             return;
         };
-        let Ok(Some(amount)) = parse_number(&form.amount.text) else {
-            form.error = Some("Amount must be a number.");
-            return;
+        let (amount, quantity, price) = match form.numbers() {
+            Ok(numbers) => numbers,
+            Err(error) => {
+                form.error = Some(error);
+                return;
+            }
         };
         let name = text_or_none(&form.name.text);
         let ticker = text_or_none(&form.ticker.text);
@@ -953,13 +1108,6 @@ impl State {
                 );
             }
             None => {
-                let (Ok(quantity), Ok(price)) = (
-                    parse_number(&form.quantity.text),
-                    parse_number(&form.price.text),
-                ) else {
-                    form.error = Some("Quantity and price must be numbers.");
-                    return;
-                };
                 let purchases = quantity
                     .filter(|quantity| *quantity > 0.0)
                     .map(|quantity| CreatePurchaseRequest {
@@ -1398,9 +1546,130 @@ mod tests {
     fn numbers_are_validated_not_coerced() {
         assert_eq!(parse_number(" 1.5 "), Ok(Some(1.5)));
         assert_eq!(parse_number(""), Ok(None));
-        assert_eq!(parse_number("1,5"), Err(NotANumber));
-        assert_eq!(parse_number("NaN"), Err(NotANumber));
-        assert_eq!(parse_number("inf"), Err(NotANumber));
+        assert_eq!(parse_number("   "), Ok(None));
+        for text in [
+            "NaN",
+            "inf",
+            "abc",
+            "-",
+            ".",
+            ",",
+            "1e3",
+            "\u{20ac}150",
+            "150 \u{20ac}",
+            "$150",
+            "1.5x",
+            "\u{661}\u{662}",
+        ] {
+            assert_eq!(parse_number(text), Err(BadNumber::NotANumber), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn numbers_read_the_one_way_they_can() {
+        for (text, wanted) in [
+            ("10", 10.0),
+            ("-3", -3.0),
+            ("+4", 4.0),
+            ("010", 10.0),
+            // A lone mark that can't be separating thousands.
+            ("1,5", 1.5),
+            ("150,00", 150.0),
+            ("1.5", 1.5),
+            ("0.125", 0.125),
+            ("0,125", 0.125),
+            ("00.125", 0.125),
+            (".125", 0.125),
+            (",5", 0.5),
+            ("5.", 5.0),
+            ("1,0000", 1.0),
+            ("1234.567", 1234.567),
+            ("1234,567", 1234.567),
+            ("-1,5", -1.5),
+            // Two marks: the last is the decimal.
+            ("1,000.50", 1000.5),
+            ("1.000,50", 1000.5),
+            ("1,000.500", 1000.5),
+            ("1 000,50", 1000.5),
+            ("1'000.50", 1000.5),
+            ("1,234,567.89", 1234567.89),
+            ("1.234.567,89", 1234567.89),
+            // A repeated or a space-like mark: thousands.
+            ("1,000,000", 1_000_000.0),
+            ("1.000.000", 1_000_000.0),
+            ("01.000.000", 1_000_000.0),
+            ("0100.000.000", 100_000_000.0),
+            ("1 000", 1000.0),
+            ("1\u{a0}000", 1000.0),
+            ("1\u{202f}000", 1000.0),
+            ("1'000", 1000.0),
+        ] {
+            assert_eq!(parse_number(text), Ok(Some(wanted)), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_number_that_could_be_off_by_a_thousand_is_refused() {
+        for (text, thousands, decimal) in [
+            ("1.000", "1000", "1.000"),
+            ("1,000", "1000", "1.000"),
+            ("12.345", "12345", "12.345"),
+            ("123,456", "123456", "123.456"),
+            ("-1.000", "-1000", "-1.000"),
+            // What typing after the form's default 0 produces.
+            ("01.000", "1000", "1.000"),
+            ("0100,000", "100000", "100.000"),
+        ] {
+            let ambiguous = BadNumber::Ambiguous {
+                thousands: thousands.to_string(),
+                decimal: decimal.to_string(),
+            };
+            assert_eq!(parse_number(text), Err(ambiguous), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn malformed_grouping_is_refused() {
+        for text in [
+            "1,00.50",
+            "1.2.3",
+            "1,000.000,5",
+            "1,000,",
+            ",000,000",
+            "1,0000,000",
+            "1000,000,000",
+            "1,5 000",
+            "1 000'000",
+            "1 00",
+            " - 5",
+        ] {
+            assert_eq!(parse_number(text), Err(BadNumber::NotANumber), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn the_form_reads_back_every_number_it_shows() {
+        for number in [
+            0.0,
+            1.0,
+            0.45,
+            12.345,
+            1.5,
+            100.0,
+            123.456,
+            -12.345,
+            999.999,
+            1000.125,
+            30000.0,
+            0.000001,
+            1e21,
+            1234567.891,
+        ] {
+            let shown = editable_number(number);
+            assert_eq!(parse_number(&shown), Ok(Some(number)), "{shown:?}");
+        }
+        assert_eq!(editable_number(12.345), "12.3450");
+        assert_eq!(editable_number(0.125), "0.125");
     }
 
     #[test]

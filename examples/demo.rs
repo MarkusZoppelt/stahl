@@ -78,6 +78,13 @@ fn main() {
                 scene(s, Page::Holdings);
                 s.open_form(None);
             }),
+            ("add-position-invalid", |s| {
+                scene(s, Page::Holdings);
+                s.open_form(None);
+                let form = s.form.as_mut().expect("the form just opened");
+                form.quantity.replace_text("1,000");
+                s.submit_form();
+            }),
             ("welcome", |s| {
                 s.reset();
                 s.settle();
