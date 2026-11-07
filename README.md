@@ -6,6 +6,7 @@ A local-first, native desktop app for [`portfolio_rs`](https://github.com/Markus
 track investment portfolios, see how they got here, run policy-aware reviews, and simulate
 rebalancing. Your data stays in plain files on your own machine. Built in Rust on
 [Rune](https://github.com/anomalyco/rune), with no web view, for macOS, Linux, and Windows.
+See it at [zoppelt.net/stahl](https://zoppelt.net/stahl/).
 
 ![Overview](screenshots/overview.png)
 
@@ -142,6 +143,7 @@ src/icons.rs     Lucide icons
 src/demo.rs      The made-up portfolio for the tests and the demo
 examples/demo.rs The demo, and a named scene for every screen
 assets/          App icons
+site/            The landing page, static and deployed to GitHub Pages
 tests/e2e.rs     End-to-end tests on the real UI
 flake.nix        Reproducible build for macOS, Linux, and NixOS
 ```

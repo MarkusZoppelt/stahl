@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a0f13" />
+    <meta name="color-scheme" content="dark" />
+    <!-- This page may only load from its own origin, and may not talk to anyone at all. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Stahl Capital: a native portfolio app with one client</title>
+    <meta
+      name="description"
+      content="Stahl Capital is a local-first desktop app that tracks your portfolio, reviews it against your own policy, and simulates rebalancing, from plain files on your machine. Native, free and open source, for macOS, Linux and Windows."
+    />
+    <link rel="canonical" href="https://zoppelt.net/stahl/" />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="alternate" type="text/markdown" href="llms.txt" title="llms.txt" />
+    <link rel="preload" href="fonts/newsreader.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="fonts/inter.woff2" as="font" type="font/woff2" crossorigin />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Stahl Capital" />
+    <meta property="og:title" content="Stahl Capital has one client." />
+    <meta property="og:description" content="You. A native, local-first portfolio app. Your data stays in plain files on your machine." />
+    <meta property="og:url" content="https://zoppelt.net/stahl/" />
+    <meta property="og:image" content="https://zoppelt.net/stahl/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="A brushed steel vault door above the words: Stahl Capital has one client." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "Stahl Capital",
+        "description": "A local-first, native desktop app for tracking investment portfolios.",
+        "url": "https://zoppelt.net/stahl/",
+        "applicationCategory": "FinanceApplication",
+        "operatingSystem": "macOS, Linux, Windows",
+        "softwareVersion": "0.2.0",
+        "license": "https://opensource.org/license/mit",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "EUR" },
+        "author": { "@type": "Person", "name": "Markus Zoppelt" }
+      }
+    </script>
+    <link rel="stylesheet" href="style.css" />
+    <script src="door.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <header class="bar">
+      <a class="bar__mark" href="#top" aria-label="Stahl Capital, back to the top">
+        <img src="favicon.svg" alt="" width="26" height="26" />
+        <span>Stahl Capital</span>
+      </a>
+      <nav class="bar__tools" aria-label="Tools">
+        <button class="tool tool--palette" type="button" data-action="palette" aria-label="Open the command palette">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.8-3.8" /></svg>
+          <kbd data-mod-k>⌘K</kbd>
+        </button>
+        <button class="tool" type="button" data-action="privacy" aria-pressed="false" aria-label="Hide amounts" title="Hide amounts (H)">
+          <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z" /><circle cx="12" cy="12" r="3" /></svg>
+          <svg class="eye-shut" viewBox="0 0 24 24" aria-hidden="true"><path d="M10.7 5.1A10.8 10.8 0 0 1 22 12a14 14 0 0 1-2.6 3.4M6.6 6.6A14 14 0 0 0 2 12s3.6 7 10 7a9.700 9.700 0 0 0 5.400-1.600M2 2l20 20M9.900 9.900a3 3 0 0 0 4.200 4.200" /></svg>
+        </button>
+        <a class="tool tool--text" href="https://github.com/MarkusZoppelt/stahl">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="vault" id="top">
+        <div class="stage">
+          <div class="tour" id="tour">
+            <p class="tour__note">
+              <span class="tour__live">Not a mockup.</span> Every frame came out of Stahl’s own renderer, on a made-up portfolio.
+            </p>
+            <figure class="window">
+              <video
+                id="tour-video"
+                muted
+                loop
+                playsinline
+                preload="none"
+                poster="media/overview.webp"
+                width="1980"
+                height="1290"
+                aria-label="A tour of Stahl Capital: Overview, Holdings, Allocation, Performance, Review, Rebalance, Policy, Briefing, the command palette and Hide Amounts."
+              >
+                <source src="media/tour.mp4" type="video/mp4" />
+                <source src="media/tour.webm" type="video/webm" />
+              </video>
+              <img class="window__hidden" id="tour-hidden" alt="The same page with amounts hidden" hidden />
+            </figure>
+            <div class="chapters" id="chapters" role="group" aria-label="Jump to a page in the tour"></div>
+          </div>
+
+          <canvas class="door" id="door" aria-hidden="true"></canvas>
+          <img class="door-still" src="favicon.svg" alt="" width="240" height="240" />
+
+          <div class="hero" id="hero">
+            <h1 class="hero__title">Stahl Capital has one&nbsp;client.</h1>
+            <p class="hero__lede">
+              You. It tracks your portfolio, reviews it against your own policy and simulates rebalancing, all from
+              plain files on your machine. A native app, with no web view and no account.
+            </p>
+            <div class="hero__actions">
+              <a class="btn btn--steel" id="hero-download" href="#account">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14" /></svg>
+                <span id="hero-download-label">Download</span>
+              </a>
+              <button class="copy" type="button" data-copy="nix run github:MarkusZoppelt/stahl" aria-label="Copy the nix run command">
+                <code>nix run github:MarkusZoppelt/stahl</code>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M15 9V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3" /></svg>
+              </button>
+            </div>
+            <p class="hero__small"><span id="hero-small">Version 0.2.0</span>. Free, MIT licensed.<span class="hero__early"> Early, so expect rough edges.</span></p>
+          </div>
+
+          <p class="scrollcue" id="scrollcue" aria-hidden="true">Scroll to open the vault</p>
+        </div>
+      </section>
+
+      <section class="dept" id="vault">
+        <header class="dept__head">
+          <p class="eyebrow">Department 01 <span>The Vault</span></p>
+          <h2>Your data is a text&nbsp;file.</h2>
+          <p class="dept__lede">
+            No proprietary format and no export button to beg for. Positions live in JSON you can read, diff and back
+            up however you already back things up. The same files work with
+            <a href="https://github.com/MarkusZoppelt/portfolio_rs">portfolio_rs</a> in a terminal.
+          </p>
+        </header>
+
+        <div class="ledger">
+          <div class="file">
+            <div class="file__head">
+              <span class="file__name">positions.json</span>
+              <span class="file__actions">
+                <button type="button" class="link" id="file-break">Break it</button>
+                <button type="button" class="link" id="file-restore" hidden>Restore</button>
+              </span>
+            </div>
+            <div class="file__body">
+              <pre class="file__lines" id="file-lines" aria-hidden="true"></pre>
+              <div class="file__edit">
+                <pre class="file__paint" id="file-paint" aria-hidden="true"></pre>
+                <textarea id="file-text" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off" aria-label="A positions file. Edit it and the portfolio updates."></textarea>
+              </div>
+            </div>
+          </div>
+
+          <div class="sketch" aria-live="polite">
+            <div class="sketch__ok" id="sketch-ok">
+              <p class="sketch__label">Total value</p>
+              <p class="sketch__total" id="sketch-total"></p>
+              <div class="alloc" id="sketch-bar" aria-hidden="true"></div>
+              <ul class="classes" id="sketch-classes"></ul>
+            </div>
+            <div class="sketch__bad" id="sketch-bad" hidden>
+              <p class="bad__title">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 2 20h20L12 3ZM12 10v5M12 18h.01" /></svg>
+                This portfolio can’t be read
+              </p>
+              <p class="bad__body">Nothing has been changed. Fix the file in your editor, then reload.</p>
+              <div class="bad__where">
+                <p class="bad__pos" id="bad-pos"></p>
+                <p class="bad__msg" id="bad-msg"></p>
+                <p class="bad__path">~/portfolio/positions.json</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="footnote">
+          Edit the file. Add a line, change an amount, then break it on purpose. A broken file is never shown as an empty
+          portfolio and never overwritten. This is a sketch of that behaviour, written for this page, with the
+          demo’s made-up prices. What you type stays in this tab.
+        </p>
+      </section>
+
+      <section class="dept dept--desk" id="desk">
+        <header class="dept__head">
+          <p class="eyebrow">Department 02 <span>The Trading Desk</span></p>
+          <h2>Permanently closed.</h2>
+          <p class="dept__lede">
+            Rebalance is what-if. It shows what getting back to your targets would take, and it never trades. There are no
+            broker credentials to steal, because there’s nowhere to put them.
+          </p>
+        </header>
+
+        <div class="desk" id="desk-panel">
+          <div class="desk__targets">
+            <p class="desk__title">If my targets were</p>
+            <div id="desk-sliders"></div>
+          </div>
+          <div class="desk__result">
+            <p class="desk__title">Allocation today</p>
+            <div class="alloc" id="desk-today" aria-hidden="true"></div>
+            <p class="desk__title">Allocation afterwards</p>
+            <div class="alloc" id="desk-after" aria-hidden="true"></div>
+            <table class="moves">
+              <thead><tr><th>Asset class</th><th>Action</th><th class="num">Amount</th></tr></thead>
+              <tbody id="desk-moves"></tbody>
+            </table>
+            <button class="btn btn--danger" type="button" id="desk-trade">Place these trades</button>
+          </div>
+          <div class="shutter" id="desk-shutter" aria-hidden="true">
+            <div class="shutter__sign">
+              <p class="shutter__closed">Closed</p>
+              <p>This desk has never opened. Stahl simulates. You trade, at your broker, or you don’t.</p>
+              <button class="btn btn--ghost" type="button" id="desk-reopen" tabindex="-1">Understood</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="dept" id="compliance">
+        <header class="dept__head">
+          <p class="eyebrow">Department 03 <span>Compliance</span></p>
+          <h2>A policy you wrote, enforced by someone with no&nbsp;opinions.</h2>
+          <p class="dept__lede">
+            Put your targets and limits in a machine-readable policy once. Review then checks drift, constraints and data
+            quality against it every time, and tells you what needs doing. Policy and Review live in a workspace, which is
+            a folder like any other.
+          </p>
+        </header>
+        <div class="memo">
+          <figure class="shot shot--wide">
+            <img data-page="review" src="media/review.webp" width="1980" height="1290" loading="lazy" alt="Stahl's Review page: one of five asset classes within tolerance, with findings for Stocks, Crypto, Bonds and Cash." />
+          </figure>
+          <pre class="policy" tabindex="0" aria-label="An excerpt of policy.toml"><code><span class="c"># portfolio/policy.toml</span>
+<span class="k">name</span> = <span class="s">"Balanced Growth"</span>
+<span class="k">risk_profile</span> = <span class="s">"moderate"</span>
+
+<span class="h">[constraints]</span>
+<span class="k">minimum_cash_amount</span> = <span class="n">20000.0</span>
+<span class="k">single_position_limit_percent</span> = <span class="n">40.0</span>
+
+<span class="h">[[allocations]]</span>
+<span class="k">asset_class</span> = <span class="s">"Stocks"</span>
+<span class="k">target_percent</span> = <span class="n">50.0</span>
+<span class="k">tolerance_percent</span> = <span class="n">5.0</span></code></pre>
+        </div>
+      </section>
+
+      <section class="dept" id="analysts">
+        <header class="dept__head">
+          <p class="eyebrow">Department 04 <span>The Analysts</span></p>
+          <h2>They work weekends. They bill&nbsp;nothing.</h2>
+        </header>
+        <div class="tiles">
+          <figure class="tile tile--a">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge Performance"><img data-page="performance" src="media/performance.webp" width="1980" height="1290" loading="lazy" alt="The Performance page: value over time with time-weighted return." /></button>
+            <figcaption><b>Performance.</b> Time-weighted return that separates what the market did from the money you added.</figcaption>
+          </figure>
+          <figure class="tile tile--b">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge Allocation"><img data-page="allocation" src="media/allocation.webp" width="1980" height="1290" loading="lazy" alt="The Allocation page: a donut with policy targets as an outer ring." /></button>
+            <figcaption><b>Allocation.</b> Your policy’s targets as a ring around today’s split.</figcaption>
+          </figure>
+          <figure class="tile tile--c">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge Holdings"><img data-page="holdings" src="media/holdings.webp" width="1980" height="1290" loading="lazy" alt="The Holdings page: a sortable table of positions." /></button>
+            <figcaption><b>Holdings.</b> Sortable and searchable, with cost basis and purchases one click away.</figcaption>
+          </figure>
+          <figure class="tile tile--d">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge Briefing"><img data-page="briefing" src="media/briefing.webp" width="1980" height="1290" loading="lazy" alt="The Briefing page: the summary an advisor would ask for." /></button>
+            <figcaption><b>Briefing.</b> The summary an advisor would ask for. Copy it as Markdown for the AI assistant you trust, or keep it to yourself.</figcaption>
+          </figure>
+          <figure class="tile tile--e">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge Data Health"><img data-page="health" src="media/health.webp" width="1980" height="1290" loading="lazy" alt="The Data Health page: file validation and data quality findings." /></button>
+            <figcaption><b>Data Health.</b> File validation, data-quality findings and workspace checks.</figcaption>
+          </figure>
+          <figure class="tile tile--f">
+            <button type="button" class="tile__view" data-zoom aria-label="Enlarge the light theme"><img src="media/light.webp" width="1980" height="1290" loading="lazy" alt="Stahl's Overview in its light theme." /></button>
+            <figcaption><b>Light and dark.</b> For the morning meeting, which is you, with coffee.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="dept dept--discretion" id="discretion">
+        <p class="eyebrow">Department 05 <span>Client Discretion</span></p>
+        <p class="big-amount" aria-label="Your total value">
+          <span class="amt" data-amount="107400">€107,400.00</span>
+        </p>
+        <h2>Press <button class="key" type="button" data-action="privacy" aria-label="Hide or show amounts">H</button> before you share your&nbsp;screen.</h2>
+        <p class="dept__lede">
+          In the app it’s <kbd>⌘⇧H</kbd>. Here it works on the whole page, including the footage above, which swaps to
+          real renders with amounts hidden.
+        </p>
+        <ul class="natives">
+          <li><kbd data-mod-k>⌘K</kbd> A command palette that also finds your holdings. It works on this page too.</li>
+          <li><kbd>⌘1</kbd><kbd>⌘0</kbd> A shortcut for every page. Ctrl stands in on Linux and Windows.</li>
+          <li><b>No web view.</b> Rust, drawn with <a href="https://github.com/anomalyco/rune">Rune</a>. The macOS installer is about 12&nbsp;MB.</li>
+          <li><b>Encrypted portfolios.</b> <code>.gpg</code> files are never recorded in history, because that would put their values on disk in plaintext.</li>
+        </ul>
+      </section>
+
+      <section class="terms" id="terms">
+        <article class="letter">
+          <header class="letter__head">
+            <img src="favicon.svg" alt="" width="52" height="52" />
+            <p>Stahl Capital<br /><span>~/portfolio</span></p>
+          </header>
+          <div class="letter__body">
+            <p class="letter__salute">Dear client,</p>
+            <p>
+              We don’t know your name, and we don’t know what you own. Nobody here can find out, because there is no
+              here. Stahl Capital is a program on your computer, and the firm’s entire records are files you can open in a
+              text editor.
+            </p>
+            <p>So that you needn’t take our word for it, this is everything that leaves your machine:</p>
+            <ol>
+              <li><b>Your tickers, to Yahoo Finance,</b> to fetch prices. Set <code>PORTFOLIO_RS_QUOTES=offline</code> and that stops too.</li>
+              <li><b>Whatever you send an AI provider,</b> if you add one in Settings. There’s none by default.</li>
+            </ol>
+            <p>
+              There’s no account and no telemetry, and the <a href="https://github.com/MarkusZoppelt/stahl">source</a> is
+              there to check. This page holds itself to the same standard: no analytics or cookies, and its
+              content security policy forbids it from contacting anyone.
+            </p>
+            <p class="letter__close">Yours, discreetly,<br /><i>Stahl Capital</i></p>
+          </div>
+
+          <div class="fees">
+            <h2>Schedule of fees</h2>
+            <table>
+              <tbody>
+                <tr><th scope="row">Management fee</th><td>0.00%</td></tr>
+                <tr><th scope="row">Performance fee</th><td>0.00%</td></tr>
+                <tr><th scope="row">Minimum investment</th><td>None</td></tr>
+                <tr><th scope="row">Assets under management</th><td>We can’t know</td></tr>
+                <tr><th scope="row">Clients</th><td>1</td></tr>
+                <tr><th scope="row">Accounts to open</th><td>0</td></tr>
+                <tr><th scope="row">Licence</th><td>MIT</td></tr>
+              </tbody>
+            </table>
+            <p class="fees__fine">
+              The small print, plainly: Stahl Capital is software, not a bank, a broker or an adviser, and it holds nothing
+              for anyone. Nothing it shows is investment advice. It is early software, so check its numbers before you act
+              on them.
+            </p>
+          </div>
+        </article>
+      </section>
+
+      <section class="account" id="account">
+        <h2>Open your account.</h2>
+        <p class="dept__lede">There’s no form. It’s a download.</p>
+        <div class="install">
+          <div class="install__tabs" role="tablist" aria-label="Operating system">
+            <button type="button" role="tab" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
+            <button type="button" role="tab" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1">Linux</button>
+            <button type="button" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1">Windows</button>
+          </div>
+
+          <div class="install__panel" role="tabpanel" id="panel-mac" aria-labelledby="tab-mac">
+            <div class="row">
+              <span class="row__label">Download</span>
+              <span class="row__value">Disk image for Apple silicon</span>
+              <a class="row__go" href="https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-macos-arm64.dmg">.dmg</a>
+            </div>
+            <div class="row">
+              <span class="row__label">Nix</span>
+              <code class="row__value">nix run github:MarkusZoppelt/stahl</code>
+              <button class="row__go" type="button" data-copy="nix run github:MarkusZoppelt/stahl">Copy</button>
+            </div>
+            <p class="install__note">Not notarized yet, so on first launch, right-click the app and choose Open.</p>
+          </div>
+
+          <div class="install__panel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" hidden>
+            <div class="row">
+              <span class="row__label">Download</span>
+              <span class="row__value">Debian or Ubuntu package, x64</span>
+              <a class="row__go" href="https://github.com/MarkusZoppelt/stahl/releases/download/v0.2.0/stahl_0.2.0_amd64.deb">.deb</a>
+            </div>
+            <div class="row">
+              <span class="row__label">Nix</span>
+              <code class="row__value">nix run github:MarkusZoppelt/stahl</code>
+              <button class="row__go" type="button" data-copy="nix run github:MarkusZoppelt/stahl">Copy</button>
+            </div>
+            <p class="install__note">Needs a Vulkan driver. Dropping files on the window doesn’t work on Wayland yet.</p>
+          </div>
+
+          <div class="install__panel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" hidden>
+            <div class="row">
+              <span class="row__label">Download</span>
+              <span class="row__value">Zip archive, x64</span>
+              <a class="row__go" href="https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-windows-x64.zip">.zip</a>
+            </div>
+            <div class="row">
+              <span class="row__label">Source</span>
+              <span class="row__value">Build it yourself with rustup</span>
+              <a class="row__go" href="https://github.com/MarkusZoppelt/stahl#without-nix">Guide</a>
+            </div>
+          </div>
+        </div>
+        <p class="install__all"><a href="https://github.com/MarkusZoppelt/stahl/releases">All releases</a></p>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <p><i>Stahl</i> is German for steel.</p>
+      <p>
+        Built on <a href="https://github.com/MarkusZoppelt/portfolio_rs">portfolio_rs</a> and
+        <a href="https://github.com/anomalyco/rune">Rune</a>. <a href="https://github.com/MarkusZoppelt/stahl">Source</a>, MIT.
+        By <a href="https://zoppelt.net">Markus Zoppelt</a>.
+      </p>
+      <p class="foot__legal">
+        A tool, not a bank, broker or adviser. Not investment advice.
+        <a href="impressum.html">Impressum und Datenschutz</a>
+      </p>
+    </footer>
+
+    <dialog class="palette" id="palette" aria-label="Command palette">
+      <div class="palette__search">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.800-3.800" /></svg>
+        <input id="palette-input" type="text" placeholder="Search this page, actions and holdings..." autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-label="Search" />
+      </div>
+      <div class="palette__list" id="palette-list" role="listbox"></div>
+    </dialog>
+
+    <dialog class="zoom" id="zoom" aria-label="Enlarged screenshot">
+      <img id="zoom-img" alt="" />
+    </dialog>
+
+    <div class="toast" id="toast" role="status"></div>
+  </body>
+</html>

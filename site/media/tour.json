@@ -1,0 +1,40 @@
+[
+  { "t": 0.0, "type": "mark", "name": "overview" },
+  { "t": 2.7, "type": "move", "x": 560, "y": 260 },
+  { "t": 3.3, "type": "move", "x": 760, "y": 250 },
+  { "t": 3.9, "type": "move", "x": 980, "y": 240 },
+
+  { "t": 4.6, "type": "mark", "name": "holdings" },
+  { "t": 4.6, "type": "tap", "key": "nav-holdings" },
+  { "t": 6.6, "type": "tap", "x": 500, "y": 220 },
+
+  { "t": 9.2, "type": "mark", "name": "allocation" },
+  { "t": 9.2, "type": "tap", "key": "nav-allocation" },
+
+  { "t": 12.4, "type": "mark", "name": "performance" },
+  { "t": 12.4, "type": "tap", "key": "nav-performance" },
+
+  { "t": 15.6, "type": "mark", "name": "review" },
+  { "t": 15.6, "type": "tap", "key": "nav-review" },
+
+  { "t": 18.8, "type": "mark", "name": "rebalance" },
+  { "t": 18.8, "type": "tap", "key": "nav-rebalance" },
+
+  { "t": 22.0, "type": "mark", "name": "policy" },
+  { "t": 22.0, "type": "tap", "key": "nav-policy" },
+
+  { "t": 24.8, "type": "mark", "name": "briefing" },
+  { "t": 24.8, "type": "tap", "key": "nav-briefing" },
+
+  { "t": 27.6, "type": "mark", "name": "palette" },
+  { "t": 27.6, "type": "tap", "key": "nav-overview" },
+  { "t": 28.8, "type": "key", "name": "k", "cmd": true },
+  { "t": 29.6, "type": "type", "text": "gold", "every": 0.12 },
+  { "t": 31.0, "type": "key", "name": "Escape" },
+
+  { "t": 31.6, "type": "mark", "name": "discretion" },
+  { "t": 31.8, "type": "key", "name": "h", "cmd": true, "shift": true },
+  { "t": 33.8, "type": "key", "name": "h", "cmd": true, "shift": true },
+
+  { "t": 35.4, "type": "mark", "name": "end" }
+]
