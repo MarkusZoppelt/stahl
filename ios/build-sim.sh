@@ -31,6 +31,14 @@ out="$target_dir/$target/$profile/Stahl.app"
 rm -rf "$out"
 mkdir -p "$out"
 cp "$here/Shell/Info.plist" "$out/Info.plist"
+# The door the app switcher's cover shows: the same as the app's mark.
+cp "$here/../assets/door.png" "$out/door.png"
+# The icon and the launch screen's colour, compiled as Xcode would, with the icon's keys merged in.
+partial="$(mktemp -d)/assets.plist"
+xcrun actool "$here/Shell/Assets.xcassets" --compile "$out" --platform iphonesimulator \
+  --minimum-deployment-target "$IPHONEOS_DEPLOYMENT_TARGET" --target-device iphone --target-device ipad \
+  --app-icon AppIcon --output-partial-info-plist "$partial" >/dev/null
+/usr/libexec/PlistBuddy -c "Merge $partial" "$out/Info.plist" >/dev/null
 xcrun -sdk iphonesimulator swiftc \
   -target "arm64-apple-ios$IPHONEOS_DEPLOYMENT_TARGET-simulator" \
   -module-name Stahl -parse-as-library \

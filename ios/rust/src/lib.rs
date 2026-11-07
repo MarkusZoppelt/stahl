@@ -4,46 +4,106 @@
 
 use std::{
     env,
-    ffi::{CStr, c_char, c_void},
+    ffi::{CStr, CString, c_char, c_void},
     path::{Path, PathBuf},
     ptr,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::Instant,
 };
 
 use portfolio_rs::config::AppConfig;
 use rune::{
-    GesturePhase, Key, KeyEvent, Mods, TouchPhase, WheelEvent, color::srgb_encode, embed::LayerHost,
+    GesturePhase, Key, KeyEvent, Mods, TouchPhase, WheelEvent,
+    clipboard::{self, MemoryClipboard},
+    color::srgb_encode,
+    embed::LayerHost,
 };
 use stahl::{
     app,
     backend::Backend,
     demo,
-    state::{PickKind, State},
+    state::{Page, PickKind, State},
     theme::Theme,
 };
 use tokio::runtime::{Builder, Runtime};
 
-/// `stahl_ios_tick` presented a frame.
+// What `stahl_ios_tick` tells the shell, as bits. The same numbers are in `stahl.h`.
+/// A frame was presented.
 pub const TICK_DREW: u32 = 1;
 /// A text field has focus: the shell should show the keyboard.
 pub const TICK_WANTS_KEYBOARD: u32 = 2;
+/// The app wants a file picked: present a document picker for one.
+pub const TICK_PICK_FILE: u32 = 4;
+/// The app wants a folder picked.
+pub const TICK_PICK_FOLDER: u32 = 8;
+/// The field with focus is a secret: the keyboard should hide what's typed.
+pub const TICK_SECURE: u32 = 16;
+/// The field with focus takes a number: a keyboard of digits.
+pub const TICK_NUMBER: u32 = 32;
+/// The app copied something: `stahl_ios_take_copied` has it for the system pasteboard.
+pub const TICK_COPIED: u32 = 64;
+/// Somewhere else now: a page, a tab, a holding. A selection haptic.
+pub const TICK_HAPTIC_SELECT: u32 = 128;
+/// Something worked: a toast came up. A success haptic.
+pub const TICK_HAPTIC_SUCCESS: u32 = 256;
+/// Something failed: an error came up. A warning haptic.
+pub const TICK_HAPTIC_WARNING: u32 = 512;
+/// The vault's door turned. A heavy, rigid knock.
+pub const TICK_HAPTIC_TURN: u32 = 1024;
 
 pub struct Host {
     host: LayerHost<State>,
     /// Set by the backend's waker and by input: the next tick has work to do.
     dirty: Arc<AtomicBool>,
     animating: bool,
+    /// iOS has no clipboard Rune can reach: the app copies here, and the shell moves it on.
+    clipboard: MemoryClipboard,
+    copied: Option<String>,
+    seen: Seen,
     /// Last, so the runtime is dropped after the state whose work runs on it.
     _tokio: Runtime,
 }
 
-/// `stahl_ios_tick` wants a file picked: present a document picker for one.
-pub const TICK_PICK_FILE: u32 = 4;
-/// `stahl_ios_tick` wants a folder picked.
-pub const TICK_PICK_FOLDER: u32 = 8;
+/// What the haptics follow, as of the last tick.
+#[derive(Clone, PartialEq, Default)]
+struct Seen {
+    place: (Option<Page>, bool, Option<usize>),
+    toast: Option<Instant>,
+    error: Option<String>,
+    door_turns: u32,
+}
+
+impl Seen {
+    fn of(state: &State) -> Seen {
+        Seen {
+            place: (Some(state.page), state.more, state.selected),
+            toast: state.toast.as_ref().map(|(_, at)| *at),
+            error: state.error.clone(),
+            door_turns: state.door_turns,
+        }
+    }
+
+    /// The haptics for going from `self` to `now`.
+    fn haptics(&self, now: &Seen) -> u32 {
+        let mut flags = 0;
+        if self.place.0.is_some() && self.place != now.place {
+            flags |= TICK_HAPTIC_SELECT;
+        }
+        if now.toast.is_some() && now.toast != self.toast {
+            flags |= TICK_HAPTIC_SUCCESS;
+        }
+        if now.error.is_some() && now.error != self.error {
+            flags |= TICK_HAPTIC_WARNING;
+        }
+        if now.door_turns != self.door_turns {
+            flags |= TICK_HAPTIC_TURN;
+        }
+        flags
+    }
+}
 
 /// The demo workspace, seeded into the app's Documents on first launch.
 fn demo_workspace(documents: &Path) -> PathBuf {
@@ -158,12 +218,19 @@ pub unsafe extern "C" fn stahl_ios_new(
         )
     };
     match host {
-        Ok(host) => Box::into_raw(Box::new(Host {
-            host,
-            dirty,
-            animating: true,
-            _tokio: tokio,
-        })),
+        Ok(mut host) => {
+            let clipboard = clipboard::memory();
+            host.runtime_mut().use_clipboard(&clipboard);
+            Box::into_raw(Box::new(Host {
+                host,
+                dirty,
+                animating: true,
+                clipboard,
+                copied: None,
+                seen: Seen::default(),
+                _tokio: tokio,
+            }))
+        }
         Err(error) => {
             eprintln!("stahl: could not start: {error}");
             ptr::null_mut()
@@ -200,15 +267,133 @@ pub unsafe extern "C" fn stahl_ios_tick(host_ptr: *mut Host) -> u32 {
             flags |= TICK_DREW;
         }
     }
-    if h.host.runtime().ime_area.is_some() && !h.host.runtime().has_secure_focus() {
+    let rt = h.host.runtime();
+    // Rune leaves a secret field out of the IME, but it still needs a keyboard.
+    if rt.has_secure_focus() {
+        flags |= TICK_WANTS_KEYBOARD | TICK_SECURE;
+    } else if rt.ime_area.is_some() {
         flags |= TICK_WANTS_KEYBOARD;
+        if rt.state.number_focused() {
+            flags |= TICK_NUMBER;
+        }
     }
+    let seen = Seen::of(&rt.state);
+    flags |= h.seen.haptics(&seen);
+    h.seen = seen;
+    let copied = h.clipboard.text().map(|text| text.to_string());
+    if copied.is_some() && copied != h.copied {
+        flags |= TICK_COPIED;
+    }
+    h.copied = copied;
     match h.host.runtime_mut().state.take_pick() {
         Some((PickKind::File, _)) => flags |= TICK_PICK_FILE,
         Some((PickKind::Folder, _)) => flags |= TICK_PICK_FOLDER,
         None => {}
     }
     flags
+}
+
+/// What the app last copied, for the system pasteboard: a string to free with
+/// [`stahl_ios_free_string`], or null.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_take_copied(host_ptr: *mut Host) -> *mut c_char {
+    host(host_ptr)
+        .copied
+        .as_deref()
+        .and_then(|text| CString::new(text).ok())
+        .map_or(ptr::null_mut(), CString::into_raw)
+}
+
+/// # Safety
+/// `text` must come from this library, and not be used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_free_string(text: *mut c_char) {
+    if !text.is_null() {
+        drop(unsafe { CString::from_raw(text) });
+    }
+}
+
+/// Text pasted from the system pasteboard, into the field with focus.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`], and `text` be NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_paste(host_ptr: *mut Host, text: *const c_char) {
+    let text = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned();
+    let h = host(host_ptr);
+    h.host.runtime_mut().paste(text);
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// The app is going to the background: save unsaved edits, since iOS may end it there without
+/// asking. Returns whether a save started.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_backgrounded(host_ptr: *mut Host) -> bool {
+    let h = host(host_ptr);
+    let mut saving = false;
+    h.host.runtime_mut().update(|state, _| {
+        if state.dirty {
+            state.save();
+            saving = true;
+        }
+    });
+    saving
+}
+
+/// The app is back: prices that went stale while it was away refresh.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_foregrounded(host_ptr: *mut Host) {
+    let h = host(host_ptr);
+    h.host
+        .runtime_mut()
+        .update(|state, _| state.refresh_if_stale());
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// A software keyboard came up over the app, or went away.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_set_keyboard(host_ptr: *mut Host, up: bool) {
+    let h = host(host_ptr);
+    if h.host.runtime().state.keyboard != up {
+        h.host.runtime_mut().update(|state, _| state.keyboard = up);
+        h.dirty.store(true, Ordering::Release);
+    }
+}
+
+/// The phone was shaken: the amounts hide, or show again.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_shake(host_ptr: *mut Host) {
+    let h = host(host_ptr);
+    h.host.runtime_mut().update(|state, _| state.shaken());
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// The system's Reduce Motion setting.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_set_reduced_motion(host_ptr: *mut Host, reduced: bool) {
+    let h = host(host_ptr);
+    h.host.runtime_mut().set_system_reduced_motion(reduced);
+    h.dirty.store(true, Ordering::Release);
 }
 
 /// The document picker answered: a path the shell has security-scoped access to, or null when it
@@ -291,7 +476,13 @@ pub unsafe extern "C" fn stahl_ios_touch(
         _ => TouchPhase::Cancelled,
     };
     let h = host(host_ptr);
-    h.host.runtime_mut().touch(id, phase, x, y, time);
+    let rt = h.host.runtime_mut();
+    rt.touch(id, phase, x, y, time);
+    // A finger on a chart reads it out as a pointer hovering there would, until it lifts.
+    match phase {
+        TouchPhase::Started | TouchPhase::Moved => rt.pointer_move(x, y),
+        TouchPhase::Ended | TouchPhase::Cancelled => rt.pointer_leave(),
+    }
     h.dirty.store(true, Ordering::Release);
 }
 

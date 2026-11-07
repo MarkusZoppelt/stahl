@@ -6,12 +6,21 @@
 
 typedef struct StahlHost StahlHost;
 
+// What stahl_ios_tick says, as bits: see the TICK_ constants in ios/rust/src/lib.rs.
 enum {
     STAHL_TICK_DREW = 1,
     STAHL_TICK_WANTS_KEYBOARD = 2,
     // The app asks for a file or a folder: present a document picker, then call stahl_ios_picked.
     STAHL_TICK_PICK_FILE = 4,
     STAHL_TICK_PICK_FOLDER = 8,
+    STAHL_TICK_SECURE = 16,
+    STAHL_TICK_NUMBER = 32,
+    // The app copied something: stahl_ios_take_copied has it.
+    STAHL_TICK_COPIED = 64,
+    STAHL_TICK_HAPTIC_SELECT = 128,
+    STAHL_TICK_HAPTIC_SUCCESS = 256,
+    STAHL_TICK_HAPTIC_WARNING = 512,
+    STAHL_TICK_HAPTIC_TURN = 1024,
 };
 
 StahlHost *stahl_ios_new(void *metal_layer, const char *documents, float width, float height,
@@ -39,3 +48,15 @@ void stahl_ios_hover(StahlHost *host, float x, float y, bool inside);
 void stahl_ios_scroll(StahlHost *host, float x, float y, float dx, float dy, uint32_t phase);
 void stahl_ios_insert_text(StahlHost *host, const char *text);
 void stahl_ios_delete_backward(StahlHost *host);
+
+// What the app last copied, to free with stahl_ios_free_string; NULL if nothing.
+char *stahl_ios_take_copied(StahlHost *host);
+void stahl_ios_free_string(char *text);
+void stahl_ios_paste(StahlHost *host, const char *text);
+// The app goes to the background: unsaved edits are saved. Returns whether a save started.
+bool stahl_ios_backgrounded(StahlHost *host);
+void stahl_ios_foregrounded(StahlHost *host);
+void stahl_ios_shake(StahlHost *host);
+void stahl_ios_set_reduced_motion(StahlHost *host, bool reduced);
+// A software keyboard covers the bottom of the app, or no longer does.
+void stahl_ios_set_keyboard(StahlHost *host, bool up);

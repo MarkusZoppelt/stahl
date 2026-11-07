@@ -30,22 +30,39 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         self.window = window
     }
 
-    func sceneDidEnterBackground(_ scene: UIScene) { runeView(scene)?.paused = true }
-    func sceneWillEnterForeground(_ scene: UIScene) { runeView(scene)?.paused = false }
+    // The app switcher shows a snapshot taken as the app resigns: a portfolio's balances shouldn't
+    // be in it, so the vault closes first.
+    func sceneWillResignActive(_ scene: UIScene) { controller?.closeVault() }
+    func sceneDidBecomeActive(_ scene: UIScene) { controller?.openVault() }
 
-    private func runeView(_ scene: UIScene) -> RuneView? {
-        (window?.rootViewController as? RuneViewController)?.rune
+    func sceneDidEnterBackground(_ scene: UIScene) {
+        controller?.rune.enteredBackground()
+        controller?.rune.paused = true
+    }
+
+    func sceneWillEnterForeground(_ scene: UIScene) {
+        controller?.rune.paused = false
+        controller?.rune.enteringForeground()
+    }
+
+    private var controller: RuneViewController? {
+        window?.rootViewController as? RuneViewController
     }
 }
 
 final class RuneViewController: UIViewController {
     let rune = RuneView()
+    private let vault = VaultCover()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         // Until Rune reads safe-area insets, keep the app inside them.
         view.backgroundColor = .black
-        rune.onBackground = { [weak self] color in self?.view.backgroundColor = color }
+        rune.onBackground = { [weak self] color in
+            self?.view.backgroundColor = color
+            self?.vault.backgroundColor = color
+            self?.setNeedsStatusBarAppearanceUpdate()
+        }
         rune.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(rune)
         let guide = view.safeAreaLayoutGuide
@@ -56,6 +73,38 @@ final class RuneViewController: UIViewController {
             rune.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ])
         rune.onTypingDone = { [weak self] in self?.becomeFirstResponder() }
+        vault.frame = view.bounds
+        vault.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        vault.isHidden = true
+        view.addSubview(vault)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(keyboardMoved),
+            name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+    }
+
+    /// A software keyboard covering much of the screen hides the phone's tab bar. A hardware
+    /// keyboard's thin bar on an iPad doesn't count.
+    @objc private func keyboardMoved(_ note: Notification) {
+        guard let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else {
+            return
+        }
+        let overlap = view.bounds.intersection(view.convert(frame, from: nil)).height
+        rune.keyboardCovers(overlap > 120)
+    }
+
+    /// Light text on the steel wall, dark on paper.
+    override var preferredStatusBarStyle: UIStatusBarStyle {
+        var white: CGFloat = 0
+        view.backgroundColor?.getWhite(&white, alpha: nil)
+        return white < 0.5 ? .lightContent : .darkContent
+    }
+
+    func closeVault() { vault.close() }
+    func openVault() { vault.open() }
+
+    // Shaking the phone hides the amounts, or shows them again.
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        if motion == .motionShake { rune.shaken() } else { super.motionEnded(motion, with: event) }
     }
 
     // First responder whenever no field has focus, so a hardware keyboard's shortcuts reach the
@@ -111,6 +160,8 @@ final class RuneView: UIView, UIKeyInput {
         guard window != nil, host == nil else { return }
         // Before Stahl starts, so it can reopen the portfolio it last opened.
         Access.restore()
+        // "On My iPhone" or "On My iPad", as Files says it.
+        setenv("STAHL_DEVICE", UIDevice.current.model, 0)
         layer.contentsScale = scale
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dark = traitCollection.userInterfaceStyle == .dark
@@ -131,6 +182,16 @@ final class RuneView: UIView, UIKeyInput {
         scroll.allowedScrollTypesMask = .all
         scroll.allowedTouchTypes = []
         addGestureRecognizer(scroll)
+        let menu = UIEditMenuInteraction(delegate: nil)
+        addInteraction(menu)
+        editMenu = menu
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(showEditMenu))
+        press.cancelsTouchesInView = false
+        addGestureRecognizer(press)
+        updateReducedMotion()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(updateReducedMotion),
+            name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
         let link = CADisplayLink(target: self, selector: #selector(tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
@@ -142,7 +203,7 @@ final class RuneView: UIView, UIKeyInput {
 
     /// Plays input for checking the app in a simulator, which `simctl` can't tap: `wait 1;
     /// tap 30 200; drag 200 600 200 200; type Apple; delete; key cmd k; key escape;
-    /// hover 300 400; scroll 300 400 -200`, in view points.
+    /// hover 300 400; scroll 300 400 -200; pick /path; shake; vault; unvault`, in view points.
     private func play(_ script: String) {
         var at = 1.0
         var id: UInt64 = 1_000
@@ -212,6 +273,22 @@ final class RuneView: UIView, UIKeyInput {
                     }
                 }
                 at += 1
+            case _ where ["down", "move", "up"].contains(verb) && numbers.count == 2:
+                // One finger held across steps, for scrubbing a chart: `down`, `move`s, `up`.
+                let (x, y) = (numbers[0], numbers[1])
+                let phase: UInt32 = verb == "down" ? 0 : (verb == "move" ? 1 : 2)
+                later(at) { stahl_ios_touch($0, 7, phase, x, y, CACurrentMediaTime()) }
+                at += 0.3
+            case "shake":
+                later(at) { stahl_ios_shake($0) }
+                at += 0.6
+            case "vault", "unvault":
+                // The app switcher's cover, closed or opening, as resigning and returning do.
+                later(at) { [weak self] _ in
+                    let controller = self?.window?.rootViewController as? RuneViewController
+                    if verb == "vault" { controller?.closeVault() } else { controller?.openVault() }
+                }
+                at += 0.6
             case "hover" where numbers.count == 2:
                 let (x, y) = (numbers[0], numbers[1])
                 later(at) { stahl_ios_hover($0, x, y, true) }
@@ -238,6 +315,44 @@ final class RuneView: UIView, UIKeyInput {
         stahl_ios_resize(host, Float(bounds.width), Float(bounds.height), Float(scale))
     }
 
+    @objc private func updateReducedMotion() {
+        guard let host else { return }
+        stahl_ios_set_reduced_motion(host, UIAccessibility.isReduceMotionEnabled)
+    }
+
+    /// The app is leaving the screen: save what's unsaved, with time from iOS to finish.
+    func enteredBackground() {
+        guard let host else { return }
+        let task = BackgroundTask()
+        guard stahl_ios_backgrounded(host) else { return task.end() }
+        // The save runs on Stahl's own threads; a few seconds is plenty for a file.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { task.end() }
+    }
+
+    func enteringForeground() {
+        guard let host else { return }
+        stahl_ios_foregrounded(host)
+    }
+
+    func keyboardCovers(_ up: Bool) {
+        guard let host else { return }
+        stahl_ios_set_keyboard(host, up)
+    }
+
+    func shaken() {
+        guard let host else { return }
+        stahl_ios_shake(host)
+    }
+
+    /// The app's background now, for the status bar and what's behind the safe area.
+    var appBackground: UIColor? {
+        background.map {
+            UIColor(
+                red: CGFloat(($0 >> 16) & 0xFF) / 255, green: CGFloat(($0 >> 8) & 0xFF) / 255,
+                blue: CGFloat($0 & 0xFF) / 255, alpha: 1)
+        }
+    }
+
     /// The phone layout wherever UIKit lays out for a narrow width: an iPhone, or an iPad in a
     /// narrow split.
     private func updateCompact() {
@@ -252,16 +367,25 @@ final class RuneView: UIView, UIKeyInput {
             let rgb = stahl_ios_background(host)
             if rgb != background {
                 background = rgb
-                onBackground?(
-                    UIColor(
-                        red: CGFloat((rgb >> 16) & 0xFF) / 255,
-                        green: CGFloat((rgb >> 8) & 0xFF) / 255,
-                        blue: CGFloat(rgb & 0xFF) / 255, alpha: 1))
+                if let color = appBackground {
+                    var white: CGFloat = 0
+                    color.getWhite(&white, alpha: nil)
+                    keyboardAppearance = white < 0.5 ? .dark : .light
+                    onBackground?(color)
+                }
             }
         }
         if flags & UInt32(STAHL_TICK_PICK_FILE | STAHL_TICK_PICK_FOLDER) != 0 {
             pick(folder: flags & UInt32(STAHL_TICK_PICK_FOLDER) != 0)
         }
+        if flags & UInt32(STAHL_TICK_COPIED) != 0, let copied = stahl_ios_take_copied(host) {
+            UIPasteboard.general.string = String(cString: copied)
+            stahl_ios_free_string(copied)
+        }
+        Haptics.play(flags)
+        updateTraits(
+            secure: flags & UInt32(STAHL_TICK_SECURE) != 0,
+            number: flags & UInt32(STAHL_TICK_NUMBER) != 0)
         let wants = flags & UInt32(STAHL_TICK_WANTS_KEYBOARD) != 0
         if wants != wantsKeyboard {
             wantsKeyboard = wants
@@ -278,10 +402,8 @@ final class RuneView: UIView, UIKeyInput {
     private func pick(folder: Bool) {
         var controller = window?.rootViewController
         while let presented = controller?.presentedViewController { controller = presented }
-        guard let host, let controller else {
-            if let host { stahl_ios_picked(host, nil) }
-            return
-        }
+        guard let host else { return }
+        guard let controller else { return stahl_ios_picked(host, nil) }
         picker.present(folder: folder, from: controller) { [weak self] path in
             guard let self, let host = self.host else { return }
             if let path {
@@ -342,6 +464,8 @@ final class RuneView: UIView, UIKeyInput {
             if flags.contains(.command),
                 let character = key.charactersIgnoringModifiers.lowercased().unicodeScalars.first
             {
+                // While typing, ⌘V is UIKit's paste, which reads the pasteboard without asking.
+                if typing, character == "v" { continue }
                 stahl_ios_key(host, UInt32(STAHL_KEY_CHORD), character.value, mods)
                 taken = true
                 continue
@@ -395,6 +519,43 @@ final class RuneView: UIView, UIKeyInput {
     var hasText: Bool { true }
     var autocorrectionType: UITextAutocorrectionType = .no
     var autocapitalizationType: UITextAutocapitalizationType = .none
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var smartQuotesType: UITextSmartQuotesType = .no
+    var smartDashesType: UITextSmartDashesType = .no
+    var keyboardType: UIKeyboardType = .default
+    var isSecureTextEntry = false
+    var keyboardAppearance: UIKeyboardAppearance = .dark
+
+    /// Digits for an amount, a hidden entry for a secret. A keyboard that's up takes a change
+    /// only when asked to reload.
+    private func updateTraits(secure: Bool, number: Bool) {
+        let type: UIKeyboardType = number ? .decimalPad : .default
+        guard type != keyboardType || secure != isSecureTextEntry else { return }
+        keyboardType = type
+        isSecureTextEntry = secure
+        if isFirstResponder { reloadInputViews() }
+    }
+
+    // Pasting: UIKit's edit menu, from a long press on a field, and ⌘V on a hardware keyboard.
+    // Both are the user's own paste, so iOS doesn't ask whether Stahl may read the pasteboard.
+
+    override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if action == #selector(paste(_:)) { return wantsKeyboard && UIPasteboard.general.hasStrings }
+        return false
+    }
+
+    override func paste(_ sender: Any?) {
+        guard let host, let text = UIPasteboard.general.string else { return }
+        text.withCString { stahl_ios_paste(host, $0) }
+    }
+
+    @objc private func showEditMenu(_ gesture: UILongPressGestureRecognizer) {
+        guard gesture.state == .began, wantsKeyboard, let menu = editMenu else { return }
+        let point = gesture.location(in: self)
+        menu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: point))
+    }
+
+    private var editMenu: UIEditMenuInteraction?
 
     func insertText(_ text: String) {
         guard let host else { return }
