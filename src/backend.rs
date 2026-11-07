@@ -6,9 +6,12 @@
 //! math, policy review, simulation, reports) lives in `portfolio_rs`.
 
 use std::{
+    env,
+    ffi::OsStr,
     fmt::Display,
     fs,
     future::Future,
+    io::ErrorKind,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -28,6 +31,7 @@ use portfolio_rs::{
     },
     policy::{self, Policy},
     review::Review,
+    services::atomic_write,
     simulate::RebalanceSimulation,
     state::{
         AllocationItemDto, AppConfigDto, AppState, CreatePositionRequest, GeneratedDocument,
@@ -51,6 +55,286 @@ fn report<E: Display>(error: E) -> String {
 /// here and on the command line is the same history.
 const HISTORY_ID: &str = "main";
 
+/// What a positions file holds before anything is added to it.
+const NO_POSITIONS: &str = "[]\n";
+
+/// Which field of the New Workspace form a problem belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkspaceField {
+    Name,
+    Location,
+}
+
+/// Why a workspace can't be created, in words for the person filling in the form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceProblem {
+    pub field: WorkspaceField,
+    pub message: String,
+}
+
+impl WorkspaceProblem {
+    fn name(message: impl Into<String>) -> Self {
+        Self {
+            field: WorkspaceField::Name,
+            message: message.into(),
+        }
+    }
+
+    fn location(message: impl Into<String>) -> Self {
+        Self {
+            field: WorkspaceField::Location,
+            message: message.into(),
+        }
+    }
+}
+
+/// Where a workspace with this name and location would go. Touches nothing on disk, so the form
+/// can show it while you type.
+pub fn plan_workspace(name: &str, location: &str) -> Result<PathBuf, WorkspaceProblem> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(WorkspaceProblem::name("Give the workspace a name."));
+    }
+    let forbidden = |c: char| c.is_control() || r#"/\:*?"<>|"#.contains(c);
+    if name.contains(forbidden) || name.ends_with('.') {
+        return Err(WorkspaceProblem::name(
+            r#"A name can't contain / \ : * ? " < > | or end with a dot."#,
+        ));
+    }
+    let location = location.trim();
+    if location.is_empty() {
+        return Err(WorkspaceProblem::location(
+            "Choose where to create the workspace.",
+        ));
+    }
+    let location = expand_home(location);
+    if !location.is_absolute() {
+        return Err(WorkspaceProblem::location(
+            "The location must be a full path, starting from the top of the disk.",
+        ));
+    }
+    Ok(location.join(name))
+}
+
+/// `~` and `~/x` as the home directory, as a path typed into a shell would be.
+fn expand_home(path: &str) -> PathBuf {
+    let rest = path
+        .strip_prefix('~')
+        .filter(|rest| rest.is_empty() || rest.starts_with(['/', '\\']));
+    match (rest, env::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// Create a workspace in the format `portfolio_rs` uses, and return its directory.
+///
+/// `positions_from` is a file to copy the positions from, or `None` to start with no positions.
+/// The directory must not exist yet, so this can never overwrite anything. If it fails part way,
+/// what it created is removed again.
+pub fn create_workspace(
+    name: &str,
+    location: &str,
+    positions_from: Option<&str>,
+) -> Result<String, WorkspaceProblem> {
+    let dir = plan_workspace(name, location)?;
+    let shown = dir.display();
+    let parent = dir.parent().unwrap_or(&dir);
+    let parent_shown = parent.display();
+    if !parent.exists() {
+        return Err(WorkspaceProblem::location(format!(
+            "{parent_shown} doesn't exist. Choose an existing folder."
+        )));
+    }
+    if !parent.is_dir() {
+        return Err(WorkspaceProblem::location(format!(
+            "{parent_shown} is a file, not a folder."
+        )));
+    }
+    let exists = || {
+        WorkspaceProblem::name(format!(
+            "{shown} already exists. Choose another name, or open it as a workspace."
+        ))
+    };
+    // Also true of a dangling link, which `create_dir` would fail on anyway.
+    if fs::symlink_metadata(&dir).is_ok() {
+        return Err(exists());
+    }
+    let Some(root) = dir.to_str() else {
+        return Err(WorkspaceProblem::name(
+            "This name or location has characters Stahl can't store.",
+        ));
+    };
+    match fs::create_dir(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Err(exists()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+            ) =>
+        {
+            return Err(WorkspaceProblem::location(format!(
+                "You can't write to {parent_shown}. Choose another location."
+            )));
+        }
+        Err(error) => {
+            return Err(WorkspaceProblem::location(format!(
+                "Couldn't create {shown}: {error}"
+            )));
+        }
+    }
+    let filled = || -> BackendResult<()> {
+        workspace::init_workspace(root, false).map_err(report)?;
+        let positions = match positions_from {
+            Some(file) => fs::read(file).map_err(report)?,
+            None => NO_POSITIONS.as_bytes().to_vec(),
+        };
+        atomic_write::write_new_private(&dir.join("positions.json"), &positions).map_err(report)
+    };
+    filled().map_err(|error| {
+        // Only ever what this call just made: `create_dir` fails on anything already there.
+        let _ = fs::remove_dir_all(&dir);
+        WorkspaceProblem::location(format!("Couldn't create {shown}: {error}"))
+    })?;
+    Ok(root.to_string())
+}
+
+/// The chosen folder was opened, or it needs the person to decide to start a workspace there.
+pub enum OpenedFolder {
+    Loaded,
+    NeedsStart { dir: String, empty: bool },
+}
+
+/// What a chosen folder is, once a `portfolio/` subdirectory has been walked back up to the
+/// workspace that contains it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FolderKind {
+    /// `positions.json` is here.
+    Workspace(String),
+    /// Laid out by `portfolio_rs init-workspace`, which writes no `positions.json`.
+    PortfolioRs(String),
+    /// Not a workspace. `empty` means the folder has nothing in it.
+    Other { dir: String, empty: bool },
+}
+
+/// Decide how to open `dir`.
+///
+/// A folder named `portfolio` with no positions file is the inside of a workspace (history,
+/// policy, diary), which is what a folder chooser returns when it reopens inside the last
+/// workspace and its only child is that directory. The workspace is the parent.
+pub fn classify_folder(dir: &Path) -> Result<FolderKind, String> {
+    if !dir.exists() {
+        return Err(format!("{} doesn't exist.", dir.display()));
+    }
+    if !dir.is_dir() {
+        return Err(format!("{} is a file, not a folder.", dir.display()));
+    }
+    let root = workspace_root(dir);
+    let shown = path_string(&root)?;
+    if positions_file(&root).is_file() {
+        return Ok(FolderKind::Workspace(shown));
+    }
+    if is_portfolio_rs_workspace(&root) {
+        return Ok(FolderKind::PortfolioRs(shown));
+    }
+    Ok(FolderKind::Other {
+        dir: shown,
+        empty: folder_is_empty(&root)?,
+    })
+}
+
+/// Where the folder dialog should open so it is not already inside a workspace.
+///
+/// The parent of the open workspace (or of a folder that was just refused) shows the workspace
+/// itself as a choice. Opening inside it highlights `portfolio/`, and Select returns that.
+pub fn folder_dialog_start(open: Option<&Path>) -> Option<PathBuf> {
+    let path = open?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())?;
+    parent.is_dir().then(|| parent.to_path_buf())
+}
+
+fn file_is_blank(path: &str) -> bool {
+    fs::read_to_string(path).is_ok_and(|text| text.trim().is_empty())
+}
+
+/// True when the file is JSON, and that JSON is not a list.
+fn json_is_not_a_list(path: &str) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    matches!(
+        serde_json::from_str::<serde_json::Value>(&text),
+        Ok(value) if !value.is_array()
+    )
+}
+
+fn positions_file(dir: &Path) -> PathBuf {
+    dir.join("positions.json")
+}
+
+fn path_string(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "This folder has characters Stahl can't store.".to_string())
+}
+
+/// `dir` when it is already a workspace, or its parent when `dir` is that workspace's
+/// `portfolio/` directory.
+fn workspace_root(dir: &Path) -> PathBuf {
+    if positions_file(dir).is_file() {
+        return dir.to_path_buf();
+    }
+    let Some(parent) = dir.parent() else {
+        return dir.to_path_buf();
+    };
+    let named_portfolio = dir.file_name() == Some(OsStr::new("portfolio"));
+    if named_portfolio && (positions_file(parent).is_file() || is_portfolio_rs_workspace(parent)) {
+        parent.to_path_buf()
+    } else {
+        dir.to_path_buf()
+    }
+}
+
+/// The files `portfolio_rs init-workspace` always writes, and Stahl does not invent.
+fn is_portfolio_rs_workspace(dir: &Path) -> bool {
+    dir.join("portfolio/watchlist.json").is_file()
+        || (dir.join("INVESTMENT_POLICY.md").is_file() && dir.join("portfolio").is_dir())
+}
+
+fn folder_is_empty(dir: &Path) -> Result<bool, String> {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| format!("Couldn't look inside {}: {error}", dir.display()))?;
+    Ok(entries.next().is_none())
+}
+
+/// Make `dir` a workspace in place. Files already there are kept: `portfolio_rs` skips what
+/// exists, and `positions.json` is only written when it is missing.
+pub fn start_workspace(dir: &Path) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Err(format!("{} is not a folder.", dir.display()));
+    }
+    let root = path_string(dir)?;
+    workspace::init_workspace(&root, false).map_err(report)?;
+    let positions = positions_file(dir);
+    if positions.exists() {
+        return Ok(());
+    }
+    atomic_write::write_new_private(&positions, NO_POSITIONS.as_bytes()).map_err(report)
+}
+
+/// Where the New Workspace form suggests putting one: Documents, or else the home directory.
+pub fn default_workspace_location() -> String {
+    let Some(home) = env::home_dir() else {
+        return String::new();
+    };
+    let documents = home.join("Documents");
+    let location = if documents.is_dir() { documents } else { home };
+    location.to_string_lossy().into_owned()
+}
+
 /// Everything the UI shows about the loaded portfolio, read together.
 #[derive(Clone, Debug)]
 pub struct Snapshot {
@@ -63,6 +347,8 @@ pub struct Snapshot {
     pub findings: Vec<Finding>,
     /// connected | partial | offline | fixture
     pub network: String,
+    /// Whether there's a policy to review the portfolio against.
+    pub has_policy: bool,
 }
 
 /// What a holding's per-unit figures are in, which [`PositionDto`] doesn't say.
@@ -118,9 +404,31 @@ impl OpenDocument {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ParseProblem {
     pub file: String,
+    /// What the parser said, unchanged.
     pub reason: String,
     pub line: usize,
     pub column: usize,
+}
+
+impl ParseProblem {
+    /// A sentence for the screen. [`Self::reason`] stays available as the raw detail.
+    pub fn summary(&self) -> String {
+        // An empty file, or one that is only whitespace, fails before any value. A file that
+        // starts a value and then stops is not empty, even when the parser also says EOF.
+        if self.reason == "EOF while parsing a value" && file_is_blank(&self.file) {
+            return "The file is empty.".to_string();
+        }
+        // Valid JSON of the wrong shape: an object, a string, a number. Invalid text that
+        // merely starts with `{` gets the same parser message, and is not a list either, but
+        // it is reported as JSON that doesn't parse.
+        if self.reason.contains("expected a sequence") && json_is_not_a_list(&self.file) {
+            return "Expected a list of positions.".to_string();
+        }
+        format!(
+            "This isn't valid JSON (line {}, column {}).",
+            self.line, self.column
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -423,31 +731,65 @@ impl Backend {
         Ok(())
     }
 
+    /// Open a workspace and remember it.
+    ///
+    /// This does what `AppState::load_workspace` does, except that it saves the config through
+    /// [`Self::save_config`]: that one always writes to the user's default location, so a backend
+    /// with its config elsewhere would overwrite the real one. It also drops the policy of whatever
+    /// was open before, which would otherwise be reviewed against the new portfolio.
     pub async fn load_workspace(&self, dir: String) -> BackendResult<()> {
-        {
-            let mut config = self.config.write().await;
-            self.state
-                .load_workspace(&dir, &mut config)
-                .await
-                .map_err(report)?;
+        let root = Path::new(&dir);
+        let positions = root.join("positions.json");
+        if !positions.exists() {
+            return Err(format!(
+                "{dir} is not a workspace, because it has no positions.json. Pick another folder, \
+                 or create a new workspace."
+            ));
         }
+        let policy_path = root.join("portfolio/policy.toml");
+        let policy = if policy_path.exists() {
+            let policy = Policy::from_file(&policy_path.to_string_lossy())
+                .map_err(|error| format!("failed to load policy: {error:#}"))?;
+            Some(policy)
+        } else {
+            None
+        };
+        self.state
+            .load_file(&positions.to_string_lossy())
+            .await
+            .map_err(report)?;
+        *self.state.workspace_dir.write().await = Some(dir.clone());
+        *self.state.policy.write().await = policy;
+        self.config.write().await.set_workspace(dir);
         self.save_config().await
     }
 
+    /// Open `dir` as a workspace.
+    ///
+    /// A `portfolio/` directory inside a workspace opens the workspace. A folder made with
+    /// `portfolio_rs init-workspace` gets an empty `positions.json` and then opens. Anything else
+    /// is left untouched and reported as [`OpenedFolder::NeedsStart`], so the caller can offer to
+    /// start one there.
+    pub async fn open_folder(&self, dir: String) -> BackendResult<OpenedFolder> {
+        match classify_folder(Path::new(&dir))? {
+            FolderKind::Other { dir, empty } => Ok(OpenedFolder::NeedsStart { dir, empty }),
+            FolderKind::Workspace(root) | FolderKind::PortfolioRs(root) => {
+                if !positions_file(Path::new(&root)).is_file() {
+                    start_workspace(Path::new(&root))?;
+                }
+                self.load_workspace(root).await?;
+                Ok(OpenedFolder::Loaded)
+            }
+        }
+    }
+
+    /// Open a single positions file and remember it. See [`Self::load_workspace`] for why this
+    /// doesn't use `AppState::load_simple_file`.
     pub async fn load_simple_file(&self, path: String) -> BackendResult<()> {
-        {
-            let mut config = self.config.write().await;
-            self.state
-                .load_simple_file(&path, &mut config)
-                .await
-                .map_err(report)?;
-        }
+        self.state.load_file(&path).await.map_err(report)?;
+        *self.state.policy.write().await = None;
+        self.config.write().await.set_portfolio_file(path);
         self.save_config().await
-    }
-
-    pub fn init_workspace(&self, dir: &str) -> BackendResult<()> {
-        workspace::init_workspace(dir, false).map_err(report)?;
-        workspace::init_agent_files(dir, false).map_err(report)
     }
 
     pub fn export_skill(&self, dir: &str) -> BackendResult<()> {
@@ -471,6 +813,7 @@ impl Backend {
             performance: self.state.get_performance().await,
             findings: analytics::data_quality(&portfolio),
             network: analytics::network_status(&portfolio).to_string(),
+            has_policy: self.state.policy().await.is_some(),
         }
     }
 
@@ -484,8 +827,9 @@ impl Backend {
 
     /// Record today's valuation, so history builds up just by using the app.
     ///
-    /// Skipped for files that do not parse or are not fully priced, and for
-    /// encrypted portfolios, whose values must not land on disk in plaintext.
+    /// Skipped for files that do not parse or are not fully priced, for encrypted portfolios,
+    /// whose values must not land on disk in plaintext, and for empty portfolios, where history
+    /// would start with a zero that reads as a jump once there are positions.
     pub async fn record_today(&self) -> BackendResult<()> {
         let encrypted = self
             .state
@@ -496,6 +840,9 @@ impl Backend {
             return Ok(());
         }
         let portfolio = self.state.portfolio().await;
+        if portfolio.positions.is_empty() {
+            return Ok(());
+        }
         let snapshot = self.today_point(&portfolio).await;
         if !snapshot.complete {
             return Ok(());
@@ -726,7 +1073,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
 
-    use portfolio_rs::services::quotes::AnyProvider;
+    use portfolio_rs::{doctor::HealthStatus, services::quotes::AnyProvider};
     use tempfile::TempDir;
     use tokio::runtime::Runtime;
 
@@ -794,6 +1141,325 @@ mod tests {
         let open = runtime.block_on(backend.startup(None)).unwrap();
         assert_eq!(open.file_path, None);
         assert_eq!(open.workspace_dir, None);
+    }
+
+    fn folder(dir: &TempDir) -> String {
+        dir.path().to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_new_workspace_opens_in_the_portfolio_rs_format() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+
+        let root = create_workspace(" My Portfolio ", &folder(&dir), None).unwrap();
+        assert!(
+            root.ends_with("My Portfolio"),
+            "the name is trimmed: {root}"
+        );
+
+        runtime.block_on(async {
+            backend.load_workspace(root.clone()).await.unwrap();
+            let open = backend.open_document().await;
+            assert_eq!(open.workspace_dir, Some(root.clone()));
+            assert_eq!(open.parse_error, None);
+            assert!(backend.snapshot().await.positions.is_empty());
+
+            backend.record_today().await.unwrap();
+            let history = Path::new(&root).join("portfolio/history/main/snapshots.jsonl");
+            assert!(!history.exists(), "an empty portfolio has no history yet");
+
+            // `portfolio_rs doctor` agrees it's a workspace, and it only lacks a policy so far.
+            let health = backend.doctor(root.clone()).await.unwrap();
+            assert_eq!(health.issue_count, 0, "{:?}", health.checks);
+            let warned: Vec<&str> = health
+                .checks
+                .iter()
+                .filter(|check| check.status == HealthStatus::Warning)
+                .map(|check| check.name.as_str())
+                .collect();
+            assert_eq!(warned, ["Policy file", "Encryption"]);
+        });
+    }
+
+    #[test]
+    fn a_new_workspace_can_start_from_an_open_file() {
+        let dir = TempDir::new().unwrap();
+        let file = write_portfolio(&dir);
+        let root = create_workspace("Copied", &folder(&dir), Some(&file)).unwrap();
+        let copied = fs::read_to_string(Path::new(&root).join("positions.json")).unwrap();
+        assert_eq!(copied, CASH_ONLY);
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            CASH_ONLY,
+            "left as it was"
+        );
+    }
+
+    #[test]
+    fn a_workspace_never_replaces_what_is_there() {
+        let dir = TempDir::new().unwrap();
+        let taken = dir.path().join("Taken");
+        fs::create_dir(&taken).unwrap();
+        fs::write(taken.join("keep.txt"), "mine").unwrap();
+
+        let problem = create_workspace("Taken", &folder(&dir), None).unwrap_err();
+        assert_eq!(problem.field, WorkspaceField::Name);
+        assert!(problem.message.contains("already exists"), "{problem:?}");
+        assert_eq!(fs::read_to_string(taken.join("keep.txt")).unwrap(), "mine");
+        assert_eq!(fs::read_dir(&taken).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_failed_workspace_leaves_nothing_behind() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("no-such-file.json");
+        let problem =
+            create_workspace("Half", &folder(&dir), Some(&missing.to_string_lossy())).unwrap_err();
+        assert!(problem.message.contains("Couldn't create"), "{problem:?}");
+        assert!(!dir.path().join("Half").exists());
+    }
+
+    #[test]
+    fn workspace_names_and_locations_are_checked() {
+        let dir = TempDir::new().unwrap();
+        let location = folder(&dir);
+        let problem = |name: &str, location: &str| plan_workspace(name, location).unwrap_err();
+
+        assert_eq!(problem("  ", &location).field, WorkspaceField::Name);
+        for name in ["a/b", r"a\b", "..", "a:b", "tail."] {
+            let problem = problem(name, &location);
+            assert_eq!(problem.field, WorkspaceField::Name, "{name}");
+            assert!(problem.message.contains("can't contain"), "{name}");
+        }
+        assert_eq!(problem("a", "  ").field, WorkspaceField::Location);
+        assert!(problem("a", "relative/path").message.contains("full path"));
+        assert_eq!(
+            plan_workspace("a", &location).unwrap(),
+            dir.path().join("a")
+        );
+
+        let missing = dir.path().join("missing");
+        let problem = create_workspace("a", &missing.to_string_lossy(), None).unwrap_err();
+        assert_eq!(problem.field, WorkspaceField::Location);
+        assert!(problem.message.contains("doesn't exist"), "{problem:?}");
+
+        let file = write_portfolio(&dir);
+        let problem = create_workspace("a", &file, None).unwrap_err();
+        assert!(problem.message.contains("not a folder"), "{problem:?}");
+    }
+
+    #[test]
+    fn a_home_location_expands() {
+        let Some(home) = env::home_dir() else {
+            return;
+        };
+        assert_eq!(plan_workspace("a", "~").unwrap(), home.join("a"));
+        assert_eq!(
+            plan_workspace("a", "~/b").unwrap(),
+            home.join("b").join("a")
+        );
+        assert!(
+            plan_workspace("a", "~elsewhere").is_err(),
+            "not this user's"
+        );
+    }
+
+    #[test]
+    fn opening_saves_the_config_where_the_backend_keeps_it() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+
+        runtime
+            .block_on(backend.load_simple_file(path.clone()))
+            .unwrap();
+        let saved = AppConfig::load_from(&dir.path().join("config.yml")).unwrap();
+        assert_eq!(saved.portfolio_file, Some(path));
+
+        let workspace = dir.path().to_string_lossy().into_owned();
+        runtime
+            .block_on(backend.load_workspace(workspace.clone()))
+            .unwrap();
+        let saved = AppConfig::load_from(&dir.path().join("config.yml")).unwrap();
+        assert_eq!(saved.workspace_dir, Some(workspace));
+    }
+
+    #[test]
+    fn opening_a_folder_without_positions_says_what_is_wrong() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let folder = dir.path().to_string_lossy().into_owned();
+
+        let error = runtime
+            .block_on(backend.load_workspace(folder))
+            .unwrap_err();
+        assert!(error.contains("no positions.json"), "{error}");
+    }
+
+    #[test]
+    fn the_portfolio_directory_inside_a_workspace_is_that_workspace() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let root = create_workspace("My Portfolio", &folder(&dir), None).unwrap();
+        // Opening records history here, which is the only child a chooser then sees.
+        runtime
+            .block_on(backend.load_workspace(root.clone()))
+            .unwrap();
+        let inner = Path::new(&root).join("portfolio");
+        assert!(inner.is_dir());
+
+        let again = classify_folder(&inner).unwrap();
+        assert_eq!(again, FolderKind::Workspace(root.clone()));
+        runtime
+            .block_on(backend.open_folder(inner.to_string_lossy().into_owned()))
+            .unwrap();
+        let open = runtime.block_on(backend.open_document());
+        assert_eq!(open.workspace_dir.as_deref(), Some(root.as_str()));
+    }
+
+    #[test]
+    fn a_folder_from_the_portfolio_rs_command_opens_without_positions() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let root = dir.path().join("cli");
+        workspace::init_workspace(&root.to_string_lossy(), false).unwrap();
+        assert!(!root.join("positions.json").exists());
+        let policy = fs::read_to_string(root.join("INVESTMENT_POLICY.md")).unwrap();
+
+        let opened = runtime
+            .block_on(backend.open_folder(root.to_string_lossy().into_owned()))
+            .unwrap();
+        assert!(matches!(opened, OpenedFolder::Loaded));
+        assert_eq!(
+            fs::read_to_string(root.join("positions.json")).unwrap(),
+            "[]\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("INVESTMENT_POLICY.md")).unwrap(),
+            policy,
+            "the command line's files stay as they were"
+        );
+        let open = runtime.block_on(backend.open_document());
+        assert_eq!(open.workspace_dir.as_deref(), Some(root.to_str().unwrap()));
+        assert!(runtime.block_on(backend.snapshot()).positions.is_empty());
+    }
+
+    #[test]
+    fn an_empty_folder_is_not_opened_as_a_workspace() {
+        let dir = TempDir::new().unwrap();
+        let empty = dir.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        let kind = classify_folder(&empty).unwrap();
+        assert_eq!(
+            kind,
+            FolderKind::Other {
+                dir: empty.to_string_lossy().into_owned(),
+                empty: true,
+            }
+        );
+
+        fs::write(dir.path().join("notes.txt"), "keep").unwrap();
+        let kind = classify_folder(dir.path()).unwrap();
+        assert!(matches!(kind, FolderKind::Other { empty: false, .. }));
+    }
+
+    #[test]
+    fn the_folder_dialog_starts_beside_the_open_workspace() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("My Portfolio");
+        fs::create_dir(&root).unwrap();
+        assert_eq!(
+            folder_dialog_start(Some(&root)).as_deref(),
+            Some(dir.path())
+        );
+        assert_eq!(folder_dialog_start(None), None);
+        assert_eq!(
+            folder_dialog_start(Some(Path::new("/no/such/workspace"))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_positions_file_that_does_not_parse_is_explained() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+
+        let explain = |name: &str, body: &str| {
+            let path = dir.path().join(name);
+            fs::write(&path, body).unwrap();
+            runtime
+                .block_on(backend.startup(Some(path.to_string_lossy().into_owned())))
+                .unwrap()
+                .parse_error
+                .expect(name)
+        };
+
+        let empty = explain("empty.json", "");
+        assert_eq!(empty.summary(), "The file is empty.");
+        assert!(empty.reason.contains("EOF"), "{}", empty.reason);
+
+        let whitespace = explain("blank.json", " \n\t");
+        assert_eq!(whitespace.summary(), "The file is empty.");
+
+        let broken = explain("broken.json", "{not json");
+        assert!(
+            broken.summary().starts_with("This isn't valid JSON (line "),
+            "{}",
+            broken.summary()
+        );
+        assert!(broken.summary().contains("column "), "{}", broken.summary());
+        assert!(
+            !broken.summary().contains("EOF"),
+            "the raw parser text stays in the detail"
+        );
+        assert!(!broken.reason.is_empty());
+
+        let object = explain("object.json", "{\"Name\":\"Cash\"}\n");
+        assert_eq!(object.summary(), "Expected a list of positions.");
+        assert!(
+            object.reason.contains("sequence"),
+            "raw detail kept: {}",
+            object.reason
+        );
+
+        let cut_off = explain("cutoff.json", "[\n");
+        assert!(
+            cut_off
+                .summary()
+                .starts_with("This isn't valid JSON (line "),
+            "a file that starts and then stops is not empty: {}",
+            cut_off.summary()
+        );
+    }
+
+    #[test]
+    fn a_policy_does_not_follow_you_to_the_next_portfolio() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+        let policy = Backend::policy_from_strategy("balanced-growth").unwrap();
+        fs::create_dir_all(dir.path().join("portfolio")).unwrap();
+        fs::write(
+            dir.path().join("portfolio/policy.toml"),
+            Backend::policy_to_toml(&policy).unwrap(),
+        )
+        .unwrap();
+
+        runtime.block_on(async {
+            let workspace = dir.path().to_string_lossy().into_owned();
+            backend.load_workspace(workspace).await.unwrap();
+            assert!(backend.policy().await.is_some());
+            backend.load_simple_file(path).await.unwrap();
+            assert!(backend.policy().await.is_none());
+        });
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! End-to-end tests: the real views and handlers on real `portfolio_rs` data with fixture
 //! quotes, driven through pointer and keyboard input in Rune's headless runtime.
 //!
-//! These never touch the user's config: the backend points at a temp directory, and opening goes
-//! through `startup`, which doesn't write it.
+//! These never touch the user's config: the backend keeps it in a temp directory.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     env, fs,
     io::{Cursor, Write},
@@ -23,13 +24,14 @@ use portfolio_rs::{
     services::quotes::AnyProvider,
     state::{AppState, PositionDto},
 };
-use rune::{Key, KeyEvent, Mods, Runtime};
+use rune::{FileDialogKind, Key, KeyEvent, Mods, Runtime};
 use stahl::{
     app,
     backend::{Backend, Period},
     demo::{self, FakeReleases},
-    state::{Confirm, Page, State, UpdatePhase},
+    state::{Command, Confirm, Page, PendingOpen, State, UpdatePhase},
     update::{self, Installation, Updater},
+    view::guide,
 };
 use tempfile::TempDir;
 use tokio::runtime::Runtime as Tokio;
@@ -279,7 +281,14 @@ fn a_broken_file_shows_where_it_broke_and_recovers_on_reload() {
     assert!(app.rt.state.open.parse_error.is_some());
     assert!(app.rt.state.positions.is_empty());
     assert!(app.exists("reload-file"));
-    assert!(app.has_text("Line 2, column"));
+    assert!(
+        app.has_text("isn't valid JSON (line 2, column"),
+        "the line and column, in words"
+    );
+    assert!(
+        app.has_text("Details:"),
+        "the parser's own text stays available"
+    );
     assert!(
         !app.exists(Page::Overview.key()),
         "not shown as an empty portfolio"
@@ -744,10 +753,202 @@ fn quitting_with_unsaved_changes_asks() {
 
 #[test]
 fn no_portfolio_lands_on_the_welcome_screen() {
-    let app = Harness::boot(false, None);
+    let mut app = Harness::boot(false, None);
+    assert!(app.has_text("Track what you own"), "says what this is");
     assert!(app.exists("welcome-workspace"));
     assert!(app.exists("welcome-file"));
     assert!(!app.exists(Page::Overview.key()));
+
+    app.click("welcome-create");
+    assert!(app.exists("workspace-create"));
+}
+
+/// A workspace with nothing in it, open as it is right after creating one.
+fn new_workspace() -> Harness {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("My Portfolio");
+    app.click("workspace-create");
+    assert!(app.rt.state.is_workspace(), "{}", app.problem());
+    app
+}
+
+#[test]
+fn every_empty_page_says_what_belongs_there() {
+    let mut app = new_workspace();
+    assert_eq!(app.rt.state.page, Page::Overview);
+    assert!(app.has_text("Your portfolio is empty"));
+    assert!(app.exists("first-steps-add"));
+    assert!(!app.has_text("€0.00"), "no zeros standing in for a value");
+
+    for (page, wanted, action) in [
+        (Page::Holdings, "No positions yet", "holdings-empty-add"),
+        (
+            Page::Allocation,
+            "Nothing to split yet",
+            "allocation-empty-add",
+        ),
+        (Page::Performance, "No history yet", "performance-empty-add"),
+        (
+            Page::Briefing,
+            "Nothing to summarize yet",
+            "briefing-empty-add",
+        ),
+        (Page::Review, "No policy yet", "review-set-policy"),
+        (Page::Rebalance, "No policy yet", "rebalance-set-policy"),
+    ] {
+        app.click(page.key());
+        assert_eq!(app.rt.state.page, page);
+        assert!(app.has_text(wanted), "{page:?} should show {wanted:?}");
+        assert!(app.exists(action), "{page:?} should offer {action}");
+        assert!(
+            !app.has_text("no investment policy"),
+            "{page:?} shows a raw error"
+        );
+    }
+}
+
+#[test]
+fn the_first_steps_lead_to_a_first_position_and_a_policy() {
+    let mut app = new_workspace();
+    app.click("first-steps-add");
+    assert!(app.rt.state.form.is_some());
+    app.type_text("Apple");
+    app.click("form-submit");
+    assert_eq!(app.rt.state.positions.len(), 1);
+    assert!(
+        !app.exists("first-steps"),
+        "done with once there's a position"
+    );
+    assert!(app.exists("hero"));
+
+    app.click(Page::Review.key());
+    app.click("review-set-policy");
+    assert_eq!(app.rt.state.page, Page::Policy);
+    app.click("strategy-balanced-growth");
+    assert!(
+        app.has_text("Press Save to Workspace"),
+        "says it isn't kept yet"
+    );
+    app.click("policy-save");
+    assert!(app.rt.state.has_policy, "{:?}", app.rt.state.policy.error);
+
+    app.click(Page::Review.key());
+    assert!(
+        app.has_text("Allocation vs target"),
+        "{:?}",
+        app.rt.state.review.error
+    );
+}
+
+#[test]
+fn the_guide_opens_from_anywhere_and_never_on_its_own() {
+    let mut app = Harness::boot(false, None);
+    assert!(!app.rt.state.guide, "not forced on a first run");
+    app.click("welcome-guide");
+    assert!(app.exists("guide-body"));
+    assert!(app.has_text("Valuation history"), "explains the terms");
+    assert!(app.has_text("Getting started"));
+    app.press(Key::Escape);
+    assert!(!app.rt.state.guide);
+
+    let mut app = Harness::boot(true, None);
+    assert!(!app.rt.state.guide, "not forced on a returning user");
+    app.command('2', false);
+    assert!(
+        app.has_text("one row per position"),
+        "the page says what it is"
+    );
+
+    app.command('/', false);
+    assert!(app.rt.state.guide);
+    assert!(app.has_text("You're on Holdings"), "starts where you are");
+    app.command('/', false);
+    assert!(!app.rt.state.guide);
+
+    app.click("guide");
+    assert!(app.rt.state.guide);
+    app.press(Key::Escape);
+
+    app.command('k', false);
+    app.type_text("guide");
+    app.press(Key::Enter);
+    assert!(app.rt.state.guide, "the palette reaches it");
+}
+
+#[test]
+fn the_end_of_the_guide_can_be_scrolled_to_in_the_smallest_window() {
+    offline();
+    let tokio = Tokio::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let backend = demo::backend(dir.path(), None, tokio.handle().clone());
+    let mut rt = app::headless(backend, None, (960.0, 640.0));
+    rt.state.toggle_guide();
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let body = rt.presented("guide-body").expect("the guide is laid out").0;
+    assert!(
+        body[1] >= 0.0 && body[1] + body[3] <= 640.0,
+        "the guide fits the window: {body:?}"
+    );
+    let last = "guide-shortcut-Hide amounts";
+    let (x, y) = rt.find("guide-body").unwrap();
+    for _ in 0..40 {
+        rt.wheel(x, y, -200.0);
+        rt.frame(1.0 / 60.0);
+    }
+    for _ in 0..60 {
+        rt.frame(1.0 / 60.0);
+    }
+    let row = rt.presented(last).expect("the last row is laid out").0;
+    assert!(
+        row[1] + row[3] <= body[1] + body[3] + 1.0,
+        "the last row scrolls into view: {row:?} in {body:?}"
+    );
+}
+
+#[test]
+fn a_german_keyboard_reaches_the_guide_too() {
+    let mut app = Harness::boot(true, None);
+    app.command('/', true);
+    assert!(app.rt.state.guide, "Shift is how some layouts type a slash");
+}
+
+#[test]
+fn every_page_has_its_own_explanation() {
+    let pages: Vec<Page> = Page::PORTFOLIO
+        .into_iter()
+        .chain(Page::PLAN)
+        .chain(Page::INSIGHTS)
+        .chain([Page::Settings])
+        .collect();
+    let about: Vec<&str> = pages.iter().map(|page| guide::about(*page)).collect();
+    let mut unique = about.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), pages.len(), "{about:?}");
+}
+
+#[test]
+fn a_search_with_no_results_is_not_mistaken_for_an_empty_portfolio() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('2', false);
+    app.click("holdings-search");
+    app.type_text("nothing like this");
+    assert!(app.has_text("No holdings match."));
+    assert!(!app.exists("holdings-empty"));
+}
+
+#[test]
+fn a_new_position_defaults_to_the_class_the_templates_use() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('n', false);
+    assert_eq!(
+        app.rt.state.form.as_ref().unwrap().asset_class.text,
+        "Stocks"
+    );
 }
 
 #[test]
@@ -1643,4 +1844,547 @@ fn the_default_updater_never_checks_anything() {
     app.type_text("check for updates");
     app.press(Key::Enter);
     assert!(app.has_text("Updates are turned off"));
+}
+
+impl Harness {
+    /// The form's location, set to a folder in this test's temp directory.
+    fn open_new_workspace_in(&mut self, location: &Path) {
+        self.command('n', true);
+        assert!(self.exists("workspace-create"), "the form opens");
+        self.rt
+            .state
+            .new_workspace
+            .as_mut()
+            .unwrap()
+            .location
+            .replace_text(location.to_string_lossy().as_ref());
+        self.settle();
+    }
+
+    fn problem(&self) -> String {
+        let form = self.rt.state.new_workspace.as_ref();
+        let problem = form.and_then(|form| form.problem.as_ref());
+        problem.map_or_else(String::new, |problem| problem.message.clone())
+    }
+
+    fn saved_config(&self) -> String {
+        fs::read_to_string(self.dir.path().join("config.yml")).unwrap_or_default()
+    }
+}
+
+#[test]
+fn a_new_user_creates_a_workspace_and_adds_a_first_position() {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+
+    app.type_text("My Portfolio");
+    assert!(app.has_text("Creates "), "says where it will go");
+    app.click("workspace-create");
+
+    let root = location.join("My Portfolio");
+    assert!(app.rt.state.new_workspace.is_none(), "{}", app.problem());
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(root.to_string_lossy().as_ref())
+    );
+    for file in [
+        "positions.json",
+        "INVESTMENT_POLICY.md",
+        "AGENTS.md",
+        ".gitignore",
+        "portfolio/watchlist.json",
+    ] {
+        assert!(root.join(file).is_file(), "{file}");
+    }
+    for folder in ["diary", "decisions", "theses", "reports"] {
+        assert!(root.join("portfolio").join(folder).is_dir(), "{folder}");
+    }
+    assert!(app.exists(Page::Review.key()), "workspace pages are open");
+    assert!(
+        app.saved_config().contains("My Portfolio"),
+        "reopens next time: {}",
+        app.saved_config()
+    );
+
+    app.command('n', false);
+    app.type_text("Savings");
+    app.rt
+        .state
+        .form
+        .as_mut()
+        .unwrap()
+        .amount
+        .replace_text("1000");
+    app.rt
+        .state
+        .form
+        .as_mut()
+        .unwrap()
+        .asset_class
+        .replace_text("Cash");
+    app.settle();
+    app.click("form-submit");
+    assert_eq!(app.rt.state.positions.len(), 1);
+    app.command('s', false);
+    let positions = fs::read_to_string(root.join("positions.json")).unwrap();
+    assert!(positions.contains("Savings"), "{positions}");
+}
+
+#[test]
+fn a_workspace_needs_a_name_and_a_place_that_can_hold_it() {
+    let mut app = Harness::boot(false, None);
+    let location = app.dir.path().to_path_buf();
+    fs::create_dir(location.join("Taken")).unwrap();
+    app.open_new_workspace_in(&location);
+
+    app.click("workspace-create");
+    assert_eq!(app.problem(), "Give the workspace a name.");
+    assert!(app.exists("workspace-problem"), "the problem shows");
+
+    app.click("workspace-name");
+    app.type_text("a/b");
+    app.click("workspace-create");
+    assert!(app.problem().contains("can't contain"), "{}", app.problem());
+    assert!(!location.join("a").exists());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.name.replace_text("Taken");
+    app.settle();
+    app.click("workspace-create");
+    assert!(
+        app.problem().contains("already exists"),
+        "{}",
+        app.problem()
+    );
+    assert!(!app.rt.state.is_workspace());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.name.replace_text("New");
+    form.location
+        .replace_text(location.join("nowhere").to_string_lossy().as_ref());
+    app.settle();
+    app.click("workspace-create");
+    assert!(app.problem().contains("doesn't exist"), "{}", app.problem());
+
+    let form = app.rt.state.new_workspace.as_mut().unwrap();
+    form.location.clear();
+    app.settle();
+    app.click("workspace-create");
+    assert!(app.problem().contains("Choose where"), "{}", app.problem());
+
+    assert_eq!(app.rt.state.open.workspace_dir, None, "nothing was opened");
+    app.click("workspace-cancel");
+    assert!(app.rt.state.new_workspace.is_none());
+    assert!(
+        !app.saved_config().contains("workspace_dir: "),
+        "nothing was remembered: {}",
+        app.saved_config()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_workspace_in_a_folder_you_cannot_write_says_so() {
+    let mut app = Harness::boot(false, None);
+    let locked = app.dir.path().join("locked");
+    fs::create_dir(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    // Root can write anywhere, so this can't be tested as root.
+    let writable = fs::write(locked.join("probe"), "").is_ok();
+    if !writable {
+        app.open_new_workspace_in(&locked);
+        app.type_text("New");
+        app.click("workspace-create");
+        assert!(app.problem().contains("can't write"), "{}", app.problem());
+        assert!(app.rt.state.new_workspace.is_some(), "the form stays open");
+    }
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
+fn unsaved_changes_are_not_lost_to_a_new_workspace() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('n', false);
+    app.click("form-submit");
+    assert!(app.rt.state.dirty);
+
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("New");
+    app.click("workspace-create");
+    assert!(
+        matches!(
+            app.rt.state.confirm,
+            Some(Confirm::Unsaved(PendingOpen::CreateWorkspace))
+        ),
+        "the same save, discard and cancel question as quitting"
+    );
+    assert!(app.exists("unsaved-save"));
+    app.click("confirm-cancel");
+    assert_eq!(app.rt.state.confirm, None);
+    assert!(!location.join("New").exists());
+    assert_eq!(app.rt.state.positions.len(), 6);
+    assert!(app.rt.state.dirty, "still there to save");
+}
+
+#[test]
+fn a_new_workspace_can_bring_the_open_file_along() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    assert!(app.has_text("Bring my 5 positions from portfolio.json"));
+    app.type_text("Kept");
+    app.click("workspace-create");
+    assert_eq!(app.rt.state.positions.len(), 5);
+    assert!(app.rt.state.is_workspace());
+
+    // From a workspace there's nothing to offer, and leaving the box unticked starts empty.
+    app.open_new_workspace_in(&location);
+    assert!(!app.exists("workspace-keep"));
+    app.type_text("Fresh");
+    app.click("workspace-create");
+    assert!(app.rt.state.positions.is_empty());
+
+    assert_eq!(
+        fs::read_to_string(location.join("portfolio.json")).unwrap(),
+        demo::POSITIONS,
+        "the original is untouched"
+    );
+}
+
+#[test]
+fn ticking_off_the_open_file_starts_empty() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("Fresh");
+    app.click("workspace-keep");
+    app.click("workspace-create");
+    assert!(app.rt.state.positions.is_empty());
+}
+
+#[test]
+fn the_palette_reaches_a_new_workspace_and_offers_only_what_works() {
+    let mut app = Harness::boot(false, None);
+    app.command('k', false);
+    assert!(app.has_text("New Workspace"));
+    assert!(
+        !app.has_text("Add Position"),
+        "there's nothing to add to yet"
+    );
+    assert!(!app.has_text("Close"), "nothing open to close");
+    assert!(!app.has_text("Holdings"), "no pages without a portfolio");
+    app.type_text("new work");
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert!(app.exists("workspace-create"));
+    app.press(Key::Escape);
+    assert!(app.rt.state.new_workspace.is_none());
+}
+
+#[test]
+fn opening_another_portfolio_forgets_the_last_ones_results() {
+    let mut app = Harness::boot(true, None);
+    app.command('5', false);
+    assert!(app.rt.state.review.data.is_some());
+    assert!(app.rt.state.has_policy);
+
+    let location = app.dir.path().to_path_buf();
+    app.open_new_workspace_in(&location);
+    app.type_text("Next");
+    app.click("workspace-create");
+    assert!(!app.rt.state.has_policy, "the policy stayed behind");
+    assert!(app.rt.state.review.data.is_none());
+    assert_eq!(app.rt.state.page, Page::Overview);
+}
+
+fn edited(app: &mut Harness) {
+    let before = app.rt.state.positions.len();
+    app.command('n', false);
+    app.type_text("Widget");
+    app.click("form-submit");
+    assert!(app.rt.state.dirty);
+    assert_eq!(app.rt.state.positions.len(), before + 1);
+}
+
+#[test]
+fn reopening_a_workspace_accepts_its_portfolio_folder() {
+    let mut app = Harness::boot(true, None);
+    let root = app.dir.path().join("portfolio");
+    let inner = root.join("portfolio");
+    assert!(inner.is_dir(), "history lives in the only subfolder");
+    assert_eq!(app.rt.state.positions.len(), 5);
+
+    app.command('o', true);
+    let start = app
+        .rt
+        .file_dialog()
+        .expect("the workspace dialog is open")
+        .1
+        .directory
+        .clone();
+    assert_eq!(app.rt.file_dialog().unwrap().0, FileDialogKind::Folder);
+    assert_eq!(
+        start.as_deref(),
+        Some(app.dir.path()),
+        "the dialog starts beside the workspace, not inside it"
+    );
+
+    // Select lands on portfolio/ when the chooser is already inside the workspace.
+    app.rt
+        .resolve_file_dialog(Some(inner.clone()))
+        .expect("the dialog is answered");
+    app.settle();
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(root.to_str().unwrap())
+    );
+    assert!(app.rt.state.error.is_none(), "{:?}", app.rt.state.error);
+    assert!(app.rt.state.folder_prompt.is_none());
+    assert_eq!(app.rt.state.positions.len(), 5);
+    assert!(!app.has_text("is not a workspace"));
+}
+
+#[test]
+fn an_empty_folder_offers_a_way_forward_and_hides_the_open_portfolio() {
+    let mut app = Harness::boot(true, None);
+    let empty = app.dir.path().join("empty");
+    fs::create_dir(&empty).unwrap();
+    let root = app.dir.path().join("portfolio");
+
+    app.rt
+        .state
+        .load_workspace(empty.to_string_lossy().into_owned());
+    app.settle();
+    assert!(app.exists("folder-start"));
+    assert!(app.exists("folder-choose"));
+    assert!(app.exists("folder-cancel"));
+    assert!(
+        !app.exists(Page::Overview.key()),
+        "the previous holdings are not left looking loaded"
+    );
+    assert!(!app.has_text("Bitcoin"));
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(root.to_str().unwrap()),
+        "the open portfolio is kept until they decide"
+    );
+
+    app.click("folder-cancel");
+    assert!(app.has_text("Bitcoin"));
+    assert!(!app.exists("folder-start"));
+
+    app.rt
+        .state
+        .load_workspace(empty.to_string_lossy().into_owned());
+    app.settle();
+    app.click("folder-start");
+    assert!(app.rt.state.is_workspace(), "{:?}", app.rt.state.error);
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(empty.to_str().unwrap())
+    );
+    assert!(empty.join("positions.json").is_file());
+    assert!(empty.join("INVESTMENT_POLICY.md").is_file());
+    assert!(app.rt.state.positions.is_empty());
+    assert!(!app.has_text("Bitcoin"));
+}
+
+#[test]
+fn a_portfolio_rs_folder_without_positions_opens() {
+    let mut app = Harness::boot(false, None);
+    let root = app.dir.path().join("cli");
+    portfolio_rs::workspace::init_workspace(&root.to_string_lossy(), false).unwrap();
+    assert!(!root.join("positions.json").exists());
+
+    app.rt
+        .state
+        .load_workspace(root.to_string_lossy().into_owned());
+    app.settle();
+    assert!(app.rt.state.folder_prompt.is_none());
+    assert!(app.rt.state.is_workspace(), "{:?}", app.rt.state.error);
+    assert_eq!(
+        fs::read_to_string(root.join("positions.json")).unwrap(),
+        "[]\n"
+    );
+    assert!(app.rt.state.positions.is_empty());
+    assert!(app.exists(Page::Overview.key()));
+}
+
+#[test]
+fn a_picked_portfolio_folder_of_a_command_line_workspace_opens_the_parent() {
+    let mut app = Harness::boot(false, None);
+    let root = app.dir.path().join("cli");
+    portfolio_rs::workspace::init_workspace(&root.to_string_lossy(), false).unwrap();
+    let inner = root.join("portfolio");
+    app.rt
+        .state
+        .load_workspace(inner.to_string_lossy().into_owned());
+    app.settle();
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(root.to_str().unwrap())
+    );
+    assert!(root.join("positions.json").is_file());
+    assert!(!inner.join("positions.json").exists());
+}
+
+#[test]
+fn opening_another_portfolio_asks_before_discarding_edits() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    let original = app.dir.path().join("portfolio.json");
+    edited(&mut app);
+
+    app.command('o', false);
+    assert!(
+        app.rt.file_dialog().is_none(),
+        "the dialog waits for an answer"
+    );
+    assert!(matches!(
+        app.rt.state.confirm,
+        Some(Confirm::Unsaved(PendingOpen::File))
+    ));
+    app.click("confirm-cancel");
+    assert!(app.rt.state.dirty);
+    assert_eq!(app.rt.state.positions.len(), 6);
+
+    app.command('o', false);
+    app.click("unsaved-save");
+    assert!(
+        app.rt.file_dialog().is_some(),
+        "saving continues into the dialog"
+    );
+    assert!(!app.rt.state.dirty);
+    assert_eq!(
+        fs::read_to_string(&original)
+            .unwrap()
+            .matches("Widget")
+            .count(),
+        1
+    );
+    app.rt.resolve_file_dialog(None).unwrap();
+    app.settle();
+    assert_eq!(
+        app.rt.state.positions.len(),
+        6,
+        "cancelling the dialog keeps the save"
+    );
+
+    edited(&mut app);
+    let other = app.dir.path().join("other.json");
+    fs::write(&other, "[]\n").unwrap();
+    let dropped = other.clone();
+    app.rt.update(move |state, _| state.open_dropped(&dropped));
+    app.settle();
+    assert!(matches!(
+        app.rt.state.confirm,
+        Some(Confirm::Unsaved(PendingOpen::Path(_)))
+    ));
+    assert_eq!(app.rt.state.positions.len(), 7, "nothing opened yet");
+    app.click("unsaved-discard");
+    assert_eq!(
+        app.rt.state.open.file_path.as_deref(),
+        Some(other.to_str().unwrap())
+    );
+    assert!(app.rt.state.positions.is_empty());
+    // The first edit was saved. The second was not.
+    assert_eq!(
+        fs::read_to_string(&original)
+            .unwrap()
+            .matches("Widget")
+            .count(),
+        1
+    );
+
+    edited(&mut app);
+    let workspace = app.dir.path().join("elsewhere");
+    fs::create_dir(&workspace).unwrap();
+    app.command('o', true);
+    assert!(matches!(
+        app.rt.state.confirm,
+        Some(Confirm::Unsaved(PendingOpen::Workspace))
+    ));
+    app.click("unsaved-discard");
+    assert_eq!(
+        app.rt.file_dialog().map(|dialog| dialog.0),
+        Some(FileDialogKind::Folder)
+    );
+    app.rt.resolve_file_dialog(Some(workspace.clone())).unwrap();
+    app.settle();
+    assert!(app.exists("folder-start"), "{:?}", app.rt.state.error);
+    assert!(!app.has_text("Apple"));
+    app.click("folder-cancel");
+    assert_eq!(
+        app.rt.state.open.file_path.as_deref(),
+        Some(other.to_str().unwrap()),
+        "cancel returns to the portfolio that was open"
+    );
+}
+
+#[test]
+fn closing_returns_to_the_welcome_screen() {
+    let mut app = Harness::boot(true, None);
+    app.command('k', false);
+    app.type_text("close");
+    assert!(app.has_text("Close Workspace"));
+    app.press(Key::Enter);
+    assert!(!app.rt.state.open.is_open(), "{:?}", app.rt.state.error);
+    assert!(app.exists("welcome-create"));
+    assert!(!app.has_text("Bitcoin"));
+
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    edited(&mut app);
+    app.command('w', true);
+    assert!(matches!(
+        app.rt.state.confirm,
+        Some(Confirm::Unsaved(PendingOpen::Close))
+    ));
+    app.click("unsaved-discard");
+    assert!(app.exists("welcome-create"));
+    assert!(!app.rt.state.dirty);
+    assert!(
+        !fs::read_to_string(app.dir.path().join("portfolio.json"))
+            .unwrap()
+            .contains("Widget")
+    );
+}
+
+#[test]
+fn add_position_does_nothing_without_a_portfolio() {
+    let mut app = Harness::boot(false, None);
+    app.rt
+        .update(|state, tx| state.run_command(Command::AddPosition, tx));
+    app.settle();
+    assert!(app.rt.state.form.is_none());
+    assert!(!app.rt.state.dirty);
+    assert!(app.rt.state.positions.is_empty());
+    assert!(app.exists("welcome-create"));
+
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('n', false);
+    assert!(app.rt.state.form.is_some());
+    app.rt.state.open = stahl::backend::OpenDocument::default();
+    app.rt.update(|state, _| state.submit_form());
+    app.settle();
+    assert!(app.rt.state.form.is_none());
+    assert_eq!(app.rt.state.positions.len(), 5);
+    assert!(!app.rt.state.dirty);
+}
+
+#[test]
+fn an_empty_positions_file_says_so() {
+    let mut app = Harness::boot(false, Some(""));
+    assert!(app.has_text("The file is empty."));
+    assert!(app.has_text("EOF while parsing a value"));
+    assert!(!app.exists(Page::Overview.key()));
+
+    let object = app.dir.path().join("object.json");
+    fs::write(&object, "{\"Name\":\"Cash\"}\n").unwrap();
+    app.rt
+        .state
+        .load_file(object.to_string_lossy().into_owned());
+    app.settle();
+    assert!(app.has_text("Expected a list of positions."));
+    assert!(app.has_text("expected a sequence"), "the raw detail stays");
 }

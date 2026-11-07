@@ -29,7 +29,10 @@ use rune::{ClipboardContent, FileDialogOptions, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
-    backend::{Backend, BackendResult, Briefing, History, OpenDocument, Period, Quote, Snapshot},
+    backend::{
+        self, Backend, BackendResult, Briefing, History, OpenDocument, OpenedFolder, Period, Quote,
+        Snapshot, WorkspaceField, WorkspaceProblem,
+    },
     format,
     update::{self, Installed, Release, Updater},
 };
@@ -216,7 +219,8 @@ impl PositionForm {
             name,
             ticker: edit(existing.and_then(|p| p.ticker.clone()).unwrap_or_default()),
             asset_class: edit(
-                existing.map_or_else(|| "Stock".to_string(), |p| p.asset_class.clone()),
+                // As the policy templates spell it: Review matches asset classes by exact name.
+                existing.map_or_else(|| "Stocks".to_string(), |p| p.asset_class.clone()),
             ),
             amount: edit(existing.map_or_else(|| "0".to_string(), |p| editable_number(p.amount))),
             quantity: TextEdit::new(""),
@@ -280,10 +284,55 @@ impl PositionForm {
     }
 }
 
+/// The New Workspace form.
+pub struct NewWorkspaceForm {
+    pub name: TextEdit,
+    pub location: TextEdit,
+    /// Copy the positions of the open file, when there is one to copy.
+    pub keep_positions: bool,
+    pub problem: Option<WorkspaceProblem>,
+    /// Creating one is under way, so a second press mustn't start another.
+    pub busy: bool,
+}
+
+/// Replacing the open portfolio, held until unsaved edits are saved or dropped.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum PendingOpen {
+    /// Show the positions-file dialog.
+    File,
+    /// Show the workspace dialog.
+    Workspace,
+    /// Open this file, or this folder as a workspace.
+    Path(String),
+    /// Back to the welcome screen.
+    Close,
+    /// Create the workspace the open form describes.
+    CreateWorkspace,
+    /// Turn this existing folder into a workspace and open it.
+    StartIn(String),
+    /// Read the file again from disk.
+    Reload,
+    /// Finish launching: the command line, or the portfolio remembered from last time.
+    Startup,
+}
+
+/// The chosen folder is not a workspace. Shown instead of whatever was open, until they decide.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct FolderPrompt {
+    pub dir: String,
+    pub empty: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 pub enum Confirm {
-    Delete { id: usize, name: String },
+    Delete {
+        id: usize,
+        name: String,
+    },
     Quit,
+    /// Save, drop, or keep the edits before [`PendingOpen`] replaces the portfolio.
+    Unsaved(PendingOpen),
 }
 
 /// What the command palette can do.
@@ -295,12 +344,15 @@ pub enum Command {
     Save,
     OpenFile,
     OpenWorkspace,
+    NewWorkspace,
+    Guide,
     Privacy,
     Theme,
     Sidebar,
     AddPosition,
     CopyBriefing,
     CheckForUpdates,
+    Close,
 }
 
 pub struct Palette {
@@ -387,6 +439,7 @@ pub struct State {
     pub findings: Vec<Finding>,
     /// connected | partial | offline | fixture
     pub network: String,
+    pub has_policy: bool,
     /// Position changes not written to disk yet.
     pub dirty: bool,
     pub loading: bool,
@@ -405,7 +458,14 @@ pub struct State {
     pub drop_hover: bool,
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
+    pub new_workspace: Option<NewWorkspaceForm>,
+    pub guide: bool,
+    /// Set when a folder was opened and it is not a workspace. The previous portfolio stays in
+    /// memory, and is not drawn, until this is cleared.
+    pub folder_prompt: Option<FolderPrompt>,
     pub confirm: Option<Confirm>,
+    /// Runs once a save or a revert of unsaved edits has finished.
+    resume: Option<PendingOpen>,
     pub toast: Option<(String, Instant)>,
     toast_armed: bool,
     title_shown: Option<String>,
@@ -580,6 +640,7 @@ impl State {
             performance: None,
             findings: Vec::new(),
             network: String::new(),
+            has_policy: false,
             dirty: false,
             loading: false,
             starting: true,
@@ -594,7 +655,11 @@ impl State {
             drop_hover: false,
             palette: None,
             form: None,
+            new_workspace: None,
+            guide: false,
+            folder_prompt: None,
             confirm: None,
+            resume: None,
             toast: None,
             toast_armed: false,
             title_shown: None,
@@ -741,6 +806,14 @@ impl State {
             self.toast = None;
             changed = true;
         }
+        // A save or revert asked for from the unsaved-changes dialog finishes in `drain`, above.
+        if self.resume.is_some() && !self.loading {
+            let next = self.resume.take().expect("resume is set");
+            if self.error.is_none() && !self.dirty {
+                self.perform(next, tx);
+                changed = true;
+            }
+        }
         let title = if self.dirty {
             "Stahl Capital — Edited"
         } else {
@@ -830,7 +903,9 @@ impl State {
     }
 
     pub fn has_portfolio(&self) -> bool {
-        self.open.is_open() && self.open.parse_error.is_none()
+        // A folder prompt is a decision about a folder that did not open. The portfolio
+        // underneath is not what's on screen, and commands must not change it.
+        self.folder_prompt.is_none() && self.open.is_open() && self.open.parse_error.is_none()
     }
 
     pub fn theme_mode(&self) -> ThemeMode {
@@ -845,6 +920,9 @@ impl State {
 
     pub fn startup(&mut self) {
         if self.started {
+            return;
+        }
+        if self.blocked_by_edits(PendingOpen::Startup) {
             return;
         }
         self.started = true;
@@ -894,6 +972,7 @@ impl State {
         self.performance = Some(snapshot.performance);
         self.findings = snapshot.findings;
         self.network = snapshot.network;
+        self.has_policy = snapshot.has_policy;
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
@@ -934,6 +1013,9 @@ impl State {
                             state.apply_snapshot(snapshot);
                         }
                         after(state);
+                        if !state.has_portfolio() {
+                            state.form = None;
+                        }
                     }
                     Err(error) => state.error = Some(error),
                 }
@@ -941,34 +1023,239 @@ impl State {
         );
     }
 
-    pub fn load_file(&mut self, path: String) {
+    /// True when unsaved edits have to be dealt with before `next`. The dialog is up.
+    fn blocked_by_edits(&mut self, next: PendingOpen) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        self.palette = None;
+        self.confirm = Some(Confirm::Unsaved(next));
+        true
+    }
+
+    /// Save or drop the edits the dialog is asking about, then do what was waiting.
+    pub fn confirm_unsaved(&mut self, save: bool) {
+        let Some(Confirm::Unsaved(next)) = self.confirm.take() else {
+            return;
+        };
+        if save && !self.has_portfolio() {
+            self.confirm = Some(Confirm::Unsaved(next));
+            self.error =
+                Some("These changes can't be saved, because no portfolio is open.".to_string());
+            return;
+        }
+        self.resume = Some(next);
+        if save {
+            self.save();
+        } else {
+            self.revert_edits();
+        }
+    }
+
+    /// Put the open file back to what's on disk, so dropping edits doesn't leave them on screen.
+    fn revert_edits(&mut self) {
         self.change_and_reload(
-            true,
+            false,
             |state| state.dirty = false,
-            move |backend| async move { backend.load_simple_file(path).await },
+            |backend| async move { backend.reload().await },
         );
     }
 
+    fn perform(&mut self, next: PendingOpen, tx: &mut Tx) {
+        match next {
+            PendingOpen::File => self.show_file_dialog(tx),
+            PendingOpen::Workspace => self.show_workspace_dialog(tx),
+            PendingOpen::Path(path) => self.open_path_now(&path),
+            PendingOpen::Close => self.reset_now(),
+            PendingOpen::CreateWorkspace => self.submit_new_workspace(),
+            PendingOpen::StartIn(dir) => self.start_workspace_now(dir),
+            PendingOpen::Reload => self.reload(),
+            PendingOpen::Startup => self.startup(),
+        }
+    }
+
+    pub fn load_file(&mut self, path: String) {
+        if self.blocked_by_edits(PendingOpen::Path(path.clone())) {
+            return;
+        }
+        self.load_file_now(path);
+    }
+
+    fn load_file_now(&mut self, path: String) {
+        self.change_and_reload(true, State::opened_another, move |backend| async move {
+            backend.load_simple_file(path).await
+        });
+    }
+
     pub fn load_workspace(&mut self, dir: String) {
-        self.change_and_reload(
-            true,
-            |state| state.dirty = false,
-            move |backend| async move { backend.load_workspace(dir).await },
+        if self.blocked_by_edits(PendingOpen::Path(dir.clone())) {
+            return;
+        }
+        self.open_folder_now(dir);
+    }
+
+    fn open_path_now(&mut self, path: &str) {
+        if Path::new(path).is_dir() {
+            self.open_folder_now(path.to_string());
+        } else {
+            self.load_file_now(path.to_string());
+        }
+    }
+
+    fn open_folder_now(&mut self, dir: String) {
+        self.loading = true;
+        self.error = None;
+        self.run(
+            move |backend| async move {
+                match backend.open_folder(dir).await? {
+                    OpenedFolder::NeedsStart { dir, empty } => Ok(Err((dir, empty))),
+                    OpenedFolder::Loaded => {
+                        let open = backend.open_document().await;
+                        let snapshot = if open.parse_error.is_none() {
+                            backend.record_today_or_warn().await;
+                            Some(backend.snapshot().await)
+                        } else {
+                            None
+                        };
+                        Ok(Ok((open, snapshot, backend.config().await)))
+                    }
+                }
+            },
+            |state, result| {
+                state.loading = false;
+                match result {
+                    Ok(Ok((open, snapshot, config))) => {
+                        state.folder_prompt = None;
+                        state.open = open;
+                        state.config = Some(config);
+                        if let Some(snapshot) = snapshot {
+                            state.apply_snapshot(snapshot);
+                        }
+                        state.opened_another();
+                    }
+                    Ok(Err((dir, empty))) => {
+                        state.folder_prompt = Some(FolderPrompt {
+                            dir,
+                            empty,
+                            error: None,
+                        });
+                        state.error = None;
+                        state.palette = None;
+                        state.form = None;
+                        state.new_workspace = None;
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+            },
         );
+    }
+
+    /// Start a workspace in a folder that was opened and wasn't one, then open it.
+    pub fn start_prompted_workspace(&mut self) {
+        let Some(dir) = self.folder_prompt.as_ref().map(|prompt| prompt.dir.clone()) else {
+            return;
+        };
+        if self.blocked_by_edits(PendingOpen::StartIn(dir.clone())) {
+            return;
+        }
+        self.start_workspace_now(dir);
+    }
+
+    fn start_workspace_now(&mut self, dir: String) {
+        self.loading = true;
+        self.error = None;
+        if let Some(prompt) = &mut self.folder_prompt {
+            prompt.error = None;
+        }
+        self.run(
+            move |backend| async move {
+                backend::start_workspace(Path::new(&dir))?;
+                backend.load_workspace(dir).await?;
+                backend.record_today_or_warn().await;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((open, snapshot, backend.config().await))
+            },
+            |state, result| {
+                state.loading = false;
+                match result {
+                    Ok((open, snapshot, config)) => {
+                        state.folder_prompt = None;
+                        state.open = open;
+                        state.config = Some(config);
+                        if let Some(snapshot) = snapshot {
+                            state.apply_snapshot(snapshot);
+                        }
+                        state.page = Page::Overview;
+                        state.opened_another();
+                        state.show_toast("Workspace created");
+                    }
+                    Err(error) => {
+                        if let Some(prompt) = &mut state.folder_prompt {
+                            prompt.error = Some(error);
+                        } else {
+                            state.error = Some(error);
+                        }
+                    }
+                }
+            },
+        );
+    }
+
+    /// A different portfolio is open now, so nothing fetched for the last one still applies.
+    fn opened_another(&mut self) {
+        self.dirty = false;
+        self.form = None;
+        self.folder_prompt = None;
+        self.selected = None;
+        self.inspector.set_open(false);
+        self.search.clear();
+        self.history = None;
+        self.review = Loadable::default();
+        self.simulation = Loadable::default();
+        self.briefing = Loadable::default();
+        self.validation = Loadable::default();
+        self.doctor = Loadable::default();
+        self.policy.policy = None;
+        self.policy.editor.clear();
+        self.policy.message = None;
+        self.policy.error = None;
+        self.documents.generated = None;
+        self.documents.message = None;
+        self.documents.error = None;
+        if self.page.needs_workspace() && !self.is_workspace() {
+            self.page = Page::Overview;
+        }
+        self.load_page();
     }
 
     pub fn open_dropped(&mut self, path: &Path) {
         let string = path.to_string_lossy().into_owned();
-        if path.is_dir() {
-            self.load_workspace(string);
-        } else {
-            self.load_file(string);
+        if self.blocked_by_edits(PendingOpen::Path(string.clone())) {
+            return;
         }
+        self.open_path_now(&string);
     }
 
     pub fn ask_for_file(&mut self, tx: &mut Tx) {
+        if self.blocked_by_edits(PendingOpen::File) {
+            return;
+        }
+        self.show_file_dialog(tx);
+    }
+
+    fn show_file_dialog(&mut self, tx: &mut Tx) {
+        let directory = self.open.file_path.as_deref().and_then(|file| {
+            let parent = Path::new(file).parent()?;
+            parent.is_dir().then(|| parent.to_path_buf())
+        });
         let options = FileDialogOptions {
             title: "Open Portfolio".into(),
+            directory,
             ..Default::default()
         }
         .filter("Portfolio", &["json", "gpg"]);
@@ -980,17 +1267,138 @@ impl State {
     }
 
     pub fn ask_for_workspace(&mut self, tx: &mut Tx) {
-        self.ask_for_folder(tx, "Open Workspace", |state, dir| state.load_workspace(dir));
+        if self.blocked_by_edits(PendingOpen::Workspace) {
+            return;
+        }
+        self.show_workspace_dialog(tx);
+    }
+
+    fn show_workspace_dialog(&mut self, tx: &mut Tx) {
+        let open = self
+            .folder_prompt
+            .as_ref()
+            .map(|prompt| PathBuf::from(&prompt.dir))
+            .or_else(|| self.open.workspace_dir.clone().map(PathBuf::from));
+        self.ask_for_folder(
+            tx,
+            "Open Workspace",
+            backend::folder_dialog_start(open.as_deref()),
+            |state, dir| state.load_workspace(dir),
+        );
+    }
+
+    /// The file a new workspace can take its positions from: one open on its own, with something
+    /// in it, and not encrypted, because a copy would be plaintext.
+    pub fn positions_to_keep(&self) -> Option<&str> {
+        let file = self.open.file_path.as_deref()?;
+        (!self.is_workspace()
+            && self.has_portfolio()
+            && !self.positions.is_empty()
+            && !file.ends_with(".gpg"))
+        .then_some(file)
+    }
+
+    pub fn open_new_workspace(&mut self) {
+        self.palette = None;
+        let mut name = TextEdit::new("");
+        name.focused = true;
+        self.new_workspace = Some(NewWorkspaceForm {
+            name,
+            location: TextEdit::new(backend::default_workspace_location()),
+            keep_positions: true,
+            problem: None,
+            busy: false,
+        });
+    }
+
+    pub fn choose_workspace_location(&mut self, tx: &mut Tx) {
+        self.ask_for_folder(tx, "Choose a Location", None, |state, dir| {
+            if let Some(form) = &mut state.new_workspace {
+                form.location.replace_text(dir);
+                form.problem = None;
+            }
+        });
+    }
+
+    /// Create the workspace the form describes and open it. Problems stay in the form.
+    pub fn submit_new_workspace(&mut self) {
+        let Some(form) = &self.new_workspace else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        if self.blocked_by_edits(PendingOpen::CreateWorkspace) {
+            return;
+        }
+        let keep = self.positions_to_keep().map(str::to_string);
+        let Some(form) = &mut self.new_workspace else {
+            return;
+        };
+        let name = form.name.text.clone();
+        let location = form.location.text.clone();
+        let keep = keep.filter(|_| form.keep_positions);
+        form.problem = None;
+        form.busy = true;
+        self.loading = true;
+        self.error = None;
+        self.run(
+            move |backend| async move {
+                let dir = match backend::create_workspace(&name, &location, keep.as_deref()) {
+                    Ok(dir) => dir,
+                    Err(problem) => return Ok(Err(problem)),
+                };
+                if let Err(message) = backend.load_workspace(dir).await {
+                    return Ok(Err(WorkspaceProblem {
+                        field: WorkspaceField::Location,
+                        message,
+                    }));
+                }
+                backend.record_today_or_warn().await;
+                let snapshot = backend.snapshot().await;
+                Ok(Ok((
+                    backend.open_document().await,
+                    snapshot,
+                    backend.config().await,
+                )))
+            },
+            |state, result| {
+                state.loading = false;
+                match result {
+                    Ok(Ok((open, snapshot, config))) => {
+                        state.new_workspace = None;
+                        state.open = open;
+                        state.config = Some(config);
+                        state.apply_snapshot(snapshot);
+                        state.page = Page::Overview;
+                        state.opened_another();
+                        state.show_toast("Workspace created");
+                    }
+                    Ok(Err(problem)) => {
+                        if let Some(form) = &mut state.new_workspace {
+                            form.problem = Some(problem);
+                            form.busy = false;
+                        }
+                    }
+                    Err(error) => {
+                        state.new_workspace = None;
+                        state.error = Some(error);
+                    }
+                }
+            },
+        );
     }
 
     fn ask_for_folder(
         &mut self,
         tx: &mut Tx,
         title: &str,
+        directory: Option<PathBuf>,
         then: impl FnOnce(&mut State, String) + 'static,
     ) {
         let options = FileDialogOptions {
             title: title.into(),
+            directory,
             ..Default::default()
         };
         tx.open_folder(options, move |state: &mut State, result, _| match result {
@@ -1002,6 +1410,9 @@ impl State {
 
     /// Read the open file again, after fixing it elsewhere.
     pub fn reload(&mut self) {
+        if self.blocked_by_edits(PendingOpen::Reload) {
+            return;
+        }
         self.change_and_reload(
             true,
             |state| state.dirty = false,
@@ -1010,7 +1421,18 @@ impl State {
     }
 
     /// Forget the remembered portfolio and go back to the welcome screen.
+    ///
+    /// Unsaved edits ask first. The same question covers every other way of leaving this portfolio.
     pub fn reset(&mut self) {
+        if self.open.is_open() && self.blocked_by_edits(PendingOpen::Close) {
+            return;
+        }
+        self.reset_now();
+    }
+
+    fn reset_now(&mut self) {
+        self.folder_prompt = None;
+        self.form = None;
         self.run(
             |backend| async move { backend.clear_remembered_path().await },
             |state, result| match result {
@@ -1022,7 +1444,8 @@ impl State {
                     state.allocation.clear();
                     state.performance = None;
                     state.findings.clear();
-                    state.dirty = false;
+                    state.has_policy = false;
+                    state.opened_another();
                     state.page = Page::Overview;
                 }
                 Err(error) => state.error = Some(error),
@@ -1097,6 +1520,10 @@ impl State {
     }
 
     pub fn load_review(&mut self) {
+        if !self.has_policy {
+            self.review = Loadable::default();
+            return;
+        }
         self.review.loading = true;
         self.restart_draw = true;
         self.run(
@@ -1106,6 +1533,10 @@ impl State {
     }
 
     pub fn load_simulation(&mut self) {
+        if !self.has_policy {
+            self.simulation = Loadable::default();
+            return;
+        }
         self.simulation.loading = true;
         self.run(
             |backend| async move { backend.simulation().await },
@@ -1182,11 +1613,18 @@ impl State {
     }
 
     pub fn open_form(&mut self, existing: Option<usize>) {
+        if !self.has_portfolio() {
+            return;
+        }
         let position = existing.and_then(|id| self.positions.iter().find(|p| p.id == id));
         self.form = Some(PositionForm::new(position));
     }
 
     pub fn submit_form(&mut self) {
+        if !self.has_portfolio() {
+            self.form = None;
+            return;
+        }
         let Some(form) = &mut self.form else {
             return;
         };
@@ -1354,16 +1792,27 @@ impl State {
             Command::Save => self.save(),
             Command::OpenFile => self.ask_for_file(tx),
             Command::OpenWorkspace => self.ask_for_workspace(tx),
+            Command::NewWorkspace => self.open_new_workspace(),
+            Command::Guide => self.toggle_guide(),
             Command::Privacy => self.privacy = !self.privacy,
             Command::Theme => self.toggle_theme(),
             Command::Sidebar => self.sidebar.toggle(),
             Command::AddPosition => {
+                if !self.has_portfolio() {
+                    return;
+                }
                 self.navigate(Page::Holdings);
                 self.open_form(None);
             }
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
+            Command::Close => self.reset(),
         }
+    }
+
+    pub fn toggle_guide(&mut self) {
+        self.palette = None;
+        self.guide = !self.guide;
     }
 
     pub fn open_palette(&mut self) {
@@ -1630,20 +2079,8 @@ impl State {
         );
     }
 
-    pub fn create_workspace(&mut self, tx: &mut Tx) {
-        self.ask_for_folder(tx, "Create Workspace", |state, dir| {
-            match state.backend.init_workspace(&dir) {
-                Ok(()) => {
-                    state.show_toast("Workspace created");
-                    state.load_workspace(dir);
-                }
-                Err(error) => state.settings.error = Some(error),
-            }
-        });
-    }
-
     pub fn export_skill(&mut self, tx: &mut Tx) {
-        self.ask_for_folder(tx, "Export Agent Skill", |state, dir| {
+        self.ask_for_folder(tx, "Export Agent Skill", None, |state, dir| {
             match state.backend.export_skill(&dir) {
                 Ok(()) => state.show_toast("Skill exported"),
                 Err(error) => state.settings.error = Some(error),
@@ -1674,7 +2111,12 @@ impl State {
 
     pub fn use_strategy(&mut self, strategy: &str) {
         match Backend::policy_from_strategy(strategy) {
-            Ok(policy) => self.show_policy(policy),
+            Ok(policy) => {
+                self.show_policy(policy);
+                self.policy.message =
+                    Some("Template loaded. Press Save to Workspace to keep it.".to_string());
+                self.policy.error = None;
+            }
             Err(error) => self.policy.error = Some(error),
         }
     }
@@ -1689,6 +2131,7 @@ impl State {
                 state.policy.loading = false;
                 match result {
                     Ok(policy) => {
+                        state.has_policy = true;
                         state.show_policy(policy);
                         state.policy.message = Some("Policy loaded".to_string());
                     }
@@ -1702,6 +2145,7 @@ impl State {
         self.policy.loading = false;
         match result {
             Ok(policy) => {
+                self.has_policy = true;
                 self.policy.policy = Some(policy);
                 self.policy.message = Some(success.to_string());
             }
@@ -1806,6 +2250,35 @@ mod tests {
 
     fn test_state(dir: &Path, runtime: &Runtime) -> State {
         State::new(demo::backend(dir, None, runtime.handle().clone()), None)
+    }
+
+    #[test]
+    fn startup_asks_before_replacing_unsaved_edits() {
+        let runtime = Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path(), &runtime);
+        state.dirty = true;
+        state.startup();
+        assert_eq!(state.confirm, Some(Confirm::Unsaved(PendingOpen::Startup)));
+        state.settle();
+        assert!(state.starting, "launch waits for the answer");
+
+        state.confirm = None;
+        state.dirty = false;
+        state.startup();
+        state.settle();
+        assert!(!state.starting);
+    }
+
+    #[test]
+    fn add_position_is_refused_with_nothing_open() {
+        let runtime = Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = test_state(dir.path(), &runtime);
+        state.open_form(None);
+        assert!(state.form.is_none());
+        state.submit_form();
+        assert!(!state.dirty);
     }
 
     #[test]

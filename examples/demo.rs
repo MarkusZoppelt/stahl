@@ -12,7 +12,7 @@ use std::{env, fs, process, time::SystemTime};
 use portfolio_rs::config::ThemeMode;
 use stahl::{
     app, demo,
-    state::{Page, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
     update::Installation,
 };
 use tokio::runtime::Builder;
@@ -44,6 +44,31 @@ fn main() {
 
     fn scene(s: &mut State, page: Page) {
         s.startup();
+        s.settle();
+        s.navigate(page);
+        s.settle();
+    }
+    /// What someone sees on first opening the app, with nothing to reopen.
+    fn first_run(s: &mut State) {
+        s.reset();
+        s.settle();
+        s.starting = false;
+    }
+    /// A form that shows no real path, with no name yet.
+    fn example_form(s: &mut State) {
+        if let Some(form) = &mut s.new_workspace {
+            form.location.replace_text("/Users/you/Documents");
+        }
+    }
+    /// A page of a new workspace with nothing in it yet.
+    fn empty(s: &mut State, page: Page) {
+        s.startup();
+        s.settle();
+        let dir = env::temp_dir()
+            .join(format!("stahl-empty-{}", process::id()))
+            .join("My Portfolio");
+        demo::seed_empty_workspace(&dir);
+        s.load_workspace(dir.to_string_lossy().into_owned());
         s.settle();
         s.navigate(page);
         s.settle();
@@ -111,10 +136,42 @@ fn main() {
                 scene(s, Page::Holdings);
                 s.open_form(Some(0));
             }),
-            ("welcome", |s| {
-                s.reset();
+            ("welcome", first_run),
+            ("new-workspace", |s| {
+                first_run(s);
+                s.open_new_workspace();
+                example_form(s);
+                if let Some(form) = &mut s.new_workspace {
+                    form.name.replace_text("My Portfolio");
+                }
+            }),
+            ("new-workspace-problem", |s| {
+                first_run(s);
+                s.open_new_workspace();
+                example_form(s);
+                s.submit_new_workspace();
                 s.settle();
-                s.starting = false;
+            }),
+            ("guide", |s| {
+                scene(s, Page::Holdings);
+                s.toggle_guide();
+            }),
+            ("guide-first-run", |s| {
+                first_run(s);
+                s.toggle_guide();
+            }),
+            ("not-a-workspace", |s| {
+                scene(s, Page::Overview);
+                s.folder_prompt = Some(FolderPrompt {
+                    dir: "/tmp/empty-folder".into(),
+                    empty: true,
+                    error: None,
+                });
+            }),
+            ("unsaved-changes", |s| {
+                scene(s, Page::Overview);
+                s.dirty = true;
+                s.confirm = Some(Confirm::Unsaved(PendingOpen::Workspace));
             }),
             ("parse-failure", |s| {
                 s.startup();
@@ -124,6 +181,16 @@ fn main() {
                 s.load_file(file.to_string_lossy().into_owned());
                 s.settle();
             }),
+            ("empty-overview", |s| empty(s, Page::Overview)),
+            ("empty-holdings", |s| empty(s, Page::Holdings)),
+            ("empty-allocation", |s| empty(s, Page::Allocation)),
+            ("empty-performance", |s| empty(s, Page::Performance)),
+            ("empty-review", |s| empty(s, Page::Review)),
+            ("empty-rebalance", |s| empty(s, Page::Rebalance)),
+            ("empty-policy", |s| empty(s, Page::Policy)),
+            ("empty-documents", |s| empty(s, Page::Documents)),
+            ("empty-briefing", |s| empty(s, Page::Briefing)),
+            ("empty-health", |s| empty(s, Page::Health)),
             ("privacy", |s| {
                 scene(s, Page::Overview);
                 s.privacy = true;

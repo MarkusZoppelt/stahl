@@ -1,9 +1,9 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::env;
+use std::{env, mem};
 
 use rune::{
-    Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
     tok::motion::LEAD,
 };
 use rune_kit::{
@@ -18,6 +18,7 @@ use crate::{
 };
 
 mod charts;
+pub mod guide;
 mod insights;
 mod overlays;
 mod plan;
@@ -50,7 +51,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.key == Key::Escape {
         return s.palette.take().is_some()
             || s.form.take().is_some()
+            || s.new_workspace.take().is_some()
             || s.confirm.take().is_some()
+            || s.folder_prompt.take().is_some()
+            || mem::take(&mut s.guide)
             || s.close_update_dialog();
     }
     if portfolio::holdings_key(s, event, tx) {
@@ -72,6 +76,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         ('r', false) => s.refresh_prices(),
         ('h', true) => s.privacy = !s.privacy,
         ('n', false) if s.has_portfolio() => s.open_form(None),
+        ('n', true) => s.open_new_workspace(),
+        ('w', true) => s.reset(),
+        // Some layouts need Shift to type a slash, so it doesn't matter here.
+        ('/' | '?', _) => s.toggle_guide(),
         ('q', false) => s.quit_or_ask(tx),
         (key, false) => match Page::from_shortcut(key) {
             Some(page) if s.has_portfolio() => s.navigate(page),
@@ -87,6 +95,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut layer = Vec::new();
     let body = if s.starting {
         splash(&t)
+    } else if s.folder_prompt.is_some() {
+        // Not the shell: the previous portfolio is still in memory, and must not look loaded.
+        folder_prompt(s, &t)
     } else if s.open.parse_error.is_some() {
         overlays::parse_failure(s, &t)
     } else if !s.has_portfolio() {
@@ -182,27 +193,43 @@ fn welcome(s: &State, t: &Theme) -> El {
                 .color(k.c.text_base),
         )
         .child(
-            ui::muted(
-                "You. Your portfolio, in plain files, on your own machine.",
-                t,
-            )
-            .mb(26.0),
+            col().w_full().max_w(620.0).items_center().mb(26.0).child(
+                ui::muted(
+                    "Track what you own, see how it has done, and check it against your plan. \
+                     Your portfolio stays in plain files on this computer. Looking up prices \
+                     sends only the ticker symbols.",
+                    t,
+                )
+                .wrap()
+                .align(Align::Center),
+            ),
         )
         .child(
             row()
-                .center_y()
                 .w_full()
-                .max_w(672.0)
+                .max_w(880.0)
                 .gap(16.0)
-                .equal_columns(2)
+                .items_stretch()
+                .equal_columns(3)
+                .child(
+                    choice(
+                        "welcome-create",
+                        &icons::FOLDER_PLUS,
+                        true,
+                        "Create a workspace",
+                        "Start here if you're new. A folder for your positions, policy, reports and decisions.",
+                        0,
+                    )
+                    .on_press(|s: &mut State| s.open_new_workspace()),
+                )
                 .child(
                     choice(
                         "welcome-workspace",
                         &icons::FOLDER_OPEN,
-                        true,
+                        false,
                         "Open a workspace",
-                        "Recommended. Holds your portfolio, policy, diary, decisions, and reports.",
-                        0,
+                        "Pick up a folder you made here or with the portfolio_rs command line.",
+                        1,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx)),
                 )
@@ -212,8 +239,8 @@ fn welcome(s: &State, t: &Theme) -> El {
                         &icons::FILE_BRACES,
                         false,
                         "Open a positions file",
-                        "Quick start with just a positions.json. You can create a workspace later.",
-                        1,
+                        "Have a positions.json already? See it right away. Planning needs a workspace.",
+                        2,
                     )
                     .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_file(tx)),
                 ),
@@ -223,10 +250,95 @@ fn welcome(s: &State, t: &Theme) -> El {
                 ui::caption("or drop a file or folder anywhere on this window", t).mt(24.0)
             }),
         )
+        .child(
+            Button::new("What's in Stahl?")
+                .variant(ButtonVariant::Ghost)
+                .icon(&icons::CIRCLE_HELP)
+                .shortcut(ui::chord(false, "/"))
+                .on_press(|s: &mut State| s.toggle_guide())
+                .build(k)
+                .key("welcome-guide")
+                .mt(8.0),
+        )
         .children(
             s.error
                 .as_ref()
-                .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(672.0)),
+                .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(880.0)),
+        )
+}
+
+/// A folder was chosen and it is not a workspace. The previous portfolio is not drawn.
+fn folder_prompt(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let Some(prompt) = &s.folder_prompt else {
+        return col();
+    };
+    let name = file_name(&prompt.dir);
+    let detail = if prompt.empty {
+        format!(
+            "{name} is empty, so there is nothing to open. Start a workspace in this folder, or choose a different one."
+        )
+    } else {
+        format!(
+            "{name} has no positions.json, and it isn't a portfolio from the portfolio_rs command line. Starting a workspace here adds those files and leaves everything else in place."
+        )
+    };
+    col()
+        .w_full()
+        .h_full()
+        .center()
+        .gap(12.0)
+        .padding(24.0)
+        .child(ui::wash(t, 0.0))
+        .child(
+            text("This folder isn't a workspace")
+                .font(PAGE_TITLE)
+                .color(k.c.text_base),
+        )
+        .child(
+            col()
+                .w_full()
+                .max_w(640.0)
+                .items_center()
+                .child(ui::muted(detail, t).wrap().align(Align::Center)),
+        )
+        .child(
+            ui::caption(prompt.dir.clone(), t)
+                .key("folder-path")
+                .truncate_middle()
+                .max_w(640.0),
+        )
+        .children(
+            prompt
+                .error
+                .clone()
+                .map(|error| ui::danger(error, t).max_w(640.0)),
+        )
+        .child(
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    Button::new("Start a workspace here")
+                        .variant(ButtonVariant::Submit)
+                        .icon(&icons::FOLDER_PLUS)
+                        .on_press(|s: &mut State| s.start_prompted_workspace())
+                        .build(k)
+                        .key("folder-start"),
+                )
+                .child(
+                    Button::new("Choose another folder")
+                        .icon(&icons::FOLDER_OPEN)
+                        .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx))
+                        .build(k)
+                        .key("folder-choose"),
+                )
+                .child(
+                    Button::new("Cancel")
+                        .on_press(|s: &mut State| s.folder_prompt = None)
+                        .build(k)
+                        .key("folder-cancel"),
+                ),
         )
 }
 
@@ -269,34 +381,31 @@ fn sidebar(s: &State, t: &Theme) -> El {
     let mut bar = Sidebar::new().label("Sections").header(header).section(
         SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
     );
-    bar =
-        if s.is_workspace() {
-            bar.section(
-                SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))),
-            )
-        } else {
-            bar.child(
+    bar = if s.is_workspace() {
+        bar.section(SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))))
+    } else {
+        bar.child(
             col()
                 .key("nav-unlock")
                 .role("button")
-                .label("Open a workspace")
+                .label("Create a workspace")
                 .focusable(true)
                 .px(10.0)
                 .py(8.0)
                 .gap(2.0)
                 .radius(6.0)
                 .hover(k.c.hover)
-                .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx))
+                .on_press(|s: &mut State| s.open_new_workspace())
                 .child(text("Plan").font(k.ty.text_xsmall_medium).color(k.c.text_faint))
                 .child(
                     ui::caption(
-                        "Open a workspace to set a policy, review drift, and simulate rebalancing.",
+                        "Create a workspace to set a policy, review drift, and simulate rebalancing.",
                         t,
                     )
                     .wrap(),
                 ),
         )
-        };
+    };
     bar.section(
         SidebarSection::new("Insights").rows(Page::INSIGHTS.map(|page| nav_row(s, page, t))),
     )
@@ -354,7 +463,7 @@ fn freshness(s: &State, t: &Theme) -> El {
                 .color(t.kit.c.text_muted)
                 .build(&t.kit),
         )
-        .help("How current these prices are")
+        .help(guide::FRESHNESS)
 }
 
 fn tool(icon: &'static Icon, label: &str, t: &Theme) -> IconButton {
@@ -391,6 +500,13 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
                 .mr(6.0)
                 .transition(Transition::scale(0.9).combined(Transition::opacity()))
         }))
+        .child(
+            tool(&icons::CIRCLE_HELP, "Guide", t)
+                .shortcut(ui::chord(false, "/"))
+                .on_press(|s: &mut State| s.toggle_guide())
+                .build(k)
+                .key("guide"),
+        )
         .child(
             tool(&icons::SEARCH, "Command Palette", t)
                 .shortcut(ui::chord(false, "K"))
@@ -432,7 +548,14 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
             .key("toggle-theme"),
         )
         .child(refresh);
-    Toolbar::new().leading(freshness(s, t)).trailing(trailing)
+    // With nothing to price, there's nothing to say about prices.
+    Toolbar::new()
+        .leading(if s.positions.is_empty() {
+            el()
+        } else {
+            freshness(s, t)
+        })
+        .trailing(trailing)
 }
 
 /// Where you are: the section in small type, the page in large.
@@ -512,6 +635,11 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
                 )
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
                 .child(page_heading(s, t))
+                .child(
+                    ui::caption(guide::about(s.page), t)
+                        .key("page-about")
+                        .wrap(),
+                )
                 .child(page),
         );
     let main = col()

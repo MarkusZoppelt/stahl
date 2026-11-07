@@ -12,7 +12,9 @@ use std::{
 };
 
 use chrono::{Duration, Local};
-use portfolio_rs::{AppConfig, FixtureProvider, services::quotes::AnyProvider, state::AppState};
+use portfolio_rs::{
+    AppConfig, FixtureProvider, services::quotes::AnyProvider, state::AppState, workspace,
+};
 use semver::Version;
 use sha2::{Digest, Sha256};
 use tokio::runtime::Handle;
@@ -126,6 +128,13 @@ pub fn seed_workspace(dir: &Path) {
         .collect();
     fs::write(history.join("snapshots.jsonl"), lines.join("\n") + "\n")
         .expect("demo workspace is writable");
+}
+
+/// A workspace as a new user has it: the files `portfolio_rs` sets up, and no positions.
+pub fn seed_empty_workspace(dir: &Path) {
+    fs::create_dir_all(dir).expect("demo workspace is writable");
+    workspace::init_workspace(&dir.to_string_lossy(), false).expect("demo workspace is writable");
+    fs::write(dir.join("positions.json"), "[]\n").expect("demo workspace is writable");
 }
 
 /// A backend on fixture quotes, with its config in `dir`. With `workspace`, it opens that on

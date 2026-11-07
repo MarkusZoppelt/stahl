@@ -4,7 +4,12 @@ use portfolio_rs::{review::Severity, simulate::RebalanceScenario};
 use rune::{Color, Cx, DragItem, El, ScrollSpec, col, icon, row, text, text_input};
 use rune_kit::{Button, ButtonVariant, Markdown, TextInput};
 
-use crate::{format, icons, state::State, theme::Theme, view::ui};
+use crate::{
+    format, icons,
+    state::{Page, State},
+    theme::Theme,
+    view::{guide, ui},
+};
 
 fn tone(severity: &Severity, t: &Theme) -> Color {
     match severity {
@@ -26,8 +31,44 @@ fn pass_icon(passed: bool, t: &Theme) -> El {
     .color(if passed { t.up } else { t.down })
 }
 
+fn no_policy(key: &'static str, button: &'static str, detail: &str, t: &Theme) -> El {
+    ui::empty_state(
+        key,
+        &icons::SHIELD,
+        "No policy yet",
+        detail,
+        Button::new("Set a Policy")
+            .variant(ButtonVariant::Submit)
+            .icon(&icons::SHIELD)
+            .on_press(|s: &mut State| s.navigate(Page::Policy))
+            .build(&t.kit)
+            .key(button),
+        t,
+    )
+}
+
 pub fn review(s: &State, t: &Theme) -> El {
     let k = &t.kit;
+    if !s.has_policy {
+        return no_policy(
+            "review-no-policy",
+            "review-set-policy",
+            "A policy says how you want your money split. Review compares your portfolio with it \
+             and lists what has drifted.",
+            t,
+        );
+    }
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "review-empty",
+            &icons::STETHOSCOPE,
+            "Nothing to review yet",
+            "Your policy is set. Add a position and this page shows how far you are from your \
+             targets.",
+            ui::add_position_button("review-empty-add", t),
+            t,
+        );
+    }
     let mut page = col()
         .w_full()
         .gap(16.0)
@@ -105,7 +146,12 @@ pub fn review(s: &State, t: &Theme) -> El {
     }
     page = page.child(ui::entering(
         ui::card(t)
-            .child(ui::title("Allocation vs target", t))
+            .child(ui::header(
+                "Allocation vs target",
+                "Drift is how far a class is from its target. A cross means it's past the \
+                 tolerance you set.",
+                t,
+            ))
             .child(ui::table(
                 &["Asset class", "Target", "Actual", "Drift", "Status"],
                 review
@@ -258,13 +304,36 @@ fn scenario_card(s: &State, scenario: &RebalanceScenario, t: &Theme) -> El {
                     }),
                 ))
         }))
-        .child(ui::caption(
-            format!("Cash impact: {}", s.signed_money(scenario.cash_impact)),
-            t,
-        ))
+        .child(
+            ui::caption(
+                format!("Cash impact: {}", s.signed_money(scenario.cash_impact)),
+                t,
+            )
+            .help(guide::CASH_IMPACT),
+        )
 }
 
 pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+    if !s.has_policy {
+        return no_policy(
+            "rebalance-no-policy",
+            "rebalance-set-policy",
+            "A policy says how you want your money split. Rebalance works out which trades would \
+             get you there. It never trades.",
+            t,
+        );
+    }
+    if s.positions.is_empty() {
+        return ui::empty_state(
+            "rebalance-empty",
+            &icons::SCALE,
+            "Nothing to rebalance yet",
+            "Your policy is set. Add a position and this page shows the trades that would bring \
+             you to your targets.",
+            ui::add_position_button("rebalance-empty-add", t),
+            t,
+        );
+    }
     let page = col()
         .w_full()
         .gap(16.0)
@@ -323,7 +392,12 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let page = &s.policy;
     let templates = page.policy.is_none().then(|| {
         ui::card(t)
-            .child(ui::muted("Start from a strategy template:", t))
+            .child(ui::header(
+                "Start from a template",
+                "It fills the editor below, and you can change anything. Nothing is kept until \
+                 you press Save to Workspace.",
+                t,
+            ))
             .child(
                 row()
                     .center_y()

@@ -74,6 +74,7 @@ fn with_menus(app: App<State>) -> App<State> {
         Some("cmd+shift+o"),
         |s, tx| s.ask_for_workspace(tx),
     ))
+    .menu_item(item("Close", "File", Some("cmd+shift+w"), |s, _| s.reset()))
     .menu_item(MenuItem::separator().menu("File"))
     .menu_item(item("Add Position…", "File", Some("cmd+n"), |s, _| {
         s.open_form(None)
@@ -121,6 +122,9 @@ fn with_menus(app: App<State>) -> App<State> {
     .menu_item(MenuItem::separator().menu("Go"))
     .menu_item(page_item(Page::Briefing, |s, _| s.navigate(Page::Briefing)))
     .menu_item(page_item(Page::Health, |s, _| s.navigate(Page::Health)))
+    .menu_item(item("Stahl Guide", "Help", Some("cmd+/"), |s, _| {
+        s.toggle_guide()
+    }))
     .menu_item(
         MenuItem::new("Refresh Prices", |s: &mut State, _| s.refresh_prices())
             .id("dock-refresh")
