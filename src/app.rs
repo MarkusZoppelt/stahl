@@ -7,6 +7,7 @@ use rune::{App, AppHandle, AppSpec, Chrome, Cx, El, Env, MenuItem, Runtime, Tx};
 use crate::{
     backend::Backend,
     state::{Page, State},
+    update::Updater,
     view,
 };
 
@@ -129,6 +130,10 @@ fn with_menus(app: App<State>) -> App<State> {
             .key_equivalent("cmd+,".parse().expect("menu shortcuts are valid"))
             .keys_first(),
     )
+    .menu_item(MenuItem::new(
+        "Check for Updates…",
+        |s: &mut State, _: &mut Tx| s.check_for_updates(false),
+    ))
 }
 
 fn configured(spec: AppSpec<State>, init: impl FnOnce() -> State + 'static) -> App<State> {
@@ -191,7 +196,7 @@ pub fn run(
     rune_args: Vec<String>,
 ) -> Result<(), String> {
     let app = with_menus(configured(spec(), move || {
-        State::new(backend, initial_file)
+        State::new(backend, initial_file).with_updater(Updater::github())
     }));
     let handle = app.handle();
     let app = app.on_ready({
@@ -220,8 +225,20 @@ pub fn headless(
     initial_file: Option<String>,
     size: (f32, f32),
 ) -> Runtime<State> {
-    let mut runtime = configured(spec(), move || State::new(backend, initial_file))
-        .headless_runtime(size, Env::new(true, 2.0));
+    headless_with_updater(backend, initial_file, size, Updater::disabled())
+}
+
+/// [`headless`] with an updater, which tests point at a fake release source and temp files.
+pub fn headless_with_updater(
+    backend: Backend,
+    initial_file: Option<String>,
+    size: (f32, f32),
+    updater: Updater,
+) -> Runtime<State> {
+    let mut runtime = configured(spec(), move || {
+        State::new(backend, initial_file).with_updater(updater)
+    })
+    .headless_runtime(size, Env::new(true, 2.0));
     runtime.state.startup();
     runtime.state.settle();
     runtime

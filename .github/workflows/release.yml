@@ -46,6 +46,8 @@ jobs:
         if: matrix.platform != 'windows-latest'
         run: cargo install cargo-bundle --locked
 
+      # Each installer gets a checksum, which the in-app updater requires. It catches a corrupt
+      # download. It comes from the same release, so it can't catch a tampered one.
       - name: build the macOS disk image
         if: matrix.platform == 'macos-latest'
         run: |
@@ -53,12 +55,14 @@ jobs:
           app="target/release/bundle/osx/Stahl Capital.app"
           codesign --force --deep --sign - "$app"
           hdiutil create -volname "Stahl Capital" -srcfolder "$app" -ov -format UDZO stahl-capital-macos-arm64.dmg
+          shasum -a 256 stahl-capital-macos-arm64.dmg > stahl-capital-macos-arm64.dmg.sha256
 
       - name: build the Debian package
         if: matrix.platform == 'ubuntu-latest'
         run: |
           cargo bundle --release --format deb
           cp target/release/bundle/deb/*.deb .
+          for deb in *.deb; do sha256sum "$deb" > "$deb.sha256"; done
 
       - name: build the Windows archive
         if: matrix.platform == 'windows-latest'
@@ -66,6 +70,8 @@ jobs:
         run: |
           cargo build --release
           Compress-Archive -Path target/release/stahl.exe -DestinationPath stahl-capital-windows-x64.zip
+          $hash = (Get-FileHash stahl-capital-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  stahl-capital-windows-x64.zip" | Out-File -Encoding ascii stahl-capital-windows-x64.zip.sha256
 
       - uses: actions/upload-artifact@v7
         with:
@@ -74,6 +80,7 @@ jobs:
             *.dmg
             *.deb
             *.zip
+            *.sha256
           if-no-files-found: error
 
   # One job after all the builds, so a failed build can't publish a release with installers missing.

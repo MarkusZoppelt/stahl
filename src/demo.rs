@@ -1,13 +1,26 @@
 //! A made-up portfolio with 90 days of history, for the tests and `examples/demo.rs`.
 //! Everything goes in a directory the caller owns; prices come from a fixture, never the network.
 
-use std::{fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use chrono::{Duration, Local};
 use portfolio_rs::{AppConfig, FixtureProvider, services::quotes::AnyProvider, state::AppState};
+use semver::Version;
+use sha2::{Digest, Sha256};
 use tokio::runtime::Handle;
 
-use crate::backend::Backend;
+use crate::{
+    backend::Backend,
+    update::{self, Asset, Installation, Pending, Release, ReleaseSource, Updater},
+};
 
 pub const POSITIONS: &str = r#"[
   {"Id": "pos_btc", "Name": "Bitcoin", "AssetClass": "Crypto", "Ticker": "BTC-USD", "Amount": 0.45,
@@ -128,5 +141,113 @@ pub fn backend(dir: &Path, workspace: Option<&Path>, runtime: Handle) -> Backend
         config,
         Some(dir.join("config.yml")),
         runtime,
+    )
+}
+
+const RELEASE_NOTES: &str = "## What's Changed
+
+- Holdings can be sorted by today's change
+- The allocation donut reads out each class under the pointer
+- Fixed stale prices after waking from sleep
+
+**Full Changelog**: https://github.com/MarkusZoppelt/stahl/compare/v0.2.0...v0.3.0
+";
+
+/// The next minor version after this build, so these stay "newer" as the app's version moves.
+pub fn next_version() -> Version {
+    let current = update::current_version();
+    Version::new(current.major, current.minor + 1, 0)
+}
+
+/// A line of the checksum file the release workflow writes for an asset.
+pub fn checksum_line(name: &str, contents: &[u8]) -> String {
+    let digest: String = Sha256::digest(contents)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{digest}  {name}\n")
+}
+
+/// A release source with no network: releases and files from memory, or nothing but failure.
+pub struct FakeReleases {
+    answer: Result<Vec<Release>, String>,
+    files: HashMap<String, Vec<u8>>,
+    downloads: AtomicUsize,
+}
+
+impl FakeReleases {
+    /// One release, with these files attached.
+    pub fn offering(version: Version, files: Vec<(String, Vec<u8>)>) -> FakeReleases {
+        let assets = files
+            .iter()
+            .map(|(name, _)| Asset {
+                name: name.clone(),
+                url: format!("{}/download/v{version}/{name}", update::RELEASES_PAGE),
+            })
+            .collect();
+        FakeReleases {
+            answer: Ok(vec![Release {
+                page: format!("{}/tag/v{version}", update::RELEASES_PAGE),
+                version,
+                notes: RELEASE_NOTES.to_string(),
+                assets,
+            }]),
+            files: files.into_iter().collect(),
+            downloads: AtomicUsize::new(0),
+        }
+    }
+
+    /// As if offline.
+    pub fn failing() -> FakeReleases {
+        FakeReleases {
+            answer: Err("can't reach GitHub".to_string()),
+            files: HashMap::new(),
+            downloads: AtomicUsize::new(0),
+        }
+    }
+
+    /// How many files anyone has fetched.
+    pub fn downloads(&self) -> usize {
+        self.downloads.load(Ordering::SeqCst)
+    }
+}
+
+impl ReleaseSource for FakeReleases {
+    fn releases(&self) -> Pending<'_, Vec<Release>> {
+        Box::pin(async move { self.answer.clone() })
+    }
+
+    fn download<'a>(&'a self, asset: &'a Asset, to: &'a Path) -> Pending<'a, ()> {
+        Box::pin(async move {
+            self.downloads.fetch_add(1, Ordering::SeqCst);
+            let contents = self
+                .files
+                .get(&asset.name)
+                .ok_or_else(|| format!("no file named {}", asset.name))?;
+            fs::write(to, contents).map_err(|error| error.to_string())
+        })
+    }
+}
+
+/// An updater for the demo's scenes, with a release waiting that it can never fetch: scenes show
+/// the screens, and nothing in them installs.
+pub fn updater(installation: Installation) -> Updater {
+    let names = [
+        "stahl-capital-macos-arm64.dmg",
+        "stahl-capital-macos-arm64.dmg.sha256",
+        "stahl-capital-windows-x64.zip",
+        "stahl-capital-windows-x64.zip.sha256",
+        "stahl_0.0.0_amd64.deb",
+        "stahl_0.0.0_amd64.deb.sha256",
+    ];
+    let files = names
+        .into_iter()
+        .map(|name| (name.to_string(), Vec::new()))
+        .collect();
+    Updater::new(
+        Arc::new(FakeReleases::offering(next_version(), files)),
+        installation,
+        update::current_version(),
+        PathBuf::from("/nonexistent"),
     )
 }

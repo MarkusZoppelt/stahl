@@ -12,7 +12,8 @@ use std::{env, fs, process, time::SystemTime};
 use portfolio_rs::config::ThemeMode;
 use stahl::{
     app, demo,
-    state::{Page, State},
+    state::{Page, State, UpdatePhase},
+    update::Installation,
 };
 use tokio::runtime::Builder;
 
@@ -46,6 +47,19 @@ fn main() {
         s.settle();
         s.navigate(page);
         s.settle();
+    }
+    /// A newer release waiting, as if a check at startup had found it.
+    fn update_scene(s: &mut State, installation: Installation, dialog: bool) {
+        scene(s, Page::Overview);
+        s.updates.updater = demo::updater(installation);
+        s.check_for_updates(true);
+        s.settle();
+        s.updates.dialog = dialog;
+    }
+    fn mac() -> Installation {
+        Installation::MacApp {
+            bundle: "/Applications/Stahl Capital.app".into(),
+        }
     }
     let result = app::run_with_scenes(
         backend,
@@ -118,6 +132,29 @@ fn main() {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            ("update-banner", |s| update_scene(s, mac(), false)),
+            ("update-dialog", |s| update_scene(s, mac(), true)),
+            ("update-installing", |s| {
+                update_scene(s, mac(), true);
+                s.updates.phase = UpdatePhase::Installing;
+            }),
+            ("update-installed", |s| {
+                update_scene(s, mac(), true);
+                s.updates.phase = UpdatePhase::Installed;
+            }),
+            ("update-failed", |s| {
+                update_scene(s, mac(), true);
+                s.updates.phase = UpdatePhase::Failed(
+                    "the download doesn't match the release's checksum".to_string(),
+                );
+            }),
+            ("update-nix", |s| update_scene(s, Installation::Nix, true)),
+            ("update-deb", |s| update_scene(s, Installation::Deb, true)),
+            ("update-deb-saved", |s| {
+                update_scene(s, Installation::Deb, true);
+                s.updates.phase =
+                    UpdatePhase::Saved("/home/me/Downloads/stahl_0.3.0_amd64.deb".into());
             }),
         ],
     );

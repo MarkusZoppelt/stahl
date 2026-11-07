@@ -10,7 +10,7 @@ use crate::{
     icons,
     state::{Command, Confirm, FormField, Page, State},
     theme::Theme,
-    view::{page_icon, portfolio::matches_search, ui},
+    view::{page_icon, portfolio::matches_search, ui, updates},
 };
 
 pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
@@ -23,6 +23,7 @@ pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
     if let Some(confirm) = &s.confirm {
         confirmation(confirm, t, layer);
     }
+    updates::build(s, t, layer);
     if let Some((message, _)) = &s.toast {
         layer.push(
             ToastRegion::new()
@@ -189,6 +190,12 @@ pub fn entries(s: &State) -> Vec<Entry> {
             &icons::COPY,
             None,
             Command::CopyBriefing,
+        ),
+        action(
+            "Check for Updates…",
+            &icons::DOWNLOAD,
+            None,
+            Command::CheckForUpdates,
         ),
     ]);
     let query = s
