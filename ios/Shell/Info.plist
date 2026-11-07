@@ -22,6 +22,11 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- Stahl's own folder shows in Files and in Finder's iPhone pane, and its files open in place. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>MinimumOSVersion</key>
 	<string>17.0</string>
 	<key>UIDeviceFamily</key>

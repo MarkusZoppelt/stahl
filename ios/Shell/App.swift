@@ -86,6 +86,7 @@ final class RuneView: UIView, UIKeyInput {
     /// No field has focus any more: the keyboard's shortcuts go back to the view controller.
     var onTypingDone: (() -> Void)?
     private var lastScroll = CGPoint.zero
+    private let picker = Picker()
 
     var paused = false {
         didSet { link?.isPaused = paused }
@@ -108,6 +109,8 @@ final class RuneView: UIView, UIKeyInput {
     override func didMoveToWindow() {
         super.didMoveToWindow()
         guard window != nil, host == nil else { return }
+        // Before Stahl starts, so it can reopen the portfolio it last opened.
+        Access.restore()
         layer.contentsScale = scale
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dark = traitCollection.userInterfaceStyle == .dark
@@ -198,6 +201,17 @@ final class RuneView: UIView, UIKeyInput {
                     later(at) { stahl_ios_key($0, UInt32(key), character, mods) }
                 }
                 at += 0.4
+            case "pick":
+                // Answers the document picker as if `rest` was picked, or cancels with no path.
+                later(at) { [weak self] host in
+                    self?.window?.rootViewController?.dismiss(animated: false)
+                    if rest.isEmpty {
+                        stahl_ios_picked(host, nil)
+                    } else {
+                        rest.withCString { stahl_ios_picked(host, $0) }
+                    }
+                }
+                at += 1
             case "hover" where numbers.count == 2:
                 let (x, y) = (numbers[0], numbers[1])
                 later(at) { stahl_ios_hover($0, x, y, true) }
@@ -245,6 +259,9 @@ final class RuneView: UIView, UIKeyInput {
                         blue: CGFloat(rgb & 0xFF) / 255, alpha: 1))
             }
         }
+        if flags & UInt32(STAHL_TICK_PICK_FILE | STAHL_TICK_PICK_FOLDER) != 0 {
+            pick(folder: flags & UInt32(STAHL_TICK_PICK_FOLDER) != 0)
+        }
         let wants = flags & UInt32(STAHL_TICK_WANTS_KEYBOARD) != 0
         if wants != wantsKeyboard {
             wantsKeyboard = wants
@@ -254,6 +271,26 @@ final class RuneView: UIView, UIKeyInput {
                 resignFirstResponder()
                 onTypingDone?()
             }
+        }
+    }
+
+    /// The app asked for a file or a folder: UIKit's document picker, over whatever shows.
+    private func pick(folder: Bool) {
+        var controller = window?.rootViewController
+        while let presented = controller?.presentedViewController { controller = presented }
+        guard let host, let controller else {
+            if let host { stahl_ios_picked(host, nil) }
+            return
+        }
+        picker.present(folder: folder, from: controller) { [weak self] path in
+            guard let self, let host = self.host else { return }
+            if let path {
+                path.withCString { stahl_ios_picked(host, $0) }
+            } else {
+                stahl_ios_picked(host, nil)
+            }
+            // A sheet going away doesn't make the controller first responder again.
+            self.onTypingDone?()
         }
     }
 

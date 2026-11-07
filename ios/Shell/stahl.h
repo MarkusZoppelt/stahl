@@ -6,12 +6,20 @@
 
 typedef struct StahlHost StahlHost;
 
-enum { STAHL_TICK_DREW = 1, STAHL_TICK_WANTS_KEYBOARD = 2 };
+enum {
+    STAHL_TICK_DREW = 1,
+    STAHL_TICK_WANTS_KEYBOARD = 2,
+    // The app asks for a file or a folder: present a document picker, then call stahl_ios_picked.
+    STAHL_TICK_PICK_FILE = 4,
+    STAHL_TICK_PICK_FOLDER = 8,
+};
 
 StahlHost *stahl_ios_new(void *metal_layer, const char *documents, float width, float height,
                          float scale, bool dark);
 void stahl_ios_free(StahlHost *host);
 uint32_t stahl_ios_tick(StahlHost *host);
+// The picker's answer: a path the shell can access, or NULL when cancelled.
+void stahl_ios_picked(StahlHost *host, const char *path);
 void stahl_ios_set_compact(StahlHost *host, bool compact);
 // The app's background, 0xRRGGBB in sRGB.
 uint32_t stahl_ios_background(StahlHost *host);

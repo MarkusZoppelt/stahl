@@ -9,6 +9,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
+portfolio_rs = "0.10.1"
 rune = { git = "https://github.com/anomalyco/rune", rev = "bca47138e9c31a7870a79272ee2523b592b1248d" }
 stahl = { path = "../.." }
 tokio = { version = "1", features = ["rt-multi-thread"] }
