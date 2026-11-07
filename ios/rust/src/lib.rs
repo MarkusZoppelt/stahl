@@ -12,8 +12,8 @@ use std::{
     },
 };
 
-use rune::{Key, KeyEvent, Mods, TouchPhase, embed::LayerHost};
-use stahl::{app, demo, state::State};
+use rune::{Key, KeyEvent, Mods, TouchPhase, color::srgb_encode, embed::LayerHost};
+use stahl::{app, demo, state::State, theme::Theme};
 use tokio::runtime::{Builder, Runtime};
 
 /// `stahl_ios_tick` presented a frame.
@@ -147,6 +147,31 @@ pub unsafe extern "C" fn stahl_ios_resize(
     let h = host(host_ptr);
     h.host.resize((width, height), scale);
     h.dirty.store(true, Ordering::Release);
+}
+
+/// Whether to lay out for a phone: UIKit's horizontal size class is compact.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_set_compact(host_ptr: *mut Host, compact: bool) {
+    let h = host(host_ptr);
+    if h.host.runtime().state.compact != compact {
+        h.host.runtime_mut().state.compact = compact;
+        h.dirty.store(true, Ordering::Release);
+    }
+}
+
+/// The app's background as `0xRRGGBB` in sRGB, for the shell to paint behind the safe area.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_background(host_ptr: *mut Host) -> u32 {
+    let state = &host(host_ptr).host.runtime().state;
+    let background = Theme::new(state.is_dark()).kit.c.bg_base;
+    let channel = |linear: f32| (srgb_encode(linear).clamp(0.0, 1.0) * 255.0).round() as u32;
+    channel(background.r) << 16 | channel(background.g) << 8 | channel(background.b)
 }
 
 /// A touch in view points. `phase`: 0 began, 1 moved, 2 ended, 3 cancelled. `time` in seconds.

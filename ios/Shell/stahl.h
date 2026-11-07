@@ -12,6 +12,9 @@ StahlHost *stahl_ios_new(void *metal_layer, const char *documents, float width, 
                          float scale, bool dark);
 void stahl_ios_free(StahlHost *host);
 uint32_t stahl_ios_tick(StahlHost *host);
+void stahl_ios_set_compact(StahlHost *host, bool compact);
+// The app's background, 0xRRGGBB in sRGB.
+uint32_t stahl_ios_background(StahlHost *host);
 void stahl_ios_resize(StahlHost *host, float width, float height, float scale);
 // phase: 0 began, 1 moved, 2 ended, 3 cancelled.
 void stahl_ios_touch(StahlHost *host, uint64_t id, uint32_t phase, float x, float y, double time);

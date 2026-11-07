@@ -272,20 +272,45 @@ pub fn stat_card(
     card(t).padding(16.0).child(stat(label, value, color, t))
 }
 
-/// Equal columns that fit the window.
-pub fn columns(wide: bool, many: usize, few: usize, gap: f32) -> El {
+/// How much room the content area has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Room {
+    /// A phone: one column.
+    Narrow,
+    Medium,
+    Wide,
+}
+
+/// The room the content area had at the last layout. Before the first, the phone layout is narrow
+/// and anything else wide, so neither starts in the other's layout.
+pub fn room(s: &State, cx: &Cx<State>) -> Room {
+    match cx.layout_size("main") {
+        Some([width, _]) if width >= 860.0 => Room::Wide,
+        Some([width, _]) if width >= 560.0 => Room::Medium,
+        Some(_) => Room::Narrow,
+        None if s.compact => Room::Narrow,
+        None => Room::Wide,
+    }
+}
+
+/// Whether the content area has room for wide layouts.
+pub fn is_wide(s: &State, cx: &Cx<State>) -> bool {
+    room(s, cx) == Room::Wide
+}
+
+/// Equal columns that fit the content area: `[wide, medium, narrow]` of them, wrapping into rows.
+pub fn columns(room: Room, counts: [usize; 3], gap: f32) -> El {
+    let count = match room {
+        Room::Wide => counts[0],
+        Room::Medium => counts[1],
+        Room::Narrow => counts[2],
+    };
     row()
         .center_y()
         .w_full()
         .gap(gap)
         .items_stretch()
-        .equal_columns(if wide { many } else { few })
-}
-
-/// Whether the content area has room for wide layouts.
-pub fn is_wide(cx: &Cx<State>) -> bool {
-    cx.layout_size("main")
-        .is_none_or(|[width, _]| width >= 860.0)
+        .equal_columns(count)
 }
 
 pub fn badge(value: impl Into<String>, color: Color) -> El {

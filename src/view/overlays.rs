@@ -360,7 +360,10 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         .grow(1.0)
                         .truncate(),
                 )
-                .children((!entry.keys.is_empty()).then(|| Keybind::new(&entry.keys).build(k))),
+                .children(
+                    (!entry.keys.is_empty() && !s.compact)
+                        .then(|| Keybind::new(&entry.keys).build(k)),
+                ),
         );
     }
     let panel = ui::floating(t)
@@ -563,10 +566,13 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .padding(12.0)
                 .radius(8.0)
                 .border(1.0, k.c.border_muted)
-                .child(ui::caption(
-                    "Optional: what you paid, so Stahl can show your gain or loss.",
-                    t,
-                ))
+                .child(
+                    ui::caption(
+                        "Optional: what you paid, so Stahl can show your gain or loss.",
+                        t,
+                    )
+                    .wrap(),
+                )
                 .child(
                     row()
                         .w_full()

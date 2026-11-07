@@ -18,7 +18,7 @@ use crate::{
     backend::Period,
     format, icons,
     state::{Confirm, Page, SortBy, State, file_name},
-    theme::{HERO, HOLDING_TITLE, NUMBER, Theme},
+    theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
     view::{charts, guide, ui},
 };
 
@@ -77,6 +77,34 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .as_ref()
         .map_or(&[][..], |history| &history.points[..]);
     let day = t.change(summary.day_change_percent);
+    let narrow = ui::room(s, cx) == ui::Room::Narrow;
+    let figures = [
+        ui::stat(
+            "Unrealized PnL",
+            s.signed_money(summary.total_pnl),
+            Some(t.change(summary.total_pnl)),
+            t,
+        )
+        .help(guide::UNREALIZED_PNL),
+        ui::stat("Securities", s.money(summary.securities_value), None, t),
+        ui::stat("Cash", s.money(summary.cash_value), None, t),
+    ];
+    // Beside the total; on a phone, under it in two columns.
+    let figures = if narrow {
+        ui::columns(ui::Room::Narrow, [2, 2, 2], 16.0).children(figures)
+    } else {
+        row().center_y().gap(36.0).pb(2.0).children(figures)
+    };
+    let top = if narrow {
+        col().w_full().gap(20.0)
+    } else {
+        row()
+            .center_y()
+            .w_full()
+            .justify_between()
+            .items_end()
+            .gap(32.0)
+    };
     col()
         .key("hero")
         .w_full()
@@ -93,67 +121,40 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .sequence(Sequence::new(FLASH)),
         )
         .child(
-            row()
-                .center_y()
-                .w_full()
-                .justify_between()
-                .items_end()
-                .gap(32.0)
-                .child(
-                    col()
-                        .gap(2.0)
-                        .child(ui::caption("Total value", t))
-                        .child(
-                            RollingText::new("hero-total", s.money(summary.total_value))
-                                .font(HERO)
-                                .color(k.c.text_base)
-                                .value(summary.total_value)
-                                .build(k)
-                                .key("total-value"),
-                        )
-                        .child(
-                            row()
-                                .center_y()
-                                .gap(8.0)
-                                .child(
-                                    RollingText::new(
-                                        "hero-day",
-                                        format!(
-                                            "{} ({})",
-                                            s.signed_money(summary.day_change),
-                                            format::percent(summary.day_change_percent),
-                                        ),
-                                    )
-                                    .font(k.ty.ui_medium)
-                                    .color(day)
-                                    .value(summary.day_change)
-                                    .build(k),
+            top.child(
+                col()
+                    .gap(2.0)
+                    .child(ui::caption("Total value", t))
+                    .child(
+                        RollingText::new("hero-total", s.money(summary.total_value))
+                            .font(if narrow { HERO_COMPACT } else { HERO })
+                            .color(k.c.text_base)
+                            .value(summary.total_value)
+                            .build(k)
+                            .key("total-value"),
+                    )
+                    .child(
+                        row()
+                            .center_y()
+                            .gap(8.0)
+                            .child(
+                                RollingText::new(
+                                    "hero-day",
+                                    format!(
+                                        "{} ({})",
+                                        s.signed_money(summary.day_change),
+                                        format::percent(summary.day_change_percent),
+                                    ),
                                 )
-                                .child(ui::muted("today", t)),
-                        ),
-                )
-                .child(
-                    row()
-                        .center_y()
-                        .gap(36.0)
-                        .pb(2.0)
-                        .child(
-                            ui::stat(
-                                "Unrealized PnL",
-                                s.signed_money(summary.total_pnl),
-                                Some(t.change(summary.total_pnl)),
-                                t,
+                                .font(k.ty.ui_medium)
+                                .color(day)
+                                .value(summary.day_change)
+                                .build(k),
                             )
-                            .help(guide::UNREALIZED_PNL),
-                        )
-                        .child(ui::stat(
-                            "Securities",
-                            s.money(summary.securities_value),
-                            None,
-                            t,
-                        ))
-                        .child(ui::stat("Cash", s.money(summary.cash_value), None, t)),
-                ),
+                            .child(ui::muted("today", t)),
+                    ),
+            )
+            .child(figures),
         )
         .child(col().w_full().child(charts::value_chart(
             s,
@@ -427,7 +428,7 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         return first_steps(s, t);
     }
     col().w_full().gap(28.0).child(hero(s, t, cx)).child(
-        ui::columns(ui::is_wide(cx), 3, 2, 32.0)
+        ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
             .child(ui::entering(allocation_card(s, t), 0))
             .child(ui::entering(movers_card(s, t), 1))
             .child(ui::entering(attention_card(s, t), 2)),
@@ -449,7 +450,7 @@ impl Columns {
         Columns {
             class: width >= 720.0,
             pnl: width >= 560.0,
-            today: width >= 400.0,
+            today: width >= 340.0,
         }
     }
 
@@ -927,7 +928,7 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
         )
         .child(ui::stat("Value", s.money(position.value), None, t))
         .child(
-            ui::columns(true, 2, 2, 12.0)
+            ui::columns(ui::Room::Wide, [2, 2, 2], 12.0)
                 .flex_wrap()
                 .child(detail("Quantity", format!("{:.4}", position.amount), t))
                 .child(detail("Price", price, t))
@@ -1034,6 +1035,8 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         );
     }
     let review = s.review.data.as_ref();
+    // On a phone the target takes a line of its own, so the class keeps its name.
+    let narrow = ui::room(s, cx) == ui::Room::Narrow;
     let rows = s.allocation.iter().enumerate().map(|(index, item)| {
         let target = review.and_then(|review| {
             review
@@ -1042,6 +1045,22 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .find(|target| target.asset_class == item.asset_class)
         });
         let hovered = s.donut_hover == Some(index);
+        let badge = |on_its_own_line: bool| {
+            target.filter(|_| narrow == on_its_own_line).map(|target| {
+                ui::badge(
+                    format!(
+                        "target {:.0}% · {}",
+                        target.target_percent,
+                        format::percent(target.drift_percent)
+                    ),
+                    if target.within_tolerance {
+                        t.up
+                    } else {
+                        t.down
+                    },
+                )
+            })
+        };
         col()
             .key(format!("allocation-{index}"))
             .matched(format!("class-{}", item.asset_class))
@@ -1078,20 +1097,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                                     .color(k.c.text_base)
                                     .truncate(),
                             )
-                            .children(target.map(|target| {
-                                ui::badge(
-                                    format!(
-                                        "target {:.0}% · {}",
-                                        target.target_percent,
-                                        format::percent(target.drift_percent)
-                                    ),
-                                    if target.within_tolerance {
-                                        t.up
-                                    } else {
-                                        t.down
-                                    },
-                                )
-                            })),
+                            .children(badge(false)),
                     )
                     .child(
                         row()
@@ -1101,6 +1107,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                             .child(ui::number(format!("{:.1}%", item.percent), k.c.text_base)),
                     ),
             )
+            .children(badge(true).map(|badge| row().child(badge)))
             .child(ui::share_bar(
                 format!("share-{index}"),
                 item.percent,
@@ -1110,7 +1117,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ))
     });
     let rows: Vec<El> = rows.collect();
-    ui::columns(ui::is_wide(cx), 2, 1, 16.0)
+    ui::columns(ui::room(s, cx), [2, 1, 1], 16.0)
         .child(ui::card(t).center().child(charts::donut(s, t, cx)))
         .child(
             ui::card(t)
@@ -1198,7 +1205,7 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let twr = history.and_then(|history| history.twr_percent);
     let contributions = history.and_then(|history| history.net_contributions);
     let market = history.and_then(|history| history.market_effect);
-    let wide = ui::is_wide(cx);
+    let room = ui::room(s, cx);
     let points = history.map_or(&[][..], |history| &history.points[..]);
     col()
         .w_full()
@@ -1216,11 +1223,13 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .center_y()
                         .w_full()
                         .justify_between()
+                        .flex_wrap()
+                        .gaps(16.0, 12.0)
                         .child(ui::title("Value over time", t))
                         .child(selector),
                 )
                 .child(
-                    ui::columns(true, 4, 4, 12.0)
+                    ui::columns(room, [4, 4, 2], 12.0)
                         .child(ui::stat(
                             "Change",
                             optional(change),
@@ -1267,7 +1276,7 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 ),
         )
         .child(
-            ui::columns(wide, 4, 2, 12.0)
+            ui::columns(room, [4, 2, 1], 12.0)
                 .child(
                     ui::stat_card("Invested", s.money(performance.invested), None, t)
                         .help(guide::INVESTED),
@@ -1302,7 +1311,7 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 )),
         )
         .child(
-            ui::columns(true, 2, 2, 16.0)
+            ui::columns(room, [2, 2, 1], 16.0)
                 .child(movers(
                     "Top gainers today",
                     "No gainers today.",

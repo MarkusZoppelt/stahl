@@ -45,6 +45,7 @@ final class RuneViewController: UIViewController {
         super.viewDidLoad()
         // Until Rune reads safe-area insets, keep the app inside them.
         view.backgroundColor = .black
+        rune.onBackground = { [weak self] color in self?.view.backgroundColor = color }
         rune.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(rune)
         let guide = view.safeAreaLayoutGuide
@@ -64,6 +65,10 @@ final class RuneView: UIView, UIKeyInput {
     private var host: OpaquePointer?
     private var link: CADisplayLink?
     private var wantsKeyboard = false
+    private var background: UInt32?
+
+    /// The app's background changed, so what's behind the safe area can match it.
+    var onBackground: ((UIColor) -> Void)?
 
     var paused = false {
         didSet { link?.isPaused = paused }
@@ -95,6 +100,10 @@ final class RuneView: UIView, UIKeyInput {
                 Float(bounds.width), Float(bounds.height), Float(scale), dark)
         }
         guard host != nil else { return }
+        updateCompact()
+        registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (view: RuneView, _) in
+            view.updateCompact()
+        }
         let link = CADisplayLink(target: self, selector: #selector(tick))
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
@@ -160,9 +169,27 @@ final class RuneView: UIView, UIKeyInput {
         stahl_ios_resize(host, Float(bounds.width), Float(bounds.height), Float(scale))
     }
 
+    /// The phone layout wherever UIKit lays out for a narrow width: an iPhone, or an iPad in a
+    /// narrow split.
+    private func updateCompact() {
+        guard let host else { return }
+        stahl_ios_set_compact(host, traitCollection.horizontalSizeClass == .compact)
+    }
+
     @objc private func tick() {
         guard let host else { return }
         let flags = stahl_ios_tick(host)
+        if flags & UInt32(STAHL_TICK_DREW) != 0 {
+            let rgb = stahl_ios_background(host)
+            if rgb != background {
+                background = rgb
+                onBackground?(
+                    UIColor(
+                        red: CGFloat((rgb >> 16) & 0xFF) / 255,
+                        green: CGFloat((rgb >> 8) & 0xFF) / 255,
+                        blue: CGFloat(rgb & 0xFF) / 255, alpha: 1))
+            }
+        }
         let wants = flags & UInt32(STAHL_TICK_WANTS_KEYBOARD) != 0
         if wants != wantsKeyboard {
             wantsKeyboard = wants

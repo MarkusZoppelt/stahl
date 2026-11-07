@@ -2388,3 +2388,74 @@ fn an_empty_positions_file_says_so() {
     assert!(app.has_text("Expected a list of positions."));
     assert!(app.has_text("expected a sequence"), "the raw detail stays");
 }
+
+impl Harness {
+    /// The phone layout on a real workspace, at an iPhone's size.
+    fn phone() -> Harness {
+        let mut app = Harness::boot(true, None);
+        app.rt.set_viewport((390.0, 844.0), 3.0);
+        app.rt.state.compact = true;
+        app.settle();
+        app
+    }
+
+    /// Scroll `key` into view: a phone shows little of a page at once.
+    fn tap(&mut self, key: &str) {
+        let key = key.to_string();
+        self.rt.update(move |_, tx| tx.scroll_into_view(key));
+        self.settle();
+    }
+}
+
+#[test]
+fn a_phone_reaches_every_page_through_the_tabs_or_more() {
+    let mut app = Harness::phone();
+    assert!(app.exists("tab-bar"));
+    assert!(!app.has_text("Stahl Capital"), "no sidebar on a phone");
+
+    for (page, wanted) in [
+        (Page::Holdings, "Bitcoin"),
+        (Page::Performance, "Time-weighted return"),
+        (Page::Allocation, "The outer ring shows your policy targets"),
+        (Page::Review, "Allocation vs target"),
+        (Page::Rebalance, "Full Rebalance to Targets"),
+        (Page::Policy, "Balanced Growth"),
+        (Page::Documents, "Weekly report"),
+        (Page::Briefing, "Cash buffer"),
+        (Page::Health, "Portfolio file is valid"),
+        (Page::Settings, "AI provider"),
+        (Page::Overview, "Top movers today"),
+    ] {
+        let tabbed = [Page::Overview, Page::Holdings, Page::Performance].contains(&page);
+        if !tabbed {
+            app.click("tab-more");
+            assert!(app.rt.state.more, "More lists the pages without a tab");
+            app.tap(page.key());
+        }
+        app.click(page.key());
+        assert_eq!(app.rt.state.page, page);
+        assert!(!app.rt.state.more);
+        assert!(app.has_text(wanted), "{page:?} should show {wanted:?}");
+        assert_eq!(app.exists("back-to-more"), !tabbed, "{page:?}");
+    }
+
+    app.click("tab-more");
+    app.tap(Page::Briefing.key());
+    app.click(Page::Briefing.key());
+    app.click("back-to-more");
+    assert!(app.rt.state.more, "back from a page under More is More");
+}
+
+#[test]
+fn on_a_phone_a_holding_s_details_take_the_table_s_place() {
+    let mut app = Harness::phone();
+    app.click(Page::Holdings.key());
+    assert!(app.exists("holdings-rows"));
+    let id = app.rt.state.positions[0].id;
+    app.click(&format!("holding-{id}"));
+    assert!(app.exists("inspector"));
+    assert!(!app.exists("holdings-rows"), "no room for both");
+    app.click("close-inspector");
+    assert!(app.exists("holdings-rows"));
+    assert!(!app.exists("inspector"));
+}

@@ -55,7 +55,7 @@ pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ),
         )
         .child(
-            ui::columns(ui::is_wide(cx), 4, 2, 12.0)
+            ui::columns(ui::room(s, cx), [4, 2, 2], 12.0)
                 .child(ui::stat_card(
                     "Total value",
                     s.money(briefing.summary.total_value),
@@ -86,7 +86,7 @@ pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     {
         page = page.child(ui::entering(
             ui::card(t).child(ui::title("Cash buffer", t)).child(
-                ui::columns(true, 3, 3, 12.0)
+                ui::columns(ui::room(s, cx), [3, 3, 1], 12.0)
                     .child(ui::stat(
                         "Cash",
                         s.money(briefing.summary.cash_value),
@@ -289,14 +289,19 @@ fn field(
     t: &Theme,
     access: fn(&mut State) -> &mut TextEdit,
 ) -> El {
-    col().gap(6.0).child(ui::caption(label, t)).child(
-        input
-            .label(label)
-            .width(Some(440.0))
-            .on_edit(access)
-            .build(&t.kit)
-            .key(key),
-    )
+    col()
+        .w_full()
+        .max_w(440.0)
+        .gap(6.0)
+        .child(ui::caption(label, t))
+        .child(
+            input
+                .label(label)
+                .width(None)
+                .on_edit(access)
+                .build(&t.kit)
+                .key(key),
+        )
 }
 
 pub fn settings(s: &State, t: &Theme) -> El {

@@ -452,6 +452,11 @@ pub struct State {
 
     // The window.
     pub page: Page,
+    /// The phone layout: a tab bar instead of the sidebar, one column, the details in place of the
+    /// table. The platform decides (on iOS, UIKit's horizontal size class), not the window's width.
+    pub compact: bool,
+    /// In the phone layout, the More tab's list of pages is showing instead of a page.
+    pub more: bool,
     pub privacy: bool,
     pub sidebar: PaneState,
     pub inspector: PaneState,
@@ -649,6 +654,8 @@ impl State {
             price_updates: 0,
             refreshed: None,
             page: Page::Overview,
+            compact: false,
+            more: false,
             privacy: false,
             sidebar: PaneState::new(224.0).range(170.0, 340.0),
             inspector: PaneState::new(320.0).range(260.0, 460.0).collapsed(),
@@ -1460,6 +1467,7 @@ impl State {
             return;
         }
         self.page = page;
+        self.more = false;
         self.chart_hover = None;
         self.donut_hover = None;
         self.palette = None;
