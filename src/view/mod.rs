@@ -204,9 +204,12 @@ fn welcome(s: &State, t: &Theme) -> El {
         .child(
             col().w_full().max_w(620.0).items_center().mb(26.0).child(
                 ui::muted(
-                    "Track what you own, see how it has done, and check it against your plan. \
-                     Your portfolio stays in plain files on this computer. Looking up prices \
-                     sends only the ticker symbols.",
+                    format!(
+                        "Track what you own, see how it has done, and check it against your \
+                         plan. Your portfolio stays in plain files on this {}. Looking up \
+                         prices sends only the ticker symbols.",
+                        if cfg!(target_os = "ios") { "device" } else { "computer" }
+                    ),
                     t,
                 )
                 .wrap()

@@ -3,7 +3,7 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use chrono::NaiveDate;
-use rune::{Cx, El, Shape, Transition, canvas, col, el, row, text};
+use rune::{Align, Cx, El, Shape, Transition, canvas, col, el, row, text};
 use rune_kit::RollingText;
 
 use crate::{
@@ -72,10 +72,13 @@ pub fn value_chart(
             .center()
             .gap(4.0)
             .child(ui::muted("Your history starts today", t))
+            .px(16.0)
             .child(ui::caption(
                 "Stahl records one valuation a day while you use it. Come back tomorrow for your first line.",
                 t,
-            ));
+            )
+            .wrap()
+            .align(Align::Center));
     }
     let chart_height = height - 22.0;
     let holder = el()

@@ -414,6 +414,25 @@ pub struct Updates {
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
 
+/// What a picker is for: an existing file, or an existing folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickKind {
+    File,
+    Folder,
+}
+
+/// What to do with a picked path.
+type PickThen = Box<dyn FnOnce(&mut State, String)>;
+
+/// A question for the platform's own picker, where it shows one in place of Rune's dialogs (iOS,
+/// whose embedded views can't show those). The platform answers with [`State::picked`].
+pub struct Pick {
+    pub kind: PickKind,
+    pub title: String,
+    asked: bool,
+    then: PickThen,
+}
+
 pub struct State {
     pub backend: Backend,
     jobs_tx: Sender<Job>,
@@ -457,6 +476,9 @@ pub struct State {
     pub compact: bool,
     /// In the phone layout, the More tab's list of pages is showing instead of a page.
     pub more: bool,
+    /// The platform shows its own picker for files and folders: see [`Pick`].
+    pub platform_picker: bool,
+    pub pick: Option<Pick>,
     pub privacy: bool,
     pub sidebar: PaneState,
     pub inspector: PaneState,
@@ -656,6 +678,8 @@ impl State {
             page: Page::Overview,
             compact: false,
             more: false,
+            platform_picker: false,
+            pick: None,
             privacy: false,
             sidebar: PaneState::new(224.0).range(170.0, 340.0),
             inspector: PaneState::new(320.0).range(260.0, 460.0).collapsed(),
@@ -1266,6 +1290,12 @@ impl State {
             ..Default::default()
         }
         .filter("Portfolio", &["json", "gpg"]);
+        if self.platform_picker {
+            self.ask_platform(PickKind::File, options.title, |state, path| {
+                state.load_file(path)
+            });
+            return;
+        }
         tx.open_file(options, |state: &mut State, result, _| match result {
             Ok(Some(path)) => state.load_file(path.to_string_lossy().into_owned()),
             Ok(None) => {}
@@ -1403,6 +1433,10 @@ impl State {
         directory: Option<PathBuf>,
         then: impl FnOnce(&mut State, String) + 'static,
     ) {
+        if self.platform_picker {
+            self.ask_platform(PickKind::Folder, title.to_string(), then);
+            return;
+        }
         let options = FileDialogOptions {
             title: title.into(),
             directory,
@@ -1413,6 +1447,40 @@ impl State {
             Ok(None) => {}
             Err(error) => state.error = Some(error.to_string()),
         });
+    }
+
+    /// Ask the platform's picker, which runs `then` with what was picked. One question at a time,
+    /// as with Rune's dialogs: a second while one is open is dropped.
+    fn ask_platform(
+        &mut self,
+        kind: PickKind,
+        title: String,
+        then: impl FnOnce(&mut State, String) + 'static,
+    ) {
+        if self.pick.is_some() {
+            return;
+        }
+        self.palette = None;
+        self.pick = Some(Pick {
+            kind,
+            title,
+            asked: false,
+            then: Box::new(then),
+        });
+    }
+
+    /// The question for the platform's picker to show, once: nothing while it shows.
+    pub fn take_pick(&mut self) -> Option<(PickKind, String)> {
+        let pick = self.pick.as_mut().filter(|pick| !pick.asked)?;
+        pick.asked = true;
+        Some((pick.kind, pick.title.clone()))
+    }
+
+    /// The platform's picker answered: `path`, or `None` when it was cancelled.
+    pub fn picked(&mut self, path: Option<String>) {
+        if let (Some(pick), Some(path)) = (self.pick.take(), path) {
+            (pick.then)(self, path);
+        }
     }
 
     /// Read the open file again, after fixing it elsewhere.

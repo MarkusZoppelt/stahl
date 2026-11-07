@@ -29,7 +29,7 @@ use stahl::{
     app,
     backend::{Backend, Period},
     demo::{self, FakeReleases},
-    state::{Command, Confirm, Page, PendingOpen, State, UpdatePhase},
+    state::{Command, Confirm, Page, PendingOpen, PickKind, State, UpdatePhase},
     update::{self, Installation, Updater},
     view::guide,
 };
@@ -2458,4 +2458,41 @@ fn on_a_phone_a_holding_s_details_take_the_table_s_place() {
     app.click("close-inspector");
     assert!(app.exists("holdings-rows"));
     assert!(!app.exists("inspector"));
+}
+
+#[test]
+fn a_platform_picker_opens_what_it_picks_and_nothing_when_cancelled() {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.rt.state.platform_picker = true;
+    let workspace = app.dir.path().join("picked");
+    demo::seed_workspace(&workspace);
+
+    app.command('o', true);
+    assert_eq!(
+        app.rt.state.take_pick().map(|(kind, _)| kind),
+        Some(PickKind::Folder),
+        "Open Workspace asks the platform, not Rune"
+    );
+    assert_eq!(app.rt.state.take_pick(), None, "asked once");
+    app.rt.state.picked(None);
+    app.settle();
+    assert!(app.rt.state.pick.is_none());
+    assert!(!app.rt.state.is_workspace(), "cancelling opens nothing");
+
+    app.command('o', true);
+    assert!(app.rt.state.take_pick().is_some());
+    let picked = workspace.to_string_lossy().into_owned();
+    app.rt.update(move |state, _| state.picked(Some(picked)));
+    app.settle();
+    assert!(app.rt.state.is_workspace());
+    assert_eq!(
+        app.rt.state.open.workspace_dir.as_deref(),
+        Some(workspace.to_string_lossy().as_ref())
+    );
+
+    app.command('o', false);
+    assert_eq!(
+        app.rt.state.take_pick().map(|(kind, _)| kind),
+        Some(PickKind::File)
+    );
 }

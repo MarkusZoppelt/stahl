@@ -105,7 +105,13 @@ render those at `--size 390x844`, and the others at an iPad's sizes (`820x1156`,
 page changes. `simctl` can't tap, so the shell plays input from `STAHL_IOS_SCRIPT` (see `play` in
 `ios/Shell/App.swift`): `SIMCTL_CHILD_STAHL_IOS_SCRIPT="wait 2; tap 346 755" xcrun simctl launch …`.
 
-An iOS app can't update itself (`update::SELF_UPDATES`) or take file drops.
+An iOS app can't update itself (`update::SELF_UPDATES`) or take file drops. Rune's file dialogs
+can't show in an embedded view, so with `State::platform_picker` the app asks through
+`State::pick` and the shell answers with UIKit's document picker (`ios/Shell/Documents.swift`),
+keeping security-scoped bookmarks so the last portfolio reopens. The shell opens your real
+portfolio with live prices; `SIMCTL_CHILD_STAHL_IOS_DEMO=1` opens the demo instead, and the
+script's `pick <path>` answers the picker. Config and single-file history live in the app's
+`Library/Application Support` (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`); a workspace keeps its own.
 
 ## Landing page
 
