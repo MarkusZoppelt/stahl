@@ -34,6 +34,12 @@ Guidance for AI agents (and humans) working on this repo.
 - `cargo clippy --all-targets -- --deny warnings` must be clean (also
   enforced by `nix flake check` → `stahl-clippy`).
 
+## Design
+
+The look is decided: read [DESIGN.md](DESIGN.md) before changing a screen. Colours, type, shadows and
+gradients come from `src/theme.rs` and the primitives in `src/view/ui.rs`, never from a page.
+`tests/design.rs` fails on a page that reaches past them.
+
 ## Rune
 
 The UI is [Rune](https://github.com/anomalyco/rune) and `rune-kit`, pinned to one git revision in

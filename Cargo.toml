@@ -17,8 +17,8 @@ short_description = "Your local-first portfolio, on your own machine."
 
 [dependencies]
 chrono = "0.4"
-rune = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50", features = ["native-file-dialog"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "781e2b6d87cd5f32d6f4365956fad4baaf24ee50", features = ["markdown"] }
+rune = { git = "https://github.com/anomalyco/rune", rev = "b03d77a813a157225c2cd940b6447e9677ec94e0", features = ["native-file-dialog"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "b03d77a813a157225c2cd940b6447e9677ec94e0", features = ["markdown"] }
 portfolio_rs = "0.10.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

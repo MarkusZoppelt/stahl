@@ -37,7 +37,7 @@ jobs:
           sed -i "s/0\.2\.0/${tag#v}/g" site/index.html site/app.js
 
       - name: leave out what only builds the page
-        run: rm site/render-media.sh site/media/tour.json
+        run: rm site/render-media.sh site/render-icons.sh site/render-icons.mjs site/media/tour.json
 
       - uses: actions/upload-pages-artifact@v5
         with:

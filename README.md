@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icons/icon.png" alt="" width="128" height="128"></p>
+
 # Stahl Capital
 
 [![CI](https://github.com/MarkusZoppelt/stahl/actions/workflows/ci.yml/badge.svg)](https://github.com/MarkusZoppelt/stahl/actions/workflows/ci.yml)
@@ -178,11 +180,12 @@ src/state.rs     All state, and everything that changes it
 src/update.rs    Finding, verifying, and installing new releases
 src/app.rs       Window chrome, menus, and how it starts
 src/view/        Pure functions from state to elements, one module per area
-src/theme.rs     Tokyo Night, dark and light
+src/theme.rs     Steel and paper, dark and light
 src/icons.rs     Lucide icons
 src/demo.rs      The made-up portfolio for the tests and the demo
 examples/demo.rs The demo, and a named scene for every screen
-assets/          App icons
+assets/          The icon, the steel door, and the fonts (Inter and Newsreader, under the OFL)
+DESIGN.md        The design language: tokens, primitives, and how to check a screen
 site/            The landing page, static and deployed to GitHub Pages
 tests/e2e.rs     End-to-end tests on the real UI
 flake.nix        Reproducible build for macOS, Linux, and NixOS
