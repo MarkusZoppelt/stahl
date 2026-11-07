@@ -1,7 +1,9 @@
 //! The phone layout: a slim bar on top, one page at a time, and a tab bar along the bottom. The
 //! pages are the desktop's own, in one column; the pages without a tab live under More.
 
-use rune::{Cx, El, Icon, col, el, icon, row, text};
+use std::f32::consts::FRAC_PI_2;
+
+use rune::{Cx, El, Icon, Spring, col, el, icon, row, text};
 use rune_kit::{IconButtonVariant, Spinner};
 
 use crate::{
@@ -64,7 +66,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .child(ui::wash(t, 0.0))
                 .child(content),
         )
-        .child(tab_bar(s, t))
+        .children((!s.keyboard).then(|| tab_bar(s, t)))
 }
 
 /// The mark, how fresh the prices are, and the two things worth a tap from anywhere.
@@ -91,7 +93,20 @@ fn top_bar(s: &State, t: &Theme) -> El {
                 .center_y()
                 .gap(10.0)
                 .shrink()
-                .child(ui::door(22.0))
+                .child(
+                    // The vault's door turns at a tap, on a heavy spring.
+                    col()
+                        .key("vault-door")
+                        .role("button")
+                        .label("Turn the vault door")
+                        .center()
+                        .size(30.0, 30.0)
+                        .rotate(s.door_turns as f32 * FRAC_PI_2)
+                        .rotate_motion(Spring::new(0.7, 0.35))
+                        .press_scale(0.9)
+                        .on_press(|s: &mut State| s.turn_door())
+                        .child(ui::door(22.0)),
+                )
                 .children((!s.positions.is_empty()).then(|| freshness(s, t))),
         )
         .child(

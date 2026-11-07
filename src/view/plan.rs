@@ -347,7 +347,8 @@ pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .center_y()
             .w_full()
             .justify_between()
-            .gap(16.0)
+            .flex_wrap()
+            .gaps(16.0, 8.0)
             .child(ui::stat(
                 format!("Toward “{}”", simulation.policy_name),
                 s.money(simulation.portfolio_value),
@@ -632,7 +633,7 @@ pub fn documents(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .justify_between()
                         .gap(12.0)
                         .child(
-                            ui::caption(document.file_path.clone(), t)
+                            ui::caption(format::place(&document.file_path), t)
                                 .truncate_middle()
                                 .shrink()
                                 .key("document-file")

@@ -8,7 +8,7 @@ use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toas
 
 use crate::{
     backend::{WorkspaceField, plan_workspace},
-    icons,
+    format, icons,
     state::{Command, Confirm, FormField, Page, PendingOpen, State, file_name},
     theme::Theme,
     update,
@@ -704,7 +704,15 @@ fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
         && !s.positions.is_empty();
     let target = plan_workspace(&form.name.text, &form.location.text)
         .ok()
-        .map(|dir| format!("Creates {}", dir.display()));
+        .map(|dir| format!("Creates {}", format::place(&dir.to_string_lossy())));
+    // An iPhone's paths are nothing to type: Files names the place, and Choose… picks another.
+    let location = if cfg!(target_os = "ios") {
+        ui::muted(format::place(&form.location.text), t)
+            .key("workspace-location")
+            .truncate_middle()
+    } else {
+        location
+    };
     let fields = col()
         .w_full()
         .gap(14.0)
@@ -784,9 +792,11 @@ fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
         .open(true)
         .fit()
         .width(520.0)
-        .description(
-            "A folder for your positions, policy, reports and decisions, in plain files you own.",
-        )
+        .description(if s.compact {
+            "A folder of plain files you own."
+        } else {
+            "A folder for your positions, policy, reports and decisions, in plain files you own."
+        })
         .on_close(|s: &mut State| s.new_workspace = None)
         .child(fields)
         .build(k, layer);

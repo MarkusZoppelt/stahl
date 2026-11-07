@@ -2496,3 +2496,31 @@ fn a_platform_picker_opens_what_it_picks_and_nothing_when_cancelled() {
         Some(PickKind::File)
     );
 }
+
+#[test]
+fn a_phone_s_door_turns_and_a_shake_hides_the_amounts() {
+    let mut app = Harness::phone();
+    for _ in 0..4 {
+        app.click("vault-door");
+    }
+    assert_eq!(app.rt.state.door_turns, 4);
+    assert!(app.has_text("Vault sealed"), "a full turn seals the vault");
+
+    assert!(!app.rt.state.privacy);
+    app.rt.update(|state, _| state.shaken());
+    app.settle();
+    assert!(app.rt.state.privacy);
+    assert!(app.has_text("Amounts hidden"));
+}
+
+#[test]
+fn a_phone_knows_when_a_field_takes_a_number() {
+    let mut app = Harness::phone();
+    app.click(Page::Holdings.key());
+    app.click("add-position");
+    assert!(!app.rt.state.number_focused(), "the name has focus first");
+    app.click("form-amount");
+    assert!(app.rt.state.number_focused());
+    app.click("form-name");
+    assert!(!app.rt.state.number_focused());
+}

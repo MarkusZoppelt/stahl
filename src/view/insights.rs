@@ -244,14 +244,19 @@ pub fn health(s: &State, t: &Theme) -> El {
         ui::entering(
             ui::card(t)
                 .gap(8.0)
-                .child(ui::header("Workspace", health.dir.clone(), t))
+                .child(ui::header("Workspace", format::place(&health.dir), t))
                 .children(health.checks.iter().map(|check| {
                     let color = match check.status {
                         HealthStatus::Ok => t.up,
                         HealthStatus::Warning => t.warn,
                         HealthStatus::Error => t.down,
                     };
-                    ui::finding(color, check.name.clone(), Some(check.message.clone()), t)
+                    ui::finding(
+                        color,
+                        check.name.clone(),
+                        Some(format::place_in(&check.message)),
+                        t,
+                    )
                 })),
             2,
         )
@@ -431,7 +436,7 @@ pub fn settings(s: &State, t: &Theme) -> El {
             ui::card(t)
                 .child(ui::title("Data", t))
                 .child(
-                    ui::caption(format!("Config file: {config_path}"), t)
+                    ui::caption(format!("Config file: {}", format::place(&config_path)), t)
                         .wrap()
                         .selectable(true),
                 )

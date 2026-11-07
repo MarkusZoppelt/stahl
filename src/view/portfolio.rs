@@ -381,10 +381,16 @@ fn first_steps(s: &State, t: &Theme) -> El {
         step(
             2,
             "Save",
-            format!(
-                "Positions reach {file} when you save, with {}.",
-                ui::chord(false, "S")
-            ),
+            if s.compact {
+                format!(
+                    "Positions reach {file} when you tap Save at the top, or when you leave the app."
+                )
+            } else {
+                format!(
+                    "Positions reach {file} when you save, with {}.",
+                    ui::chord(false, "S")
+                )
+            },
             None,
             t,
         ),
@@ -1271,7 +1277,8 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     history
                         .and_then(|history| history.path.clone())
                         .map(|path| {
-                            ui::caption(format!("History is stored in {path}"), t).truncate_middle()
+                            ui::caption(format!("History is stored in {}", format::place(&path)), t)
+                                .truncate_middle()
                         }),
                 ),
         )

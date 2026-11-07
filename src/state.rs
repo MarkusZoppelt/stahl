@@ -476,6 +476,10 @@ pub struct State {
     pub compact: bool,
     /// In the phone layout, the More tab's list of pages is showing instead of a page.
     pub more: bool,
+    /// Quarter turns of the door in the phone's top bar. Four seal the vault.
+    pub door_turns: u32,
+    /// A software keyboard covers the bottom of the screen: the phone layout hides its tab bar.
+    pub keyboard: bool,
     /// The platform shows its own picker for files and folders: see [`Pick`].
     pub platform_picker: bool,
     pub pick: Option<Pick>,
@@ -678,6 +682,8 @@ impl State {
             page: Page::Overview,
             compact: false,
             more: false,
+            door_turns: 0,
+            keyboard: false,
             platform_picker: false,
             pick: None,
             privacy: false,
@@ -860,6 +866,31 @@ impl State {
     pub fn show_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
         self.toast_armed = true;
+    }
+
+    /// A tap on the door in the phone's top bar turns it a quarter. A full turn seals the vault.
+    pub fn turn_door(&mut self) {
+        self.door_turns += 1;
+        if self.door_turns.is_multiple_of(4) {
+            self.show_toast("Vault sealed. One client, safe inside.");
+        }
+    }
+
+    /// Shaking the phone hides the amounts, or shows them again, from anywhere.
+    pub fn shaken(&mut self) {
+        self.privacy = !self.privacy;
+        self.show_toast(if self.privacy {
+            "Amounts hidden"
+        } else {
+            "Amounts shown"
+        });
+    }
+
+    /// Whether the field with focus takes a number, so a phone can offer digits.
+    pub fn number_focused(&self) -> bool {
+        self.form
+            .as_ref()
+            .is_some_and(|form| form.amount.focused || form.quantity.focused || form.price.focused)
     }
 
     /// 0 to 1 through a chart's draw-in.

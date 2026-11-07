@@ -113,6 +113,13 @@ portfolio with live prices; `SIMCTL_CHILD_STAHL_IOS_DEMO=1` opens the demo inste
 script's `pick <path>` answers the picker. Config and single-file history live in the app's
 `Library/Application Support` (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`); a workspace keeps its own.
 
+The shell also: moves what the app copies to the system pasteboard (Rune has no iOS clipboard),
+saves unsaved edits when the app leaves the screen, refreshes stale prices when it returns, plays
+haptics for what `stahl_ios_tick` reports, covers the app with the vault door in the app switcher,
+and hides the amounts on a shake. Paths shown on iOS go through `format::place`. The app icon is
+rendered with the others by `site/render-icons.sh` into `ios/Shell/Assets.xcassets`. To find where
+to tap, `--tree` a scene at the simulator's view size (`--size 402x778` on an iPhone 18 Pro).
+
 ## Landing page
 
 `site/` is the landing page: plain HTML, CSS and JavaScript with no build step, deployed by
