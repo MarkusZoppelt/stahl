@@ -8,6 +8,7 @@ use std::{
     env, fs,
     io::{Cursor, Write},
     path::{Path, PathBuf},
+    process,
     sync::{
         Arc, Once,
         atomic::{AtomicUsize, Ordering},
@@ -45,9 +46,14 @@ struct Harness {
 
 fn offline() {
     static ONCE: Once = Once::new();
-    // Parts of portfolio_rs resolve their own quote provider from this. Tests must never reach
-    // the network. SAFETY: before any test here reads the environment.
-    ONCE.call_once(|| unsafe { env::set_var("PORTFOLIO_RS_QUOTES", "offline") });
+    // Parts of portfolio_rs resolve their own quote provider from the first, and a portfolio with
+    // no workspace keeps its history under the second. Tests must never reach the network or the
+    // real history. SAFETY: before any test here reads the environment.
+    ONCE.call_once(|| unsafe {
+        env::set_var("PORTFOLIO_RS_QUOTES", "offline");
+        let data = env::temp_dir().join(format!("stahl-e2e-{}", process::id()));
+        env::set_var("XDG_DATA_HOME", data);
+    });
 }
 
 impl Harness {
