@@ -719,3 +719,17 @@ dialog { color: inherit; }
   .pinned .vault { height: auto; }
   .pinned .stage { position: static; height: auto; }
 }
+
+/* The legal page */
+
+.foot__legal { flex-basis: 100%; font-size: 12.5px; }
+.foot__legal a { margin-left: 6px; color: var(--body); }
+.legal { max-width: 680px; margin: 0 auto; padding: 44px 22px 72px; font-size: 15px; line-height: 1.6; }
+.legal h1 { margin: 44px 0 10px; color: var(--ink); font: 340 34px/1.1 var(--serif); letter-spacing: -0.015em; }
+.legal__back + h1 { margin-top: 32px; }
+.legal h2 { margin: 26px 0 6px; color: var(--ink); font: 550 15px/1.4 var(--sans); letter-spacing: 0; text-wrap: wrap; }
+.legal p + p, .legal address + p { margin-top: 10px; }
+.legal address { margin-top: 10px; color: var(--ink); font-style: normal; }
+.legal a { color: var(--ink); }
+.legal code { color: var(--ink); font-size: 0.88em; overflow-wrap: anywhere; }
+.legal__back { font-size: 14px; }
