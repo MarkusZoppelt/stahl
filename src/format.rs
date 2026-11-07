@@ -40,6 +40,15 @@ fn group_thousands(digits: &str) -> String {
 
 /// `-€8,878.50`
 pub fn currency(value: f64, code: &str) -> String {
+    with_prefix(value, &currency_symbol(code))
+}
+
+/// `-8,878.50`, for an amount whose currency isn't known.
+pub fn amount(value: f64) -> String {
+    with_prefix(value, "")
+}
+
+fn with_prefix(value: f64, prefix: &str) -> String {
     let fixed = format!("{:.2}", value.abs());
     let (whole, fraction) = fixed.split_once('.').unwrap_or((&fixed, "00"));
     // `-0.001` rounds to zero, and a zero has no sign.
@@ -49,11 +58,7 @@ pub fn currency(value: f64, code: &str) -> String {
     } else {
         ""
     };
-    format!(
-        "{sign}{}{}.{fraction}",
-        currency_symbol(code),
-        group_thousands(whole)
-    )
+    format!("{sign}{prefix}{}.{fraction}", group_thousands(whole))
 }
 
 /// What money reads as in privacy mode.
@@ -91,6 +96,12 @@ mod tests {
         assert_eq!(currency(999.0, "GBP"), "£999.00");
         assert_eq!(currency(1_000.0, "GBP"), "£1,000.00");
         assert_eq!(currency(1_234_567.891, "USD"), "$1,234,567.89");
+    }
+
+    #[test]
+    fn an_amount_has_no_currency() {
+        assert_eq!(amount(-8_878.5), "-8,878.50");
+        assert_eq!(amount(42_000.0), "42,000.00");
     }
 
     #[test]
