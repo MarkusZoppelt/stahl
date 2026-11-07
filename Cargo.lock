@@ -3299,15 +3299,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordered-float"
-version = "5.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4446,7 +4437,7 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=781e2b6d87cd5f32d6f4365956fad4baaf24ee50#781e2b6d87cd5f32d6f4365956fad4baaf24ee50"
+source = "git+https://github.com/anomalyco/rune?rev=b03d77a813a157225c2cd940b6447e9677ec94e0#b03d77a813a157225c2cd940b6447e9677ec94e0"
 dependencies = [
  "accesskit",
  "accesskit_macos",
@@ -4511,6 +4502,7 @@ dependencies = [
  "wgpu-core",
  "wgpu-hal",
  "wgpu-naga-bridge",
+ "windows",
  "windows-sys 0.59.0",
  "winit",
  "x11rb",
@@ -4522,7 +4514,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=781e2b6d87cd5f32d6f4365956fad4baaf24ee50#781e2b6d87cd5f32d6f4365956fad4baaf24ee50"
+source = "git+https://github.com/anomalyco/rune?rev=b03d77a813a157225c2cd940b6447e9677ec94e0#b03d77a813a157225c2cd940b6447e9677ec94e0"
 dependencies = [
  "pulldown-cmark",
  "rune",
@@ -4533,12 +4525,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=781e2b6d87cd5f32d6f4365956fad4baaf24ee50#781e2b6d87cd5f32d6f4365956fad4baaf24ee50"
+source = "git+https://github.com/anomalyco/rune?rev=b03d77a813a157225c2cd940b6447e9677ec94e0#b03d77a813a157225c2cd940b6447e9677ec94e0"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=781e2b6d87cd5f32d6f4365956fad4baaf24ee50#781e2b6d87cd5f32d6f4365956fad4baaf24ee50"
+source = "git+https://github.com/anomalyco/rune?rev=b03d77a813a157225c2cd940b6447e9677ec94e0#b03d77a813a157225c2cd940b6447e9677ec94e0"
 dependencies = [
  "wgpu",
 ]
@@ -4546,7 +4538,7 @@ dependencies = [
 [[package]]
 name = "rune-taffy"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=781e2b6d87cd5f32d6f4365956fad4baaf24ee50#781e2b6d87cd5f32d6f4365956fad4baaf24ee50"
+source = "git+https://github.com/anomalyco/rune?rev=b03d77a813a157225c2cd940b6447e9677ec94e0#b03d77a813a157225c2cd940b6447e9677ec94e0"
 dependencies = [
  "taffy",
 ]
@@ -5466,7 +5458,7 @@ dependencies = [
  "nix 0.29.0",
  "num-derive",
  "num-traits",
- "ordered-float 4.6.0",
+ "ordered-float",
  "pest",
  "pest_derive",
  "phf 0.11.3",
@@ -6257,7 +6249,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f2ab60e120fd6eaa68d9567f3226e876684639d22a4219b313ff69ec0ccd5ac"
 dependencies = [
  "log",
- "ordered-float 4.6.0",
+ "ordered-float",
  "strsim",
  "thiserror 1.0.69",
  "wezterm-dynamic-derive",
@@ -6397,7 +6389,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "once_cell",
- "ordered-float 5.5.1",
+ "ordered-float",
  "parking_lot 0.12.5",
  "portable-atomic",
  "portable-atomic-util",
