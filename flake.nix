@@ -55,7 +55,15 @@
         ];
 
         commonArgs = {
-          src = craneLib.cleanCargoSource ./.;
+          # The app embeds its fonts and its mark.
+          src = pkgs.lib.cleanSourceWith {
+            src = ./.;
+            name = "source";
+            filter = path: type:
+              (craneLib.filterCargoSources path type)
+              || (pkgs.lib.hasInfix "/assets/" path
+                && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null));
+          };
           strictDeps = true;
 
           nativeBuildInputs = with pkgs;

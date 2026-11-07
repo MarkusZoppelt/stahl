@@ -8,8 +8,7 @@ use portfolio_rs::{
 };
 use rune::{
     Beat, Cx, El, PopupItem, PopupMenu, Sequence, Tx, col, el, icon, popup_menu_supported, row,
-    text,
-    tok::{TextStyle, motion::LEAD},
+    text, tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, SegmentedControl, TextInput,
@@ -19,7 +18,7 @@ use crate::{
     backend::Period,
     format, icons,
     state::{Confirm, Page, SortBy, State},
-    theme::{HERO, NUMBER, Theme},
+    theme::{HERO, HOLDING_TITLE, NUMBER, Theme},
     view::{charts, ui},
 };
 
@@ -71,30 +70,25 @@ const FLASH: &[Beat] = &[
 fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
     let Some(summary) = &s.summary else {
-        return ui::card(t);
+        return col();
     };
     let points = s
         .history
         .as_ref()
         .map_or(&[][..], |history| &history.points[..]);
     let day = t.change(summary.day_change_percent);
-    ui::card(t)
+    col()
         .key("hero")
-        .padding(0.0)
-        .gap(0.0)
-        .radial_gradient(
-            [0.0, 0.0],
-            [640.0, 300.0],
-            [(0.0, day.alpha(0.13)), (1.0, day.alpha(0.0))],
-        )
+        .w_full()
+        .gap(12.0)
         .child(
             // A new key each refresh, which replays it: the numbers just changed, look here.
             el().key(format!("hero-flash-{}", s.price_updates))
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full()
-                .radius(14.0)
-                .fill(day.alpha(0.1))
+                .radius(12.0)
+                .fill(day.alpha(0.06))
                 .a11y_hidden()
                 .sequence(Sequence::new(FLASH)),
         )
@@ -103,13 +97,11 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .center_y()
                 .w_full()
                 .justify_between()
-                .items_start()
+                .items_end()
                 .gap(32.0)
-                .padding(24.0)
-                .pb(8.0)
                 .child(
                     col()
-                        .gap(4.0)
+                        .gap(2.0)
                         .child(ui::caption("Total value", t))
                         .child(
                             RollingText::new("hero-total", s.money(summary.total_value))
@@ -143,7 +135,8 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .child(
                     row()
                         .center_y()
-                        .gap(32.0)
+                        .gap(36.0)
+                        .pb(2.0)
                         .child(ui::stat(
                             "Unrealized PnL",
                             s.signed_money(summary.total_pnl),
@@ -159,13 +152,13 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .child(ui::stat("Cash", s.money(summary.cash_value), None, t)),
                 ),
         )
-        .child(col().w_full().px(24.0).pb(16.0).child(charts::value_chart(
+        .child(col().w_full().child(charts::value_chart(
             s,
             points,
             t,
             cx,
             "overview-chart",
-            210.0,
+            230.0,
         )))
 }
 
@@ -176,7 +169,7 @@ fn allocation_card(s: &State, t: &Theme) -> El {
         .iter()
         .map(|item| (item.percent, t.class_color(&item.asset_class)))
         .collect();
-    ui::card(t)
+    ui::ledger(t)
         .role("button")
         .label("Open Allocation")
         .focusable(true)
@@ -239,7 +232,7 @@ fn movers_card(s: &State, t: &Theme) -> El {
         let size = |position: &PositionDto| position.day_change_percent.unwrap_or(0.0).abs();
         size(b).total_cmp(&size(a))
     });
-    ui::card(t)
+    ui::ledger(t)
         .child(ui::title("Top movers today", t))
         .children(
             movers
@@ -263,7 +256,6 @@ fn movers_card(s: &State, t: &Theme) -> El {
                         .justify_between()
                         .gap(12.0)
                         .py(2.0)
-                        .px(6.0)
                         .radius(6.0)
                         .hover(k.c.hover)
                         .on_press(move |s: &mut State| s.reveal_position(id))
@@ -287,7 +279,7 @@ fn attention_card(s: &State, t: &Theme) -> El {
         .filter(|finding| !matches!(finding.severity, Severity::Info))
         .collect();
     findings.sort_by_key(|finding| !matches!(finding.severity, Severity::Critical));
-    ui::card(t)
+    ui::ledger(t)
         .child(ui::title("Needs attention", t))
         .children(findings.is_empty().then(|| {
             row()
@@ -317,8 +309,8 @@ fn attention_card(s: &State, t: &Theme) -> El {
 }
 
 pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
-    col().w_full().gap(16.0).child(hero(s, t, cx)).child(
-        ui::columns(ui::is_wide(cx), 3, 2, 16.0)
+    col().w_full().gap(28.0).child(hero(s, t, cx)).child(
+        ui::columns(ui::is_wide(cx), 3, 2, 32.0)
             .child(ui::entering(allocation_card(s, t), 0))
             .child(ui::entering(movers_card(s, t), 1))
             .child(ui::entering(attention_card(s, t), 2)),
@@ -392,10 +384,6 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
     } else {
         0.0
     };
-    let initial = name
-        .chars()
-        .next()
-        .map_or_else(String::new, |initial| initial.to_uppercase().to_string());
     row()
         .center_y()
         .key(format!("holding-{id}"))
@@ -406,7 +394,7 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         .w_full()
         .gap(12.0)
         .px(12.0)
-        .h(54.0)
+        .h(52.0)
         .radius(6.0)
         .center_y()
         .fill(if selected {
@@ -446,7 +434,7 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         .child(
             el().key(format!("weight-{id}"))
                 .pin(Some(12.0), None, Some(12.0), Some(0.0))
-                .h(2.0)
+                .h(1.0)
                 .a11y_hidden()
                 .child(
                     el().h_full()
@@ -459,18 +447,9 @@ fn holding_row(s: &State, position: &PositionDto, t: &Theme) -> El {
         .child(cell(
             row()
                 .center_y()
-                .gap(10.0)
+                .gap(12.0)
                 .min_w(0.0)
-                .child(
-                    col()
-                        .size(30.0, 30.0)
-                        .radius(9.0)
-                        .continuous_corners()
-                        .center()
-                        .fill(class_color.alpha(0.18))
-                        .a11y_hidden()
-                        .child(text(initial).font(k.ty.ui_medium).color(class_color)),
-                )
+                .child(ui::dot(class_color))
                 .child(
                     col()
                         .min_w(0.0)
@@ -650,14 +629,6 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
         .key("inspector")
         .w_full()
         .h_full()
-        .radial_gradient(
-            [0.5, 0.0],
-            [300.0, 200.0],
-            [
-                (0.0, t.class_color(&position.asset_class).alpha(0.16)),
-                (1.0, t.class_color(&position.asset_class).alpha(0.0)),
-            ],
-        )
         .padding(20.0)
         .gap(16.0)
         .child(
@@ -669,12 +640,7 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .child(
                     col()
                         .shrink()
-                        .child(
-                            text(name)
-                                .font(TextStyle::new(16.0, 600.0))
-                                .color(k.c.text_base)
-                                .wrap(),
-                        )
+                        .child(text(name).font(HOLDING_TITLE).color(k.c.text_base).wrap())
                         .child(ui::caption(subtitle, t)),
                 )
                 .child(

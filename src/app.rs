@@ -5,6 +5,7 @@ use rune::{App, AppSpec, Chrome, Cx, El, Env, MenuItem, Runtime, Tx};
 use crate::{
     backend::Backend,
     state::{Page, State},
+    theme::FONTS,
     view,
 };
 
@@ -29,6 +30,7 @@ pub fn spec() -> AppSpec<State> {
         }),
         poll: Some(State::poll),
         on_key: Some(view::on_key),
+        fonts: FONTS,
         ..AppSpec::new("Stahl Capital", (1320.0, 860.0), placeholder, view_state)
     }
 }

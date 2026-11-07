@@ -4,7 +4,7 @@ use std::env;
 
 use rune::{
     Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
-    tok::{TextStyle, motion::LEAD},
+    tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
@@ -14,7 +14,7 @@ use rune_kit::{
 use crate::{
     icons,
     state::{Page, State, file_name},
-    theme::Theme,
+    theme::{PAGE_TITLE, STATEMENT, Theme, WORDMARK},
 };
 
 mod charts;
@@ -111,15 +111,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
 }
 
 fn splash(t: &Theme) -> El {
-    let [accent, trend] = ui::aurora(t, t.up, 0.0);
     col()
         .w_full()
         .h_full()
         .center()
         .gap(16.0)
-        .child(accent)
-        .child(trend)
-        .child(ui::orbiting_mark(48.0, t))
+        .child(ui::wash(t, 0.0))
+        .child(ui::orbiting_mark(72.0, t))
         .child(ui::muted("Loading your portfolio…", t))
 }
 
@@ -142,14 +140,12 @@ fn welcome(s: &State, t: &Theme) -> El {
                 .role("button")
                 .focusable(true)
                 .grow(1.0)
-                .fill(t.card.alpha(0.55))
-                .backdrop_blur(20.0)
                 .hover(k.c.hover)
                 .press_scale(0.98)
                 .child(
                     col()
                         .size(40.0, 40.0)
-                        .radius(10.0)
+                        .radius(8.0)
                         .continuous_corners()
                         .center()
                         .fill(if primary { t.accent } else { k.c.layer_03 })
@@ -168,22 +164,26 @@ fn welcome(s: &State, t: &Theme) -> El {
             index,
         )
     };
-    let [accent, trend] = ui::aurora(t, t.up, 0.0);
     col()
         .w_full()
         .h_full()
         .center()
-        .gap(8.0)
+        .gap(10.0)
         .padding(24.0)
-        .child(accent)
-        .child(trend)
-        .child(ui::orbiting_mark(64.0, t).mb(8.0))
+        .child(ui::wash(t, 0.0))
+        .child(ui::door(168.0).mb(14.0))
         .child(
-            text("Welcome to Stahl Capital")
-                .font(TextStyle::new(30.0, 650.0).tracking(-0.4))
+            text("Stahl Capital has one client.")
+                .font(STATEMENT)
                 .color(k.c.text_base),
         )
-        .child(ui::muted("Your portfolio, in plain files, on your own machine.", t).mb(24.0))
+        .child(
+            ui::muted(
+                "You. Your portfolio, in plain files, on your own machine.",
+                t,
+            )
+            .mb(26.0),
+        )
         .child(
             row()
                 .center_y()
@@ -250,15 +250,11 @@ fn sidebar(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .px(8.0)
         .pb(8.0)
-        .child(ui::mark(28.0))
+        .child(ui::door(28.0))
         .child(
             col()
                 .shrink()
-                .child(
-                    text("Stahl Capital")
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base),
-                )
+                .child(text("Stahl Capital").font(WORDMARK).color(k.c.text_base))
                 .child(
                     text(document)
                         .font(k.ty.text_xsmall)
@@ -432,20 +428,29 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
             .key("toggle-theme"),
         )
         .child(refresh);
-    Toolbar::new()
-        .leading(
-            row()
-                .center_y()
-                .gap(12.0)
-                .center_y()
-                .child(
-                    text(s.page.label())
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base),
-                )
-                .child(freshness(s, t)),
+    Toolbar::new().leading(freshness(s, t)).trailing(trailing)
+}
+
+/// Where you are: the section in small type, the page in large.
+fn page_heading(s: &State, t: &Theme) -> El {
+    let section = if Page::PLAN.contains(&s.page) {
+        Some("Plan")
+    } else if Page::PORTFOLIO.contains(&s.page) {
+        Some("Portfolio")
+    } else if Page::INSIGHTS.contains(&s.page) {
+        Some("Insights")
+    } else {
+        None
+    };
+    col()
+        .gap(2.0)
+        .children(section.map(|section| ui::caption(section, t)))
+        .child(
+            text(s.page.label())
+                .font(PAGE_TITLE)
+                .color(t.kit.c.text_base)
+                .role("heading"),
         )
-        .trailing(trailing)
 }
 
 fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
@@ -463,11 +468,6 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         Page::Health => insights::health(s, t),
         Page::Settings => insights::settings(s, t),
     };
-    let trend = s
-        .summary
-        .as_ref()
-        .map_or(t.up, |summary| t.change(summary.day_change));
-    let [accent, day] = ui::aurora(t, trend, 12.0);
     let scroller = col()
         .key("main")
         .w_full()
@@ -480,14 +480,18 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
             col()
                 .key(format!("page-{}", s.page.key()))
                 .w_full()
-                .padding(24.0)
-                .gap(16.0)
+                .max_w(1240.0)
+                .px(32.0)
+                .pt(20.0)
+                .pb(40.0)
+                .gap(24.0)
                 .transition(
                     Transition::offset(0.0, 8.0)
                         .combined(Transition::blur(3.0))
                         .combined(Transition::opacity()),
                 )
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
+                .child(page_heading(s, t))
                 .child(page),
         );
     let main = col()
@@ -495,8 +499,7 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(accent)
-        .child(day)
+        .child(ui::wash(t, 12.0))
         .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))

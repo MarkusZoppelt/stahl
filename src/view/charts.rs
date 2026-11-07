@@ -3,7 +3,7 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use chrono::NaiveDate;
-use rune::{Color, Cx, El, Shape, Transition, canvas, col, el, row, text};
+use rune::{Cx, El, Shape, Transition, canvas, col, el, row, text};
 use rune_kit::RollingText;
 
 use crate::{
@@ -125,10 +125,10 @@ pub fn value_chart(
         area = area.fill(band.points, trend.alpha(band.alpha));
     }
     let glow = Shape::new()
-        .stroke(plotted.clone(), 5.0, trend.alpha(0.55))
+        .stroke(plotted.clone(), 4.0, trend.alpha(0.22))
         .drawn(progress);
     let mut line = Shape::new()
-        .stroke(plotted.clone(), 2.0, trend)
+        .stroke(plotted.clone(), 1.5, trend)
         .drawn(progress);
     if let Some(index) = hovered {
         let [x, y] = plotted[index];
@@ -150,10 +150,10 @@ pub fn value_chart(
                 el().absolute(0.0, 0.0)
                     .size(16.0, 16.0)
                     .radius(8.0)
-                    .fill(trend.alpha(0.3))
+                    .fill(trend.alpha(0.2))
                     .cycle(ui::BREATHE),
             )
-            .child(el().size(7.0, 7.0).radius(3.5).fill(trend))
+            .child(el().size(6.0, 6.0).radius(3.0).fill(trend))
     });
     let readout = hovered.map(|index| {
         let point = &points[index];
@@ -163,7 +163,7 @@ pub fn value_chart(
         } else {
             s.money(point.value)
         };
-        col()
+        ui::floating(t)
             .key("chart-readout")
             .pin(
                 Some((x + 10.0).min(width - 124.0).max(0.0)),
@@ -175,9 +175,6 @@ pub fn value_chart(
             .px(10.0)
             .py(6.0)
             .radius(8.0)
-            .fill(k.c.layer_03.alpha(0.86))
-            .backdrop_blur(10.0)
-            .shadow(4.0, 14.0, Color::BLACK.alpha(0.25))
             .child(ui::caption(short_date(&point.date), t))
             .child(text(value).font(NUMBER).color(k.c.text_base))
     });
@@ -216,7 +213,7 @@ struct AreaBand {
 /// that follows the line, which also shows whatever is behind the card through it.
 fn area_bands(line: &[[f32; 2]], height: f32) -> Vec<AreaBand> {
     const BANDS: usize = 28;
-    const TOP_ALPHA: f32 = 0.34;
+    const TOP_ALPHA: f32 = 0.16;
     let top = line.iter().fold(height, |top, point| top.min(point[1]));
     let step = (height - top) / BANDS as f32;
     (0..BANDS)
