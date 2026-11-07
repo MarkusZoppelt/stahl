@@ -47,7 +47,7 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
-    app::run_with_scenes(
+    let result = app::run_with_scenes(
         backend,
         env::args().skip(1).collect(),
         &[
@@ -56,6 +56,10 @@ fn main() {
             ("holding-details", |s| {
                 scene(s, Page::Holdings);
                 s.select_position(0);
+            }),
+            ("sidebar-collapsed", |s| {
+                scene(s, Page::Holdings);
+                s.sidebar.toggle();
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
@@ -118,4 +122,8 @@ fn main() {
         ],
     );
     let _ = fs::remove_dir_all(&dir);
+    if let Err(error) = result {
+        eprintln!("error: {error}");
+        process::exit(1);
+    }
 }
