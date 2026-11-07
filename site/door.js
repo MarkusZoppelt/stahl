@@ -50,7 +50,8 @@ vec4 half_door(vec2 world, float side) {
   ring = min(ring, RINGS - 1);
   float a = EDGE[ring], b = EDGE[ring + 1];
   float seed = float(ring) * 17.3;
-  float angle = atan(p.y, p.x);
+  // At the very centre there's no angle to speak of, and atan may return anything.
+  float angle = r > 0.002 ? atan(p.y, p.x) : 0.0;
   float turned = angle + spin * DIRECTION[ring];
 
   vec2 radial = r > 0.0001 ? p / r : vec2(1.0, 0.0);
@@ -122,7 +123,9 @@ vec4 half_door(vec2 world, float side) {
   c += steel * smoothstep(0.012, 0.0, faceDist) * 0.14 * smoothstep(0.0, 0.02, split);
   c *= mix(0.25, 1.0, smoothstep(0.0, 0.0035, faceDist));
 
-  return vec4(c * alpha, alpha);
+  // A last guard: one bad pixel in the hub is the first thing anyone would see.
+  if (!(c.r >= 0.0 && c.g >= 0.0 && c.b >= 0.0)) c = base;
+  return vec4(clamp(c, 0.0, 1.0) * alpha, alpha);
 }
 
 void main() {

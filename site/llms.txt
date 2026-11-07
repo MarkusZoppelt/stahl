@@ -1,6 +1,6 @@
 # Stahl Capital
 
-> A local-first, native desktop app for tracking investment portfolios, built on portfolio_rs and written in Rust on Rune, with no web view. For macOS, Linux and Windows. Free, MIT licensed, and early, so expect rough edges.
+> A local-first, native desktop app for tracking investment portfolios, built on portfolio_rs and written in Rust on Rune, with no web view. For macOS, Linux and Windows. Free and MIT licensed. It is an early alpha, so expect rough edges.
 
 Stahl Capital is software, not a bank, a broker or an adviser. The page's private bank voice is a joke about having one client: you. Nothing it shows is investment advice.
 
