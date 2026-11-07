@@ -1,6 +1,6 @@
 [package]
 name = "stahl"
-version = "0.2.0"
+version = "0.3.0"
 description = "Stahl Capital — native desktop app for portfolio_rs"
 authors = ["Markus Zoppelt"]
 license = "MIT"

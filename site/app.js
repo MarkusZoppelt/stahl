@@ -608,9 +608,9 @@ $$("[data-copy]").forEach((el) => el.addEventListener("click", () => copyText(el
 /* Downloads: show the visitor's own platform first. */
 
 const PLATFORMS = {
-  mac: { label: "Download for macOS", small: "Version 0.2.0 for Apple silicon", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-macos-arm64.dmg" },
-  linux: { label: "Download for Linux", small: "Version 0.2.0, .deb for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/download/v0.2.0/stahl_0.2.0_amd64.deb" },
-  windows: { label: "Download for Windows", small: "Version 0.2.0 for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-windows-x64.zip" },
+  mac: { label: "Download for macOS", small: "Version 0.3.0 for Apple silicon", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-macos-arm64.dmg" },
+  linux: { label: "Download for Linux", small: "Version 0.3.0, .deb for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/download/v0.3.0/stahl_0.3.0_amd64.deb" },
+  windows: { label: "Download for Windows", small: "Version 0.3.0 for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-windows-x64.zip" },
 };
 const agent = `${navigator.platform} ${navigator.userAgent}`;
 const isPhone = /iPhone|iPad|Android/.test(agent) || (navigator.maxTouchPoints > 1 && /Mac/.test(agent));
