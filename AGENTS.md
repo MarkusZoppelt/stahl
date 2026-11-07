@@ -87,6 +87,26 @@ temp directory, so they can't reach the network or replace the running binary. T
 When running the app by hand, use the demo, or isolate it from real data: set `HOME` to a temp
 directory and `PORTFOLIO_RS_QUOTES=offline`. Opening a portfolio records a valuation in its history.
 
+## iOS
+
+`ios/` is the iPhone and iPad app: `ios/rust` is a staticlib that runs the app's own `State` and
+views on a Rune `LayerHost`, and `ios/Shell` is the small UIKit shell around it (window, display
+link, touch, keyboard, trackpad). It is its own Cargo workspace with its own lockfile; keep its Rune
+`rev` the same as the app's. Build and run it with Xcode installed:
+
+```sh
+nix develop .#ios -c ios/build-sim.sh --run [--device "iPad Air 11-inch (M4)"]
+```
+
+The phone layout (`src/view/compact.rs`) is on when `State::compact` is, which the shell sets from
+UIKit's horizontal size class; an iPad otherwise gets the desktop layout. Pages size themselves
+with `ui::room` and `ui::columns`, never by platform. Each phone screen has a `phone-*` scene:
+render those at `--size 390x844`, and the others at an iPad's sizes (`820x1156`, `1180x800`) when a
+page changes. `simctl` can't tap, so the shell plays input from `STAHL_IOS_SCRIPT` (see `play` in
+`ios/Shell/App.swift`): `SIMCTL_CHILD_STAHL_IOS_SCRIPT="wait 2; tap 346 755" xcrun simctl launch …`.
+
+An iOS app can't update itself (`update::SELF_UPDATES`) or take file drops.
+
 ## Landing page
 
 `site/` is the landing page: plain HTML, CSS and JavaScript with no build step, deployed by

@@ -11,6 +11,7 @@ use crate::{
     icons,
     state::{Command, Confirm, FormField, Page, PendingOpen, State, file_name},
     theme::Theme,
+    update,
     view::{guide, page_icon, portfolio::matches_search, ui, updates},
 };
 
@@ -254,6 +255,7 @@ pub fn entries(s: &State) -> Vec<Entry> {
         .map_or(String::new(), |palette| palette.query.text.to_lowercase());
     let mut found: Vec<Entry> = all
         .into_iter()
+        .filter(|entry| update::SELF_UPDATES || !matches!(entry.command, Command::CheckForUpdates))
         .filter(|entry| {
             let label = entry.label.to_lowercase();
             query.split_whitespace().all(|word| label.contains(word))

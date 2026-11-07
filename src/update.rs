@@ -29,6 +29,10 @@ use tempfile::Builder;
 use tokio::task;
 use zip::ZipArchive;
 
+/// Whether this platform lets an app replace itself. An iOS app updates through the App Store, so
+/// there it offers no update at all.
+pub const SELF_UPDATES: bool = !cfg!(target_os = "ios");
+
 /// The releases page, and the only place a release may send anyone.
 pub const RELEASES_PAGE: &str = "https://github.com/MarkusZoppelt/stahl/releases";
 const RELEASES_API: &str = "https://api.github.com/repos/MarkusZoppelt/stahl/releases?per_page=30";

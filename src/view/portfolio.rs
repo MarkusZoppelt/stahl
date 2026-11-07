@@ -77,7 +77,8 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .as_ref()
         .map_or(&[][..], |history| &history.points[..]);
     let day = t.change(summary.day_change_percent);
-    let narrow = ui::room(s, cx) == ui::Room::Narrow;
+    let room = ui::room(s, cx);
+    let narrow = room == ui::Room::Narrow;
     let figures = [
         ui::stat(
             "Unrealized PnL",
@@ -89,13 +90,12 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         ui::stat("Securities", s.money(summary.securities_value), None, t),
         ui::stat("Cash", s.money(summary.cash_value), None, t),
     ];
-    // Beside the total; on a phone, under it in two columns.
-    let figures = if narrow {
-        ui::columns(ui::Room::Narrow, [2, 2, 2], 16.0).children(figures)
-    } else {
-        row().center_y().gap(36.0).pb(2.0).children(figures)
+    // Beside the total when there's room; under it otherwise, in two columns on a phone.
+    let figures = match room {
+        ui::Room::Wide => row().center_y().gap(36.0).pb(2.0).children(figures),
+        _ => ui::columns(room, [3, 3, 2], 16.0).children(figures),
     };
-    let top = if narrow {
+    let top = if room != ui::Room::Wide {
         col().w_full().gap(20.0)
     } else {
         row()
@@ -1229,7 +1229,7 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .child(selector),
                 )
                 .child(
-                    ui::columns(room, [4, 4, 2], 12.0)
+                    ui::columns(room, [4, 2, 2], 12.0)
                         .child(ui::stat(
                             "Change",
                             optional(change),

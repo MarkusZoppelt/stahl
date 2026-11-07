@@ -493,9 +493,10 @@ pub fn refresh_button(key: &'static str, load: fn(&mut State), t: &Theme) -> El 
         .key(key)
 }
 
-/// A shortcut's keys as this platform writes them. Rune maps its command chords to Ctrl off macOS.
+/// A shortcut's keys as this platform writes them: ⌘ on Apple's, Ctrl elsewhere, as Rune maps
+/// its command chords. An iPad's keyboard has ⌘ too.
 pub fn chord_keys(shift: bool, key: &str) -> Vec<String> {
-    let (command, shifted) = if cfg!(target_os = "macos") {
+    let (command, shifted) = if cfg!(any(target_os = "macos", target_os = "ios")) {
         ("⌘", "⇧")
     } else {
         ("Ctrl", "Shift")
@@ -511,7 +512,11 @@ pub fn chord_keys(shift: bool, key: &str) -> Vec<String> {
 
 /// [`chord_keys`] as one label, for a tooltip.
 pub fn chord(shift: bool, key: &str) -> String {
-    let separator = if cfg!(target_os = "macos") { "" } else { "+" };
+    let separator = if cfg!(any(target_os = "macos", target_os = "ios")) {
+        ""
+    } else {
+        "+"
+    };
     chord_keys(shift, key).join(separator)
 }
 

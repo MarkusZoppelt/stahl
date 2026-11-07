@@ -10,6 +10,7 @@ use crate::{
     format, icons,
     state::State,
     theme::Theme,
+    update,
     view::{ui, updates},
 };
 
@@ -425,11 +426,15 @@ pub fn settings(s: &State, t: &Theme) -> El {
                         ),
                 ),
         )
-        .child(updates::settings_card(s, t))
+        .children(update::SELF_UPDATES.then(|| updates::settings_card(s, t)))
         .child(
             ui::card(t)
                 .child(ui::title("Data", t))
-                .child(ui::caption(format!("Config file: {config_path}"), t).selectable(true))
+                .child(
+                    ui::caption(format!("Config file: {config_path}"), t)
+                        .wrap()
+                        .selectable(true),
+                )
                 .child(
                     row().center_y().child(
                         Button::new("Forget This Portfolio")

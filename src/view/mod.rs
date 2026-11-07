@@ -139,7 +139,9 @@ fn splash(t: &Theme) -> El {
 
 /// Rune's windowing library reports no file drags on Wayland, so don't offer them there.
 fn drops_work() -> bool {
-    !cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none()
+    // Nor does the iOS shell pass drops on yet.
+    !cfg!(target_os = "ios")
+        && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
 }
 
 fn welcome(s: &State, t: &Theme) -> El {
@@ -253,7 +255,7 @@ fn welcome(s: &State, t: &Theme) -> El {
                 ),
         )
         .children(
-            (drops_work() && !compact).then(|| {
+            drops_work().then(|| {
                 ui::caption("or drop a file or folder anywhere on this window", t).mt(24.0)
             }),
         )
