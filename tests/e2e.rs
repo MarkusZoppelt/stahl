@@ -844,3 +844,264 @@ fn the_form_only_names_a_currency_it_knows() {
     assert!(app.has_text("Price (quote currency)"));
     assert!(!app.has_text("Price (EUR)"));
 }
+
+/// Position ids top to bottom: biggest value first. S&P 500, Savings, Bitcoin, Long Bonds, Gold.
+const BY_VALUE: [usize; 5] = [1, 4, 0, 2, 3];
+
+fn on_holdings() -> Harness {
+    let mut app = Harness::boot(false, Some(demo::POSITIONS));
+    app.command('2', false);
+    app
+}
+
+#[test]
+fn arrow_keys_move_the_selection_after_a_click() {
+    let mut app = on_holdings();
+    app.click(&format!("holding-{}", BY_VALUE[0]));
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[0]));
+
+    for id in &BY_VALUE[1..] {
+        app.press(Key::Down);
+        assert_eq!(app.rt.state.selected, Some(*id));
+        assert!(app.exists("edit-position"), "the details follow the row");
+    }
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[4]), "stops at the end");
+    app.press(Key::End);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[4]), "End stays too");
+    app.press(Key::Up);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[3]));
+    app.press(Key::Home);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[0]));
+    app.press(Key::Up);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[0]), "stops at the top");
+    app.press(Key::Text("s".into()));
+    assert_eq!(
+        app.rt.state.selected,
+        Some(BY_VALUE[0]),
+        "letters do nothing"
+    );
+}
+
+#[test]
+fn arrow_keys_move_the_selection_with_nothing_focused() {
+    let mut app = on_holdings();
+    app.press(Key::Down);
+    assert_eq!(
+        app.rt.state.selected,
+        Some(BY_VALUE[0]),
+        "starts at the top"
+    );
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[1]));
+    app.press(Key::Up);
+    app.press(Key::Up);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[0]), "stops at the top");
+    assert!(app.exists("edit-position"));
+}
+
+#[test]
+fn arrow_keys_follow_a_selection_from_elsewhere_without_toggling_it() {
+    let mut app = on_holdings();
+    app.click(&format!("holding-{}", BY_VALUE[0]));
+    // Selected from the palette, while the first row still has focus.
+    app.command('k', false);
+    app.type_text("savings");
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[1]));
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[2]));
+}
+
+#[test]
+fn arrow_keys_follow_the_sort_and_the_search() {
+    let mut app = on_holdings();
+    app.click("sort-name");
+    // A to Z: Bitcoin, Gold, Long Bonds, S&P 500, Savings.
+    app.click("holding-0");
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(3));
+
+    app.click("holdings-search");
+    app.type_text("o");
+    // The arrows stay in the field.
+    let selected = app.rt.state.selected;
+    app.press(Key::Down);
+    app.press(Key::Up);
+    assert_eq!(app.rt.state.selected, selected);
+    assert_eq!(app.rt.state.search.text, "o");
+}
+
+#[test]
+fn arrow_keys_leave_other_controls_and_pages_alone() {
+    let mut app = on_holdings();
+    app.command('k', false);
+    app.press(Key::Down);
+    assert!(
+        app.rt.state.selected.is_none(),
+        "the palette has the arrows"
+    );
+    app.press(Key::Escape);
+
+    app.command('n', false);
+    app.press(Key::Down);
+    assert!(app.rt.state.selected.is_none(), "the form has the arrows");
+    app.press(Key::Escape);
+
+    app.command('1', false);
+    app.press(Key::Down);
+    assert!(
+        app.rt.state.selected.is_none(),
+        "only Holdings has a selection"
+    );
+}
+
+#[test]
+fn return_edits_the_selected_holding_and_escape_comes_back() {
+    let mut app = on_holdings();
+    app.click(&format!("holding-{}", BY_VALUE[2]));
+    app.press(Key::Enter);
+    assert!(
+        app.rt.state.form.is_some(),
+        "Return on a focused row edits it"
+    );
+    assert_eq!(
+        app.rt.state.selected,
+        Some(BY_VALUE[2]),
+        "and keeps it selected"
+    );
+
+    app.press(Key::Escape);
+    assert!(app.rt.state.form.is_none());
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[3]));
+}
+
+#[test]
+fn return_edits_a_selection_with_nothing_focused() {
+    let mut app = on_holdings();
+    app.press(Key::Enter);
+    assert!(app.rt.state.form.is_none(), "no selection, nothing to edit");
+    app.press(Key::Down);
+    app.press(Key::Enter);
+    assert!(app.rt.state.form.is_some());
+}
+
+#[test]
+fn tab_stops_once_in_the_table_and_space_still_toggles() {
+    let mut app = on_holdings();
+    app.click(&format!("holding-{}", BY_VALUE[1]));
+    app.press(Key::Text(" ".into()));
+    assert!(
+        app.rt.state.selected.is_none(),
+        "Space presses the focused row"
+    );
+    app.press(Key::Text(" ".into()));
+    assert_eq!(app.rt.state.selected, Some(BY_VALUE[1]));
+    app.press(Key::Tab);
+    app.press(Key::Down);
+    assert_eq!(
+        app.rt.state.selected,
+        Some(BY_VALUE[1]),
+        "Tab left the table, so the arrows no longer move it"
+    );
+}
+
+fn narrowed_to(app: &mut Harness, width: f32, height: f32) {
+    app.rt.set_viewport((width, height), 2.0);
+    app.settle();
+}
+
+fn columns_of(app: &Harness) -> Vec<&'static str> {
+    [
+        "sort-name",
+        "sort-class",
+        "sort-value",
+        "sort-pnl",
+        "sort-day",
+    ]
+    .into_iter()
+    .filter(|key| app.exists(key))
+    .collect()
+}
+
+#[test]
+fn the_table_drops_columns_rather_than_overlap_them() {
+    let mut app = on_holdings();
+    assert_eq!(columns_of(&app).len(), 5, "a wide window has them all");
+
+    // The smallest window Stahl allows, with the pane open beside the table.
+    narrowed_to(&mut app, 960.0, 640.0);
+    assert_eq!(columns_of(&app).len(), 5, "no pane yet");
+    app.click("holding-0");
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value", "sort-day"]);
+    assert!(app.exists("edit-position"), "the details show beside it");
+    assert!(app.exists("add-position"));
+    let add = app.rt.presented("add-position").unwrap().0;
+    let pane = app.rt.presented("inspector").unwrap().0;
+    assert!(
+        add[0] + add[2] <= pane[0],
+        "the Add button stays clear of the pane"
+    );
+}
+
+#[test]
+fn a_window_too_narrow_for_both_shows_the_details_in_place_of_the_table() {
+    let mut app = on_holdings();
+    narrowed_to(&mut app, 646.0, 450.0);
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value", "sort-day"]);
+
+    app.click("holding-1");
+    assert!(!app.exists("holding-1"), "the details replace the table");
+    assert!(app.exists("edit-position"));
+
+    // The arrows still work, and Edit is still a key away.
+    app.press(Key::Down);
+    assert_eq!(app.rt.state.selected, Some(4));
+    app.press(Key::Enter);
+    assert!(app.rt.state.form.is_some());
+    app.press(Key::Escape);
+
+    app.click("close-inspector");
+    assert!(app.rt.state.selected.is_none());
+    assert!(
+        app.exists("holding-1"),
+        "closing them brings the table back"
+    );
+
+    // With the sidebar out of the way, both fit.
+    app.click("holding-1");
+    app.command('b', true);
+    assert!(app.exists("holding-1"));
+    assert!(app.exists("edit-position"));
+    assert_eq!(columns_of(&app), ["sort-name", "sort-value"]);
+}
+
+#[test]
+fn collapsing_the_sidebar_hides_every_row_on_every_page() {
+    // What stays is the toolbar's title for the open page, which isn't part of the sidebar.
+    let mut app = Harness::boot(true, None);
+    let rows = [
+        "nav-overview",
+        "nav-holdings",
+        "nav-allocation",
+        "nav-performance",
+        "nav-review",
+        "nav-rebalance",
+        "nav-policy",
+        "nav-documents",
+        "nav-briefing",
+        "nav-health",
+        "nav-settings",
+    ];
+    for key in rows {
+        app.click(key);
+        app.click("sidebar-toggle");
+        assert!(!app.rt.state.sidebar.is_open());
+        for row in rows {
+            let (_, opacity) = app.rt.presented(row).expect("the row stays laid out");
+            assert_eq!(opacity, 0.0, "{row} shows with {key} open");
+        }
+        app.click("sidebar-toggle");
+    }
+}

@@ -1,6 +1,8 @@
 //! The application: window chrome, native menus, and how it starts.
 
-use rune::{App, AppSpec, Chrome, Cx, El, Env, MenuItem, Runtime, Tx};
+use std::{thread, time::Duration};
+
+use rune::{App, AppHandle, AppSpec, Chrome, Cx, El, Env, MenuItem, Runtime, Tx};
 
 use crate::{
     backend::Backend,
@@ -148,7 +150,46 @@ fn configured(spec: AppSpec<State>, init: impl FnOnce() -> State + 'static) -> A
         })
 }
 
-pub fn run(backend: Backend, initial_file: Option<String>, rune_args: Vec<String>) {
+/// What to tell someone whose window couldn't open, given Rune's reason.
+fn window_failure(reason: &str) -> String {
+    let hint = if cfg!(target_os = "linux") {
+        "Stahl draws with the GPU, so this usually means a missing driver. Install a Vulkan \
+         driver, such as mesa-vulkan-drivers on Debian and Ubuntu, which also works with no GPU."
+    } else {
+        "Stahl draws with the GPU, so this usually means a missing or outdated graphics driver."
+    };
+    format!("could not open the window: {reason}\n{hint}")
+}
+
+/// Asks the app to quit if its first window can't be created. Rune would otherwise keep running
+/// with no window, waiting for an open that nothing will ever ask for.
+fn quit_without_a_window(handle: AppHandle<State>) {
+    thread::spawn(move || {
+        while !handle.is_visible() {
+            if handle.window_error().is_some() {
+                handle.quit();
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+}
+
+/// Runs until the app quits, or says why it couldn't start.
+fn launch(app: App<State>) -> Result<(), String> {
+    let handle = app.handle();
+    quit_without_a_window(handle.clone());
+    app.try_run()?;
+    handle
+        .window_error()
+        .map_or(Ok(()), |reason| Err(window_failure(&reason)))
+}
+
+pub fn run(
+    backend: Backend,
+    initial_file: Option<String>,
+    rune_args: Vec<String>,
+) -> Result<(), String> {
     let app = with_menus(configured(spec(), move || {
         State::new(backend, initial_file)
     }));
@@ -160,15 +201,17 @@ pub fn run(backend: Backend, initial_file: Option<String>, rune_args: Vec<String
             handle.update(move |s, _| s.reopen = Some(Box::new(move || reopen.open())));
         }
     });
-    app.args(rune_args).run();
+    launch(app.args(rune_args))
 }
 
 /// [`run`] with named states to render, for `examples/demo.rs`.
-pub fn run_with_scenes(backend: Backend, rune_args: Vec<String>, scenes: &'static [Scene]) {
+pub fn run_with_scenes(
+    backend: Backend,
+    rune_args: Vec<String>,
+    scenes: &'static [Scene],
+) -> Result<(), String> {
     let spec = AppSpec { scenes, ..spec() };
-    with_menus(configured(spec, move || State::new(backend, None)))
-        .args(rune_args)
-        .run();
+    launch(with_menus(configured(spec, move || State::new(backend, None))).args(rune_args))
 }
 
 /// The app without a window, for tests and tooling: every scene and handler as in the real one.
@@ -182,4 +225,19 @@ pub fn headless(
     runtime.state.startup();
     runtime.state.settle();
     runtime
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_failure_says_why_and_what_to_do() {
+        let message = window_failure("Failed to create surface for any enabled backend: {}");
+        assert!(message.contains("Failed to create surface"));
+        assert!(message.contains("driver"));
+        if cfg!(target_os = "linux") {
+            assert!(message.contains("mesa-vulkan-drivers"));
+        }
+    }
 }

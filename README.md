@@ -20,7 +20,9 @@ See it at [zoppelt.net/stahl](https://zoppelt.net/stahl/).
 ## Features
 
 - **Overview:** total value, today's change, and value over time at a glance, with what needs attention
-- **Holdings:** a sortable, searchable table with a detail pane for cost basis and purchases
+- **Holdings:** a sortable, searchable table with a detail pane for cost basis and purchases. Up and
+  Down move the selection and Return edits it. In a narrow window, columns drop out, and the details
+  take the table's place when both don't fit.
 - **Allocation:** the split today, compared with your policy's targets
 - **Performance:** value over time with time-weighted return, separating market moves from money you added
 - **Review** (workspace): drift, constraint checks, data quality, and suggested actions
@@ -71,6 +73,9 @@ nix run github:MarkusZoppelt/stahl
 
 Pass a positions file to open it: `stahl positions.json`.
 
+On Linux, Stahl needs a GPU driver or a Vulkan software renderer. On Debian and Ubuntu, install
+`mesa-vulkan-drivers`. Without one, Stahl says so and exits instead of opening a window.
+
 ## Install
 
 ```sh
@@ -96,7 +101,7 @@ cargo run
 Requires [rustup](https://rustup.rs), which picks up the toolchain pinned in `rust-toolchain.toml`.
 On Linux you also need the development packages for xkbcommon and Wayland
 (`libxkbcommon-dev libwayland-dev` on Debian and Ubuntu), and `libxkbcommon-x11-0` plus a Vulkan
-driver to run it. On macOS the Xcode command line tools are enough.
+driver (`mesa-vulkan-drivers`) to run it. On macOS the Xcode command line tools are enough.
 
 ```sh
 cargo run
