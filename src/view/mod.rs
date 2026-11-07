@@ -53,6 +53,7 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             || s.form.take().is_some()
             || s.new_workspace.take().is_some()
             || s.confirm.take().is_some()
+            || s.folder_prompt.take().is_some()
             || mem::take(&mut s.guide)
             || s.close_update_dialog();
     }
@@ -76,6 +77,7 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         ('h', true) => s.privacy = !s.privacy,
         ('n', false) if s.has_portfolio() => s.open_form(None),
         ('n', true) => s.open_new_workspace(),
+        ('w', true) => s.reset(),
         // Some layouts need Shift to type a slash, so it doesn't matter here.
         ('/' | '?', _) => s.toggle_guide(),
         ('q', false) => s.quit_or_ask(tx),
@@ -93,6 +95,9 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let mut layer = Vec::new();
     let body = if s.starting {
         splash(&t)
+    } else if s.folder_prompt.is_some() {
+        // Not the shell: the previous portfolio is still in memory, and must not look loaded.
+        folder_prompt(s, &t)
     } else if s.open.parse_error.is_some() {
         overlays::parse_failure(s, &t)
     } else if !s.has_portfolio() {
@@ -259,6 +264,81 @@ fn welcome(s: &State, t: &Theme) -> El {
             s.error
                 .as_ref()
                 .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(880.0)),
+        )
+}
+
+/// A folder was chosen and it is not a workspace. The previous portfolio is not drawn.
+fn folder_prompt(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let Some(prompt) = &s.folder_prompt else {
+        return col();
+    };
+    let name = file_name(&prompt.dir);
+    let detail = if prompt.empty {
+        format!(
+            "{name} is empty, so there is nothing to open. Start a workspace in this folder, or choose a different one."
+        )
+    } else {
+        format!(
+            "{name} has no positions.json, and it isn't a portfolio from the portfolio_rs command line. Starting a workspace here adds those files and leaves everything else in place."
+        )
+    };
+    col()
+        .w_full()
+        .h_full()
+        .center()
+        .gap(12.0)
+        .padding(24.0)
+        .child(ui::wash(t, 0.0))
+        .child(
+            text("This folder isn't a workspace")
+                .font(PAGE_TITLE)
+                .color(k.c.text_base),
+        )
+        .child(
+            col()
+                .w_full()
+                .max_w(640.0)
+                .items_center()
+                .child(ui::muted(detail, t).wrap().align(Align::Center)),
+        )
+        .child(
+            ui::caption(prompt.dir.clone(), t)
+                .key("folder-path")
+                .truncate_middle()
+                .max_w(640.0),
+        )
+        .children(
+            prompt
+                .error
+                .clone()
+                .map(|error| ui::danger(error, t).max_w(640.0)),
+        )
+        .child(
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    Button::new("Start a workspace here")
+                        .variant(ButtonVariant::Submit)
+                        .icon(&icons::FOLDER_PLUS)
+                        .on_press(|s: &mut State| s.start_prompted_workspace())
+                        .build(k)
+                        .key("folder-start"),
+                )
+                .child(
+                    Button::new("Choose another folder")
+                        .icon(&icons::FOLDER_OPEN)
+                        .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_workspace(tx))
+                        .build(k)
+                        .key("folder-choose"),
+                )
+                .child(
+                    Button::new("Cancel")
+                        .on_press(|s: &mut State| s.folder_prompt = None)
+                        .build(k)
+                        .key("folder-cancel"),
+                ),
         )
 }
 

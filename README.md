@@ -68,8 +68,9 @@ And it behaves like a desktop app:
   line, empty pages say what fills them, and the less obvious figures explain themselves on hover.
 - **Hide amounts** (`⌘⇧H`) before you share your screen
 - **Drop a file or folder** on the window to open it (not yet on Wayland, where Rune gets no drags)
-- **Unsaved changes** show in the title bar, and quitting offers to save them
-- **A broken positions file** shows the line and column at fault. It is never shown as an empty portfolio, and never overwritten.
+- **Unsaved changes** show in the title bar. Opening another portfolio, closing, or quitting asks before they're discarded
+- **Close** (`⌘⇧W`, or the command palette) returns to the welcome screen
+- **A broken positions file** says what's wrong: an empty file, JSON that doesn't parse (with the line and column), or a file that isn't a list of positions. The parser's own text stays under Details. It is never shown as an empty portfolio, and never overwritten.
 - **Price freshness** in the toolbar: live, stale, partial, or offline
 - **Motion that means something:** digits roll when a price changes, the hero flashes when new
   prices land, charts draw themselves in and read out the value under the pointer, and rows fly

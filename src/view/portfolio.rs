@@ -321,8 +321,8 @@ fn step(number: usize, heading: &str, detail: String, action: Option<El>, t: &Th
         .py(10.0)
         .child(
             col()
-                .size(26.0, 26.0)
-                .radius(13.0)
+                .size(24.0, 24.0)
+                .radius(12.0)
                 .center()
                 .fill(k.c.layer_03)
                 .a11y_hidden()

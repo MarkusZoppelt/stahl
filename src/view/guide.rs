@@ -91,12 +91,13 @@ const TERMS: [(&str, &str); 12] = [
     ("Market effect", MARKET_EFFECT),
 ];
 
-const SHORTCUTS: [(&str, bool, &str); 9] = [
+const SHORTCUTS: [(&str, bool, &str); 10] = [
     ("Command palette: every page and action", false, "K"),
     ("This guide", false, "/"),
     ("New workspace", true, "N"),
     ("Open a workspace", true, "O"),
     ("Open a positions file", false, "O"),
+    ("Close the portfolio", true, "W"),
     ("Add a position", false, "N"),
     ("Save", false, "S"),
     ("Refresh prices", false, "R"),

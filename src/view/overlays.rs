@@ -9,7 +9,7 @@ use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toas
 use crate::{
     backend::{WorkspaceField, plan_workspace},
     icons,
-    state::{Command, Confirm, FormField, Page, State, file_name},
+    state::{Command, Confirm, FormField, Page, PendingOpen, State, file_name},
     theme::Theme,
     view::{guide, page_icon, portfolio::matches_search, ui, updates},
 };
@@ -74,12 +74,14 @@ pub fn parse_failure(s: &State, t: &Theme) -> El {
                     .radius(8.0)
                     .fill(t.warn.alpha(0.12))
                     .child(
-                        text(format!("Line {}, column {}", problem.line, problem.column))
+                        text(problem.summary())
                             .font(k.ty.ui_medium)
-                            .color(t.warn),
+                            .color(t.warn)
+                            .wrap(),
                     )
                     .child(
-                        text(problem.reason.clone())
+                        text(format!("Details: {}", problem.reason))
+                            .key("parse-detail")
                             .font(k.ty.ui)
                             .color(k.c.text_base)
                             .wrap()
@@ -206,6 +208,24 @@ pub fn entries(s: &State) -> Vec<Entry> {
             Command::CheckForUpdates,
         ),
     ]);
+    if s.open.is_open() {
+        all.push(action(
+            if s.is_workspace() {
+                "Close Workspace"
+            } else {
+                "Close File"
+            },
+            &icons::X_CIRCLE,
+            Some((true, "W")),
+            Command::Close,
+        ));
+    }
+    all.extend([action(
+        "Toggle Light/Dark Theme",
+        &icons::MOON,
+        None,
+        Command::Theme,
+    )]);
     if s.has_portfolio() {
         all.extend([
             action(
@@ -423,6 +443,7 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
     } else {
         "Price (quote currency)".to_string()
     };
+    let base = s.currency();
     macro_rules! access {
         ($field:ident) => {
             |s: &mut State| &mut s.form.as_mut().expect("form is open").$field
@@ -518,7 +539,7 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         .children((!form.amount_from_purchases()).then(|| {
                             ui::caption(
                                 format!(
-                                    "Shares or units you hold. Without a ticker, the value in {currency}."
+                                    "Shares or units you hold. Without a ticker, the value in {base}."
                                 ),
                                 t,
                             )
@@ -789,6 +810,57 @@ fn confirmation(confirm: &Confirm, t: &Theme, layer: &mut Vec<El>) {
                             })
                             .build(k)
                             .key("confirm-delete"),
+                    ),
+            )
+        }
+        Confirm::Unsaved(next) => {
+            let (title, description) = match next {
+                PendingOpen::Close => (
+                    "Save changes before closing?",
+                    "Closing goes back to the welcome screen. Your position changes are lost if you don't save them.",
+                ),
+                PendingOpen::CreateWorkspace => (
+                    "Save changes before creating a workspace?",
+                    "Creating a workspace closes this portfolio. Your position changes are lost if you don't save them.",
+                ),
+                PendingOpen::Reload => (
+                    "Save changes before reloading?",
+                    "Reloading reads the file from disk. Your position changes are lost if you don't save them.",
+                ),
+                PendingOpen::File
+                | PendingOpen::Workspace
+                | PendingOpen::Path(_)
+                | PendingOpen::StartIn(_)
+                | PendingOpen::Startup => (
+                    "Save changes before opening another portfolio?",
+                    "Your position changes are lost if you don't save them.",
+                ),
+            };
+            (
+                title.to_string(),
+                description,
+                row()
+                    .center_y()
+                    .gap(8.0)
+                    .child(
+                        Button::new("Don't Save")
+                            .variant(ButtonVariant::Danger)
+                            .on_press(|s: &mut State| s.confirm_unsaved(false))
+                            .build(k)
+                            .key("unsaved-discard"),
+                    )
+                    .child(
+                        Button::new("Cancel")
+                            .on_press(|s: &mut State| s.confirm = None)
+                            .build(k)
+                            .key("confirm-cancel"),
+                    )
+                    .child(
+                        Button::new("Save")
+                            .variant(ButtonVariant::Submit)
+                            .on_press(|s: &mut State| s.confirm_unsaved(true))
+                            .build(k)
+                            .key("unsaved-save"),
                     ),
             )
         }

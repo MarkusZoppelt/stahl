@@ -12,7 +12,7 @@ use std::{env, fs, process, time::SystemTime};
 use portfolio_rs::config::ThemeMode;
 use stahl::{
     app, demo,
-    state::{Page, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
     update::Installation,
 };
 use tokio::runtime::Builder;
@@ -159,6 +159,19 @@ fn main() {
             ("guide-first-run", |s| {
                 first_run(s);
                 s.toggle_guide();
+            }),
+            ("not-a-workspace", |s| {
+                scene(s, Page::Overview);
+                s.folder_prompt = Some(FolderPrompt {
+                    dir: "/tmp/empty-folder".into(),
+                    empty: true,
+                    error: None,
+                });
+            }),
+            ("unsaved-changes", |s| {
+                scene(s, Page::Overview);
+                s.dirty = true;
+                s.confirm = Some(Confirm::Unsaved(PendingOpen::Workspace));
             }),
             ("parse-failure", |s| {
                 s.startup();
