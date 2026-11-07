@@ -25,8 +25,7 @@ Guidance for AI agents (and humans) working on this repo.
 - If an import is only needed under a `#[cfg(...)]`-gated function or block,
   gate the `use` with the same `#[cfg(...)]` rather than importing it
   unconditionally (which would produce an unused-import warning on other
-  platforms). Example: `main.rs`'s Linux-only display check uses
-  `#[cfg(target_os = "linux")] use std::process;`.
+  platforms). Example: `#[cfg(unix)] use std::os::unix::fs::PermissionsExt;` in `tests/e2e.rs`.
 
 - Run `cargo fmt` after adding/moving imports — rustfmt reorders and groups
   `use` statements (including `#[cfg(...)]`-gated ones) and CI enforces this
