@@ -48,6 +48,8 @@ And it behaves like a desktop app:
   targets as an outer ring around the allocation donut, each holding's weight along its row, a gauge
   for how much of the portfolio sits within policy, and today against afterwards for a rebalance.
 - **Prices catch up** when you come back to the app after 15 minutes away
+- **Updates** you decide on: it tells you when a new version is out, and installs it only when you
+  say so. See [Updates](#updates).
 - Light and dark themes, and system file panels. On macOS, native menus, context menus, a Dock
   menu, and saved reports you can drag out to Finder or Mail.
 
@@ -83,6 +85,36 @@ nix profile install github:MarkusZoppelt/stahl
 
 Installers (`.dmg`, `.deb`, and a Windows `.zip`) are attached to
 [GitHub Releases](https://github.com/MarkusZoppelt/stahl/releases).
+
+## Updates
+
+On launch, Stahl asks GitHub whether there is a newer release. That is one request to
+`api.github.com`. GitHub sees your IP address and which version of Stahl is asking, and nothing about
+your portfolio. If it can't get an answer it says nothing. If there is a newer version, a notice offers its release notes, and nothing is downloaded
+until you press the button. You can also use **Check for Updates…** in the command palette, in
+Settings, or in the app menu on macOS. Drafts, prereleases, and older versions are never offered.
+
+Set `STAHL_NO_UPDATE_CHECK=1` to skip the check on launch. Checking by hand still works.
+
+What installing means depends on how you installed Stahl:
+
+| Installed from | What an update does |
+|---|---|
+| **macOS `.dmg`** (Apple Silicon) | Replaces the app in place, then restarts when you say so |
+| **Windows `.zip`** | Replaces `stahl.exe` in place, then restarts when you say so |
+| **Debian `.deb`** | Downloads and verifies the package, saves it to your downloads, and gives you the `sudo apt install` command. Stahl never asks for root |
+| **Nix** | Only tells you, and links to the release. The Nix store is read-only and belongs to Nix, so update it the way you installed it |
+| **Anything else** (a source build, Intel Mac, ARM Linux, or an app still running from the disk image) | Only tells you, links to the release, and says why |
+
+If an update can't finish, the version you have stays as it was, and restarting saves your changes
+first.
+
+**What is and isn't verified.** Downloads are HTTPS-only, from this repository's releases, and must
+match the SHA-256 checksum published beside the installer. That catches a corrupt or truncated
+download. It doesn't catch a compromised release, since whoever could replace an installer could
+replace its checksum too. The app isn't signed with a Developer ID or notarized either: macOS builds
+are ad-hoc signed, and an update is not quarantined, so Gatekeeper doesn't review it the way it does
+a first install from a browser. If that matters to you, verify and install releases yourself, or use Nix.
 
 ## Building
 
@@ -129,7 +161,9 @@ and opens a real window.
 
 To release, bump the version in `Cargo.toml`, merge it, and push a matching tag (`v0.2.0` for version
 `0.2.0`). `.github/workflows/release.yml` then builds installers with each OS's native toolchain and
-publishes a GitHub Release with them, once all three have built. This is
+publishes a GitHub Release with them and their `.sha256` checksums, once all three have built. The
+in-app updater needs those exact asset names (see `src/update.rs`) and won't install without a
+checksum. This is
 separate from Nix: `nix build` produces binaries linked against `/nix/store` paths, which is fine for
 machines with Nix but not for distribution. macOS builds are ad-hoc signed, as there is no Apple
 Developer certificate configured, so users need to right-click → Open (or clear the quarantine
@@ -140,6 +174,7 @@ attribute) on first launch.
 ```
 src/backend.rs   The bridge to portfolio_rs, which runs on Tokio beside Rune
 src/state.rs     All state, and everything that changes it
+src/update.rs    Finding, verifying, and installing new releases
 src/app.rs       Window chrome, menus, and how it starts
 src/view/        Pure functions from state to elements, one module per area
 src/theme.rs     Tokyo Night, dark and light

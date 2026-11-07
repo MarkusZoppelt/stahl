@@ -6,7 +6,12 @@ use portfolio_rs::{
 use rune::{Cx, El, TextEdit, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, SegmentedControl, TextInput};
 
-use crate::{format, icons, state::State, theme::Theme, view::ui};
+use crate::{
+    format, icons,
+    state::State,
+    theme::Theme,
+    view::{ui, updates},
+};
 
 pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
@@ -411,6 +416,7 @@ pub fn settings(s: &State, t: &Theme) -> El {
                         ),
                 ),
         )
+        .child(updates::settings_card(s, t))
         .child(
             ui::card(t)
                 .child(ui::title("Data", t))
