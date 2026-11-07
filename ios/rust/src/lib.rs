@@ -12,7 +12,9 @@ use std::{
     },
 };
 
-use rune::{Key, KeyEvent, Mods, TouchPhase, color::srgb_encode, embed::LayerHost};
+use rune::{
+    GesturePhase, Key, KeyEvent, Mods, TouchPhase, WheelEvent, color::srgb_encode, embed::LayerHost,
+};
 use stahl::{app, demo, state::State, theme::Theme};
 use tokio::runtime::{Builder, Runtime};
 
@@ -203,6 +205,95 @@ fn key(h: &mut Host, key: Key) {
         key,
         mods: Mods::default(),
     });
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// The keys a hardware keyboard sends that aren't text, numbered as in `stahl.h`.
+const KEYS: [Key; 13] = [
+    Key::Escape,
+    Key::Tab,
+    Key::Enter,
+    Key::Backspace,
+    Key::Delete,
+    Key::Left,
+    Key::Right,
+    Key::Up,
+    Key::Down,
+    Key::Home,
+    Key::End,
+    Key::PageUp,
+    Key::PageDown,
+];
+
+/// A key from a hardware keyboard. `key` is 0 for a chord with ⌘ and `character` (its key, without
+/// modifiers), or 1 + an index into [`KEYS`]. `mods`: 1 Shift, 2 ⌘, 4 Option, 8 Control.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_key(host_ptr: *mut Host, key: u32, character: u32, mods: u32) {
+    let pressed = match key {
+        0 => match char::from_u32(character) {
+            Some(character) => Key::Command(character.to_ascii_lowercase()),
+            None => return,
+        },
+        index => match KEYS.get(index as usize - 1) {
+            Some(key) => key.clone(),
+            None => return,
+        },
+    };
+    let h = host(host_ptr);
+    h.host.runtime_mut().key(KeyEvent {
+        key: pressed,
+        mods: Mods {
+            shift: mods & 1 != 0,
+            cmd: mods & 2 != 0,
+            logo: mods & 2 != 0,
+            alt: mods & 4 != 0,
+            ctrl: mods & 8 != 0,
+        },
+    });
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// A trackpad or mouse pointer hovering at `x`, `y` in view points, or gone when `inside` is false.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_hover(host_ptr: *mut Host, x: f32, y: f32, inside: bool) {
+    let h = host(host_ptr);
+    if inside {
+        h.host.runtime_mut().pointer_move(x, y);
+    } else {
+        h.host.runtime_mut().pointer_leave();
+    }
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// Two-finger trackpad or mouse-wheel scrolling at `x`, `y`: `dx`, `dy` in points, the way the
+/// fingers moved. `phase`: 0 began, 1 moved, 2 ended.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_scroll(
+    host_ptr: *mut Host,
+    x: f32,
+    y: f32,
+    dx: f32,
+    dy: f32,
+    phase: u32,
+) {
+    let phase = match phase {
+        0 => GesturePhase::Began,
+        1 => GesturePhase::Moved,
+        _ => GesturePhase::Ended,
+    };
+    let h = host(host_ptr);
+    h.host
+        .runtime_mut()
+        .wheel_event(WheelEvent::new(dx, dy).at(x, y).phase(phase).precise(true));
     h.dirty.store(true, Ordering::Release);
 }
 
