@@ -24,7 +24,7 @@ use portfolio_rs::{
     services::quotes::AnyProvider,
     state::{AppState, PositionDto},
 };
-use rune::{FileDialogKind, Key, KeyEvent, Mods, Runtime};
+use rune::{FileDialogKind, Key, KeyEvent, Mods, Runtime, TouchPhase};
 use stahl::{
     app,
     backend::{Backend, Period},
@@ -2523,4 +2523,124 @@ fn a_phone_knows_when_a_field_takes_a_number() {
     assert!(app.rt.state.number_focused());
     app.click("form-name");
     assert!(!app.rt.state.number_focused());
+}
+
+impl Harness {
+    /// A finger along a straight line, over a few frames, then lifted.
+    fn swipe(&mut self, from: (f32, f32), to: (f32, f32)) {
+        let mut time = 1.0;
+        self.rt.touch(9, TouchPhase::Started, from.0, from.1, time);
+        self.rt.pointer_move(from.0, from.1);
+        for step in 1..=12 {
+            let f = step as f32 / 12.0;
+            time += 1.0 / 60.0;
+            let (x, y) = (from.0 + (to.0 - from.0) * f, from.1 + (to.1 - from.1) * f);
+            self.rt.touch(9, TouchPhase::Moved, x, y, time);
+            // As the iOS shell does, so a finger on a chart reads it out.
+            self.rt.pointer_move(x, y);
+            self.rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn lift(&mut self, at: (f32, f32)) {
+        self.rt.touch(9, TouchPhase::Ended, at.0, at.1, 2.0);
+        self.rt.pointer_leave();
+        self.rt.frame(1.0 / 60.0);
+    }
+}
+
+#[test]
+fn back_on_a_phone_closes_then_returns() {
+    let mut app = Harness::phone();
+    app.rt.update(|state, _| state.open_palette());
+    assert!(app.rt.update_if(|state, _| state.go_back()));
+    assert!(app.rt.state.palette.is_none());
+
+    app.click(Page::Holdings.key());
+    let id = app.rt.state.positions[0].id;
+    app.click(&format!("holding-{id}"));
+    assert!(app.rt.update_if(|state, _| state.go_back()));
+    assert_eq!(app.rt.state.selected, None, "the details close first");
+
+    app.click("tab-more");
+    app.tap(Page::Briefing.key());
+    app.click(Page::Briefing.key());
+    assert!(app.rt.update_if(|state, _| state.go_back()));
+    assert!(app.rt.state.more, "a page from More goes back to More");
+    app.click(Page::Overview.key());
+    assert!(
+        !app.rt.update_if(|state, _| state.go_back()),
+        "a tab has nowhere to go back to"
+    );
+}
+
+#[test]
+fn pulling_a_phone_s_page_far_enough_refreshes_the_prices() {
+    let mut app = Harness::phone();
+    app.swipe((195.0, 300.0), (195.0, 340.0));
+    assert!(!app.rt.state.pull.past(), "a nudge isn't a pull");
+    app.lift((195.0, 340.0));
+    assert!(!app.rt.update_if(|state, _| state.pull_released()));
+    app.settle();
+
+    app.swipe((195.0, 250.0), (195.0, 650.0));
+    assert!(
+        app.rt.state.pull.past(),
+        "pulled {}",
+        app.rt.state.pull.distance.get()
+    );
+    app.lift((195.0, 650.0));
+    let updates = app.rt.state.price_updates;
+    assert!(app.rt.update_if(|state, _| state.pull_released()));
+    assert!(app.rt.state.pull_refreshing);
+    app.settle();
+    assert_eq!(app.rt.state.price_updates, updates + 1);
+}
+
+#[test]
+fn a_phone_s_holding_slides_open_to_edit_or_delete() {
+    let mut app = Harness::phone();
+    app.click(Page::Holdings.key());
+    let id = app.rt.state.positions[0].id;
+    let (x, y) = app.rt.find(&format!("holding-{id}")).unwrap();
+    let edit = format!("swipe-edit-{id}");
+    let hidden = |app: &Harness| app.rt.find(&edit).is_none_or(|(x, _)| x > 390.0);
+    assert!(hidden(&app), "the actions start out of sight");
+
+    app.swipe((x + 120.0, y), (x - 20.0, y));
+    app.lift((x - 20.0, y));
+    app.rt.update(|state, tx| state.settle_swipes(tx));
+    app.settle();
+    assert!(!hidden(&app), "a long enough slide opens the row");
+    assert_eq!(app.rt.state.selected, None, "a slide isn't a tap");
+
+    app.click(&format!("swipe-delete-{id}"));
+    assert!(
+        matches!(app.rt.state.confirm, Some(Confirm::Delete { id: deleting, .. }) if deleting == id)
+    );
+    app.settle();
+    assert!(hidden(&app), "an action shuts its row");
+}
+
+#[test]
+fn a_phone_can_lock_the_vault_and_ticks_along_the_chart() {
+    let mut app = Harness::phone();
+    app.rt.state.lock = Some(false);
+    app.rt.state.lock_name = "Face ID".to_string();
+    app.click("tab-more");
+    app.tap(Page::Settings.key());
+    app.click(Page::Settings.key());
+    app.tap("settings-lock");
+    app.click("settings-lock");
+    assert_eq!(app.rt.state.lock, Some(true));
+    assert!(app.has_text("Face ID locks the vault"));
+
+    app.click(Page::Overview.key());
+    let (x, y) = app.rt.find("overview-chart").unwrap();
+    app.rt.pointer_move(x - 100.0, y);
+    app.rt.frame(1.0 / 60.0);
+    let first = app.rt.state.chart_point;
+    app.rt.pointer_move(x + 100.0, y);
+    app.rt.frame(1.0 / 60.0);
+    assert!(first.is_some() && app.rt.state.chart_point > first);
 }

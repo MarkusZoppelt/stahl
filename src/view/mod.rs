@@ -3,8 +3,8 @@
 use std::{env, mem};
 
 use rune::{
-    Align, Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
-    tok::motion::LEAD,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
+    text, tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
@@ -646,6 +646,11 @@ fn page_column(
         .scroll(ScrollSpec {
             stick_bottom: false,
         });
+    // On a phone, a pull past the page's top shows the door, and letting go refreshes.
+    let scroller = match s.compact.then(|| s.pull.clone()) {
+        Some(pull) => scroller.on_scroll_offset(move |at: ScrollPos| pull.track(at.offset[1])),
+        None => scroller,
+    };
     col().key("main").w_full().h_full().min_h(0.0).child(
         scroller.child(
             col()

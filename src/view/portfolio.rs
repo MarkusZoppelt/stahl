@@ -7,8 +7,8 @@ use portfolio_rs::{
     state::{PositionDto, TopMoverDto},
 };
 use rune::{
-    Beat, Cx, El, Key, KeyEvent, PopupItem, PopupMenu, Sequence, Tx, col, el, icon,
-    popup_menu_supported, row, text, tok::motion::LEAD,
+    Beat, Color, Cx, El, Icon, Key, KeyEvent, PopupItem, PopupMenu, ScrollPos, Sequence, Tx, col,
+    el, icon, popup_menu_supported, row, text, tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, SegmentedControl, TextInput,
@@ -17,7 +17,7 @@ use rune_kit::{
 use crate::{
     backend::Period,
     format, icons,
-    state::{Confirm, Page, SortBy, State, file_name},
+    state::{Confirm, Page, SWIPE_ACTIONS, SortBy, State, file_name, swipe_key},
     theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
     view::{charts, guide, ui},
 };
@@ -687,6 +687,86 @@ fn holding_row(
         }))
 }
 
+/// A holding's row on a phone, which slides left to show Edit and Delete, as rows in iOS do.
+/// Where it comes to rest is settled when the finger lifts (`State::settle_swipes`).
+fn swipe_row(s: &State, position: &PositionDto, content: El, t: &Theme) -> El {
+    let k = &t.kit;
+    let id = position.id;
+    let name = display_name(position);
+    let swipes = s.swipes.clone();
+    let action = |key: String, glyph: &'static Icon, label: &str, fill: Color, ink: Color| {
+        col()
+            .key(key)
+            .role("button")
+            .label(label.to_string())
+            .grow(1.0)
+            .w(0.0)
+            .h(44.0)
+            .gap(2.0)
+            .center()
+            .radius(6.0)
+            .fill(fill)
+            .press_scale(0.95)
+            .child(icon(glyph, 16.0).color(ink))
+            .child(
+                text(label.to_string())
+                    .font(k.ty.text_xsmall_medium)
+                    .color(ink),
+            )
+    };
+    let shut = move |tx: &mut Tx| tx.scroll_to(swipe_key(id), 0.0, 0.0);
+    let actions = row()
+        .center_y()
+        .w(SWIPE_ACTIONS)
+        .h(52.0)
+        .gap(6.0)
+        .pl(8.0)
+        .child(
+            action(
+                format!("swipe-edit-{id}"),
+                &icons::PENCIL,
+                "Edit",
+                k.c.layer_03,
+                k.c.text_base,
+            )
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                shut(tx);
+                s.open_form(Some(id));
+            }),
+        )
+        .child(
+            action(
+                format!("swipe-delete-{id}"),
+                &icons::TRASH,
+                "Delete",
+                t.down,
+                k.c.bg_base,
+            )
+            .on_press_tx(move |s: &mut State, tx: &mut Tx| {
+                shut(tx);
+                s.confirm = Some(Confirm::Delete {
+                    id,
+                    name: name.clone(),
+                });
+            }),
+        );
+    row()
+        .key(swipe_key(id))
+        .w_full()
+        .scroll_x()
+        .on_scroll_offset(move |at: ScrollPos| {
+            if let Ok(mut rows) = swipes.lock() {
+                let before = rows.offsets.insert(id, at.offset[0]);
+                // Every row reports where it starts; only a row that moved was slid.
+                if before.is_some_and(|x| (x - at.offset[0]).abs() > 0.5) {
+                    rows.last = Some(id);
+                }
+            }
+        })
+        .child(content.w_full())
+        .child(actions)
+}
+
 fn search_input(s: &State) -> TextInput {
     let input = TextInput::new(&s.search)
         .placeholder("Search holdings")
@@ -867,7 +947,12 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .focus_follows()
                     .w_full()
                     .children(rows.into_iter().enumerate().map(|(index, position)| {
-                        holding_row(s, position, columns, index == 0, index == end, t)
+                        let row = holding_row(s, position, columns, index == 0, index == end, t);
+                        if s.compact {
+                            swipe_row(s, position, row, t)
+                        } else {
+                            row
+                        }
                     })),
             ),
     )

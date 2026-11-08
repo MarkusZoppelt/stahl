@@ -4,7 +4,7 @@ use portfolio_rs::{
     config::ThemeMode, doctor::HealthStatus, mcp::dto::Severity, validate::ValidationSeverity,
 };
 use rune::{Cx, El, TextEdit, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, SegmentedControl, TextInput};
+use rune_kit::{Button, ButtonVariant, Checkbox, SegmentedControl, TextInput};
 
 use crate::{
     format, icons,
@@ -357,6 +357,24 @@ pub fn settings(s: &State, t: &Theme) -> El {
                 ))
                 .child(col().gap(6.0).child(ui::caption("Theme", t)).child(theme)),
         )
+        .children(s.lock.map(|on| {
+            ui::card(t)
+                .gap(16.0)
+                .child(ui::header(
+                    "Privacy",
+                    "The app switcher never shows your portfolio. Shake to hide the amounts, \
+                     and again to show them.",
+                    t,
+                ))
+                .child(
+                    Checkbox::new(on)
+                        .label(format!("Lock with {}", s.lock_name))
+                        .description("Stahl asks each time you open it or come back to it.")
+                        .on_toggle(|s: &mut State| s.toggle_lock())
+                        .build(k)
+                        .key("settings-lock"),
+                )
+        }))
         .child(
             ui::card(t)
                 .gap(16.0)

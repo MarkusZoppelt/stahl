@@ -116,9 +116,16 @@ script's `pick <path>` answers the picker. Config and single-file history live i
 The shell also: moves what the app copies to the system pasteboard (Rune has no iOS clipboard),
 saves unsaved edits when the app leaves the screen, refreshes stale prices when it returns, plays
 haptics for what `stahl_ios_tick` reports, covers the app with the vault door in the app switcher,
-and hides the amounts on a shake. Paths shown on iOS go through `format::place`. The app icon is
-rendered with the others by `site/render-icons.sh` into `ios/Shell/Assets.xcassets`. To find where
-to tap, `--tree` a scene at the simulator's view size (`--size 402x778` on an iPhone 18 Pro).
+and hides the amounts on a shake. With the lock on (`ios/Shell/Lock.swift`), the vault stays shut
+until Face ID opens it. A pull past a page's top refreshes (`State::pull`), a holding's row slides
+open on a phone (`State::settle_swipes`), and a swipe from the left edge goes back
+(`State::go_back`). Paths shown on iOS go through `format::place`. The app icon is
+rendered with the others, with its dark and tinted versions, by `site/render-icons.sh` into
+`ios/Shell/Assets.xcassets`; restore the other icons after, since a render differs by a few
+pixels. A simulator fakes
+Face ID: `notifyutil -s com.apple.BiometricKit.enrollmentChanged 1`, then `-p` it, and
+`notifyutil -p com.apple.BiometricKit_Sim.pearl.match` (both through `simctl spawn`). To find
+where to tap, `--tree` a scene at the simulator's view size (`--size 402x778` on an iPhone 18 Pro).
 
 ## Landing page
 

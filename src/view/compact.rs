@@ -3,7 +3,7 @@
 
 use std::f32::consts::FRAC_PI_2;
 
-use rune::{Cx, El, Icon, Spring, col, el, icon, row, text};
+use rune::{Cx, El, Icon, LoopSpec, Spring, col, el, icon, row, text};
 use rune_kit::{IconButtonVariant, Spinner};
 
 use crate::{
@@ -13,8 +13,7 @@ use crate::{
     view::{freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui},
 };
 
-/// The pages with a tab of their own. Everything else is under More.
-const TABS: [Page; 3] = [Page::Overview, Page::Holdings, Page::Performance];
+const TABS: [Page; 3] = Page::TABS;
 
 /// Side margin of a page on a phone.
 const MARGIN: f32 = 16.0;
@@ -64,9 +63,29 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .grow(1.0)
                 .min_h(0.0)
                 .child(ui::wash(t, 0.0))
+                .child(pull_door(s))
                 .child(content),
         )
         .children((!s.keyboard).then(|| tab_bar(s, t)))
+}
+
+/// The door behind the top of a page pulled past its top: it grows into view with the pull, and
+/// spins while the prices it asked for come in.
+fn pull_door(s: &State) -> El {
+    let door = ui::door(28.0);
+    let door = if s.pull_refreshing && s.loading {
+        door.looping(LoopSpec::rotation(1.2))
+    } else {
+        door.live_opacity(&s.pull.shown).live_scale(&s.pull.scale)
+    };
+    row()
+        .key("pull-door")
+        .absolute(0.0, 14.0)
+        .w_full()
+        .h(28.0)
+        .center()
+        .a11y_hidden()
+        .child(door)
 }
 
 /// The mark, how fresh the prices are, and the two things worth a tap from anywhere.
