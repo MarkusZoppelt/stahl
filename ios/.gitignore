@@ -1,1 +1,9 @@
 rust/target/
+Stahl.xcodeproj/
+xcuserdata/
+*.xcworkspace/
+*.mobileprovision
+*.provisionprofile
+*.p12
+*.cer
+*.p8

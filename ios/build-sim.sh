@@ -31,6 +31,7 @@ out="$target_dir/$target/$profile/Stahl.app"
 rm -rf "$out"
 mkdir -p "$out"
 cp "$here/Shell/Info.plist" "$out/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier net.zoppelt.stahl" "$out/Info.plist"
 # The door the app switcher's cover shows: the same as the app's mark.
 cp "$here/../assets/door.png" "$out/door.png"
 # The icon and the launch screen's colour, compiled as Xcode would, with the icon's keys merged in.

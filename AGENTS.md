@@ -98,6 +98,13 @@ link, touch, keyboard, trackpad). It is its own Cargo workspace with its own loc
 nix develop .#ios -c ios/build-sim.sh --run [--device "iPad Air 11-inch (M4)"]
 ```
 
+To install on a connected iPhone or iPad, run this outside the dev shell, with Xcode signed in to
+the team and the device unlocked and in Developer Mode. Xcode is only used to sign:
+
+```sh
+ios/install-device.sh <device name or UDID> <team id> [bundle id]
+```
+
 The phone layout (`src/view/compact.rs`) is on when `State::compact` is, which the shell sets from
 UIKit's horizontal size class; an iPad otherwise gets the desktop layout. Pages size themselves
 with `ui::room` and `ui::columns`, never by platform. Each phone screen has a `phone-*` scene:
