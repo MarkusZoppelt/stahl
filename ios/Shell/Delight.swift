@@ -1,5 +1,5 @@
 // The parts of Stahl that only an iPhone or iPad has: haptics, and the vault that closes over the
-// app in the app switcher.
+// app in the app switcher and, with the lock on, until Face ID opens it.
 
 import UIKit
 
@@ -8,6 +8,10 @@ enum Haptics {
     private static let selection = UISelectionFeedbackGenerator()
     private static let notice = UINotificationFeedbackGenerator()
     private static let knock = UIImpactFeedbackGenerator(style: .rigid)
+    private static let tick = UIImpactFeedbackGenerator(style: .light)
+
+    /// The vault's door, turning.
+    static func turn() { knock.impactOccurred(intensity: 0.9) }
 
     static func play(_ flags: UInt32) {
         if flags & UInt32(STAHL_TICK_HAPTIC_TURN) != 0 {
@@ -18,15 +22,20 @@ enum Haptics {
             notice.notificationOccurred(.success)
         } else if flags & UInt32(STAHL_TICK_HAPTIC_SELECT) != 0 {
             selection.selectionChanged()
+        } else if flags & UInt32(STAHL_TICK_HAPTIC_TICK) != 0 {
+            tick.impactOccurred(intensity: 0.5)
         }
     }
 }
 
 /// The steel wall and its door, over the app while it isn't active, so the app switcher's
 /// snapshot shows no balances. Coming back, the door turns a quarter and the wall fades: the
-/// vault opening.
+/// vault opening. Locked, it stays until Face ID opens it, and a tap on it asks again.
 final class VaultCover: UIView {
     private let door = UIImageView(image: UIImage(named: "door"))
+    private let hint = UILabel()
+    /// A tap on the closed vault: ask Face ID again.
+    var onTap: (() -> Void)?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -39,6 +48,24 @@ final class VaultCover: UIView {
             door.widthAnchor.constraint(equalToConstant: 128),
             door.heightAnchor.constraint(equalToConstant: 128),
         ])
+        hint.text = "Tap to open the vault"
+        hint.font = .systemFont(ofSize: 15, weight: .medium)
+        hint.textColor = UIColor(white: 0.62, alpha: 1)
+        hint.alpha = 0
+        hint.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(hint)
+        NSLayoutConstraint.activate([
+            hint.centerXAnchor.constraint(equalTo: centerXAnchor),
+            hint.topAnchor.constraint(equalTo: door.bottomAnchor, constant: 28),
+        ])
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tapped)))
+    }
+
+    @objc private func tapped() { onTap?() }
+
+    /// Face ID didn't open it: say how to try again.
+    func showHint() {
+        UIView.animate(withDuration: 0.3) { self.hint.alpha = 1 }
     }
 
     required init?(coder: NSCoder) { fatalError("not from a storyboard") }
@@ -46,6 +73,7 @@ final class VaultCover: UIView {
     func close() {
         layer.removeAllAnimations()
         door.transform = .identity
+        hint.alpha = 0
         alpha = 1
         isHidden = false
         superview?.bringSubviewToFront(self)

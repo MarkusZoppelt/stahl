@@ -62,6 +62,12 @@ wall.alpha_composite(at(inset), ((size - inset) // 2, (size - inset) // 2))
 ios = root / "ios/Shell/Assets.xcassets/AppIcon.appiconset"
 ios.mkdir(parents=True, exist_ok=True)
 wall.convert("RGB").save(ios / "icon.png", optimize=True)
+# Its dark appearance: the door alone, which iOS sets on its own dark tile. Tinted: the same in
+# grey, which iOS colours with the Home Screen's tint.
+alone = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+alone.alpha_composite(at(inset), ((size - inset) // 2, (size - inset) // 2))
+alone.save(ios / "icon-dark.png", optimize=True)
+alone.convert("LA").save(ios / "icon-tinted.png", optimize=True)
 
 # The app draws the door at up to 168 points, so 2x that with room to spare, mipmapped by Rune.
 at(512).save(root / "assets/door.png", optimize=True)

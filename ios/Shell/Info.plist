@@ -22,6 +22,11 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- ProMotion: without this an iPhone holds an app to 60 Hz. -->
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Stahl opens the vault with Face ID, if you ask it to in Settings.</string>
 	<!-- Stahl's own folder shows in Files and in Finder's iPhone pane, and its files open in place. -->
 	<key>UIFileSharingEnabled</key>
 	<true/>

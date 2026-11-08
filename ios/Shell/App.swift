@@ -32,10 +32,11 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 
     // The app switcher shows a snapshot taken as the app resigns: a portfolio's balances shouldn't
     // be in it, so the vault closes first.
-    func sceneWillResignActive(_ scene: UIScene) { controller?.closeVault() }
-    func sceneDidBecomeActive(_ scene: UIScene) { controller?.openVault() }
+    func sceneWillResignActive(_ scene: UIScene) { controller?.resigning() }
+    func sceneDidBecomeActive(_ scene: UIScene) { controller?.returning() }
 
     func sceneDidEnterBackground(_ scene: UIScene) {
+        controller?.leaving()
         controller?.rune.enteredBackground()
         controller?.rune.paused = true
     }
@@ -53,6 +54,10 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 final class RuneViewController: UIViewController {
     let rune = RuneView()
     private let vault = VaultCover()
+    /// The lock is on and the vault hasn't been opened since the app was last away.
+    private var locked = false
+    /// Face ID is asking: its prompt makes the app resign and return, which mustn't ask again.
+    private var asking = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -76,7 +81,13 @@ final class RuneViewController: UIViewController {
         vault.frame = view.bounds
         vault.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         vault.isHidden = true
+        vault.onTap = { [weak self] in self?.unlock() }
         view.addSubview(vault)
+        // With the lock on, the vault is shut from the first frame.
+        if Lock.active {
+            locked = true
+            vault.close()
+        }
         NotificationCenter.default.addObserver(
             self, selector: #selector(keyboardMoved),
             name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
@@ -100,7 +111,46 @@ final class RuneViewController: UIViewController {
     }
 
     func closeVault() { vault.close() }
+
+    func showVaultHint() {
+        vault.close()
+        vault.showHint()
+    }
     func openVault() { vault.open() }
+
+    func resigning() {
+        if !asking { vault.close() }
+    }
+
+    func leaving() {
+        if Lock.active { locked = true }
+    }
+
+    func returning() {
+        guard !asking else { return }
+        if locked { unlock() } else { vault.open() }
+    }
+
+    /// Face ID, and the vault turning open when it says yes.
+    func unlock() {
+        guard locked, !asking else { return }
+        guard Lock.active else {
+            locked = false
+            return vault.open()
+        }
+        asking = true
+        Lock.ask { [weak self] opened in
+            guard let self else { return }
+            self.asking = false
+            if opened {
+                self.locked = false
+                Haptics.turn()
+                self.vault.open()
+            } else {
+                self.vault.showHint()
+            }
+        }
+    }
 
     // Shaking the phone hides the amounts, or shows them again.
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
@@ -114,6 +164,7 @@ final class RuneViewController: UIViewController {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         becomeFirstResponder()
+        unlock()
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -170,7 +221,8 @@ final class RuneView: UIView, UIKeyInput {
                 Unmanaged.passUnretained(layer).toOpaque(), path,
                 Float(bounds.width), Float(bounds.height), Float(scale), dark)
         }
-        guard host != nil else { return }
+        guard let host else { return }
+        Lock.name.withCString { stahl_ios_set_lock(host, Lock.available, Lock.enabled, $0) }
         updateCompact()
         registerForTraitChanges([UITraitHorizontalSizeClass.self]) { (view: RuneView, _) in
             view.updateCompact()
@@ -178,6 +230,10 @@ final class RuneView: UIView, UIKeyInput {
         // A trackpad or mouse on an iPad: hover, and two-finger scrolling. The pan takes scroll
         // events alone, never fingers, which arrive as touches.
         addGestureRecognizer(UIHoverGestureRecognizer(target: self, action: #selector(hover)))
+        // A swipe in from the left edge goes back, as everywhere on an iPhone.
+        let back = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(edgeBack))
+        back.edges = .left
+        addGestureRecognizer(back)
         let scroll = UIPanGestureRecognizer(target: self, action: #selector(scroll))
         scroll.allowedScrollTypesMask = .all
         scroll.allowedTouchTypes = []
@@ -203,7 +259,7 @@ final class RuneView: UIView, UIKeyInput {
 
     /// Plays input for checking the app in a simulator, which `simctl` can't tap: `wait 1;
     /// tap 30 200; drag 200 600 200 200; type Apple; delete; key cmd k; key escape;
-    /// hover 300 400; scroll 300 400 -200; pick /path; shake; vault; unvault`, in view points.
+    /// hover 300 400; scroll 300 400 -200; pick /path; shake; vault; unvault; hint; back`, in view points.
     private func play(_ script: String) {
         var at = 1.0
         var id: UInt64 = 1_000
@@ -279,8 +335,17 @@ final class RuneView: UIView, UIKeyInput {
                 let phase: UInt32 = verb == "down" ? 0 : (verb == "move" ? 1 : 2)
                 later(at) { stahl_ios_touch($0, 7, phase, x, y, CACurrentMediaTime()) }
                 at += 0.3
+            case "back":
+                later(at) { _ = stahl_ios_back($0) }
+                at += 0.6
             case "shake":
                 later(at) { stahl_ios_shake($0) }
+                at += 0.6
+            case "hint":
+                // The vault as Face ID leaves it when it doesn't open: shut, with a way to retry.
+                later(at) { [weak self] _ in
+                    (self?.window?.rootViewController as? RuneViewController)?.showVaultHint()
+                }
                 at += 0.6
             case "vault", "unvault":
                 // The app switcher's cover, closed or opening, as resigning and returning do.
@@ -383,6 +448,9 @@ final class RuneView: UIView, UIKeyInput {
             stahl_ios_free_string(copied)
         }
         Haptics.play(flags)
+        if flags & UInt32(STAHL_TICK_LOCK_CHANGED) != 0 {
+            Lock.enabled = stahl_ios_lock_enabled(host)
+        }
         updateTraits(
             secure: flags & UInt32(STAHL_TICK_SECURE) != 0,
             number: flags & UInt32(STAHL_TICK_NUMBER) != 0)
@@ -417,6 +485,11 @@ final class RuneView: UIView, UIKeyInput {
     }
 
     // MARK: Trackpad, mouse and hardware keyboard
+
+    @objc private func edgeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {
+        guard gesture.state == .ended, gesture.translation(in: self).x > 60, let host else { return }
+        _ = stahl_ios_back(host)
+    }
 
     @objc private func hover(_ gesture: UIHoverGestureRecognizer) {
         guard let host else { return }

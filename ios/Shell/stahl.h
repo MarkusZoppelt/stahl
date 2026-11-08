@@ -21,6 +21,9 @@ enum {
     STAHL_TICK_HAPTIC_SUCCESS = 256,
     STAHL_TICK_HAPTIC_WARNING = 512,
     STAHL_TICK_HAPTIC_TURN = 1024,
+    STAHL_TICK_HAPTIC_TICK = 2048,
+    // The lock setting changed: stahl_ios_lock_enabled says what to remember.
+    STAHL_TICK_LOCK_CHANGED = 4096,
 };
 
 StahlHost *stahl_ios_new(void *metal_layer, const char *documents, float width, float height,
@@ -60,3 +63,8 @@ void stahl_ios_shake(StahlHost *host);
 void stahl_ios_set_reduced_motion(StahlHost *host, bool reduced);
 // A software keyboard covers the bottom of the app, or no longer does.
 void stahl_ios_set_keyboard(StahlHost *host, bool up);
+// The back gesture, a swipe in from the left edge. Returns whether it went back.
+bool stahl_ios_back(StahlHost *host);
+// Whether the device can lock the app, and whether to: name is "Face ID", "Touch ID" or "Passcode".
+void stahl_ios_set_lock(StahlHost *host, bool available, bool enabled, const char *name);
+bool stahl_ios_lock_enabled(StahlHost *host);

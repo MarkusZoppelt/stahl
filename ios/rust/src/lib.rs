@@ -5,6 +5,7 @@
 use std::{
     env,
     ffi::{CStr, CString, c_char, c_void},
+    mem,
     path::{Path, PathBuf},
     ptr,
     sync::{
@@ -53,6 +54,10 @@ pub const TICK_HAPTIC_SUCCESS: u32 = 256;
 pub const TICK_HAPTIC_WARNING: u32 = 512;
 /// The vault's door turned. A heavy, rigid knock.
 pub const TICK_HAPTIC_TURN: u32 = 1024;
+/// A finger crossed a chart's day, a donut's slice, or the point where a pull refreshes. A light tick.
+pub const TICK_HAPTIC_TICK: u32 = 2048;
+/// The lock setting changed: `stahl_ios_lock_enabled` says what to remember.
+pub const TICK_LOCK_CHANGED: u32 = 4096;
 
 pub struct Host {
     host: LayerHost<State>,
@@ -63,6 +68,8 @@ pub struct Host {
     clipboard: MemoryClipboard,
     copied: Option<String>,
     seen: Seen,
+    /// Haptics an input asked for, played on the next tick.
+    pending: u32,
     /// Last, so the runtime is dropped after the state whose work runs on it.
     _tokio: Runtime,
 }
@@ -74,6 +81,9 @@ struct Seen {
     toast: Option<Instant>,
     error: Option<String>,
     door_turns: u32,
+    point: (Option<usize>, Option<usize>),
+    pull_past: bool,
+    lock: Option<bool>,
 }
 
 impl Seen {
@@ -83,6 +93,9 @@ impl Seen {
             toast: state.toast.as_ref().map(|(_, at)| *at),
             error: state.error.clone(),
             door_turns: state.door_turns,
+            point: (state.chart_point, state.donut_hover),
+            pull_past: state.pull.past(),
+            lock: state.lock,
         }
     }
 
@@ -100,6 +113,17 @@ impl Seen {
         }
         if now.door_turns != self.door_turns {
             flags |= TICK_HAPTIC_TURN;
+        }
+        let pointed =
+            |point: Option<usize>, before: Option<usize>| point.is_some() && point != before;
+        if pointed(now.point.0, self.point.0)
+            || pointed(now.point.1, self.point.1)
+            || (now.pull_past && !self.pull_past)
+        {
+            flags |= TICK_HAPTIC_TICK;
+        }
+        if self.place.0.is_some() && now.lock != self.lock {
+            flags |= TICK_LOCK_CHANGED;
         }
         flags
     }
@@ -228,6 +252,7 @@ pub unsafe extern "C" fn stahl_ios_new(
                 clipboard,
                 copied: None,
                 seen: Seen::default(),
+                pending: 0,
                 _tokio: tokio,
             }))
         }
@@ -278,8 +303,14 @@ pub unsafe extern "C" fn stahl_ios_tick(host_ptr: *mut Host) -> u32 {
         }
     }
     let seen = Seen::of(&rt.state);
-    flags |= h.seen.haptics(&seen);
+    flags |= h.seen.haptics(&seen) | mem::take(&mut h.pending);
     h.seen = seen;
+    // The pull's door spins until the prices it asked for are in.
+    if h.host.runtime().state.pull_refreshing && !h.host.runtime().state.loading {
+        h.host
+            .runtime_mut()
+            .update(|state, _| state.pull_refreshing = false);
+    }
     let copied = h.clipboard.text().map(|text| text.to_string());
     if copied.is_some() && copied != h.copied {
         flags |= TICK_COPIED;
@@ -483,7 +514,63 @@ pub unsafe extern "C" fn stahl_ios_touch(
         TouchPhase::Started | TouchPhase::Moved => rt.pointer_move(x, y),
         TouchPhase::Ended | TouchPhase::Cancelled => rt.pointer_leave(),
     }
+    // Letting go: a page pulled far enough refreshes, and slid rows come to rest.
+    if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+        let mut refreshing = false;
+        rt.update(|state, tx| {
+            refreshing = state.pull_released();
+            state.settle_swipes(tx);
+        });
+        if refreshing {
+            h.pending |= TICK_HAPTIC_TURN;
+        }
+    }
     h.dirty.store(true, Ordering::Release);
+}
+
+/// The system's back gesture: a swipe in from the left edge. Returns whether it went back.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_back(host_ptr: *mut Host) -> bool {
+    let h = host(host_ptr);
+    let went = h.host.runtime_mut().update_if(|state, _| state.go_back());
+    h.dirty.store(true, Ordering::Release);
+    went
+}
+
+/// Whether this device can lock the app, what it calls its lock, and whether the person asked
+/// for it.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`], and `name` be NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_set_lock(
+    host_ptr: *mut Host,
+    available: bool,
+    enabled: bool,
+    name: *const c_char,
+) {
+    let name = unsafe { CStr::from_ptr(name) }
+        .to_string_lossy()
+        .into_owned();
+    let h = host(host_ptr);
+    h.host.runtime_mut().update(|state, _| {
+        state.lock = available.then_some(enabled);
+        state.lock_name = name;
+    });
+    h.seen.lock = h.host.runtime().state.lock;
+    h.dirty.store(true, Ordering::Release);
+}
+
+/// Whether opening the app asks for Face ID, as the person last set it.
+///
+/// # Safety
+/// `host` must come from [`stahl_ios_new`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn stahl_ios_lock_enabled(host_ptr: *mut Host) -> bool {
+    host(host_ptr).host.runtime().state.lock == Some(true)
 }
 
 fn key(h: &mut Host, key: Key) {
