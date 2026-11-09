@@ -154,7 +154,8 @@ final class RuneViewController: UIViewController {
 
     // Shaking the phone hides the amounts, or shows them again.
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        if motion == .motionShake { rune.shaken() } else { super.motionEnded(motion, with: event) }
+        guard motion == .motionShake else { return super.motionEnded(motion, with: event) }
+        if !locked { rune.shaken() }
     }
 
     // First responder whenever no field has focus, so a hardware keyboard's shortcuts reach the
@@ -168,7 +169,7 @@ final class RuneViewController: UIViewController {
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if !rune.handle(presses, typing: false) { super.pressesBegan(presses, with: event) }
+        if locked || !rune.handle(presses, typing: false) { super.pressesBegan(presses, with: event) }
     }
 }
 
@@ -252,9 +253,11 @@ final class RuneView: UIView, UIKeyInput {
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         self.link = link
+        #if DEBUG
         if let script = ProcessInfo.processInfo.environment["STAHL_IOS_SCRIPT"] {
             play(script)
         }
+        #endif
     }
 
     /// Plays input for checking the app in a simulator, which `simctl` can't tap: `wait 1;

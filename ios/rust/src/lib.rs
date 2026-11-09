@@ -75,7 +75,7 @@ pub struct Host {
 }
 
 /// What the haptics follow, as of the last tick.
-#[derive(Clone, PartialEq, Default)]
+#[derive(Default)]
 struct Seen {
     place: (Option<Page>, bool, Option<usize>),
     toast: Option<Instant>,
@@ -470,7 +470,9 @@ pub unsafe extern "C" fn stahl_ios_resize(
 pub unsafe extern "C" fn stahl_ios_set_compact(host_ptr: *mut Host, compact: bool) {
     let h = host(host_ptr);
     if h.host.runtime().state.compact != compact {
-        h.host.runtime_mut().state.compact = compact;
+        h.host
+            .runtime_mut()
+            .update(|state, _| state.compact = compact);
         h.dirty.store(true, Ordering::Release);
     }
 }
@@ -518,7 +520,7 @@ pub unsafe extern "C" fn stahl_ios_touch(
     if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
         let mut refreshing = false;
         rt.update(|state, tx| {
-            refreshing = state.pull_released();
+            refreshing = phase == TouchPhase::Ended && state.pull_released();
             state.settle_swipes(tx);
         });
         if refreshing {
@@ -560,7 +562,6 @@ pub unsafe extern "C" fn stahl_ios_set_lock(
         state.lock = available.then_some(enabled);
         state.lock_name = name;
     });
-    h.seen.lock = h.host.runtime().state.lock;
     h.dirty.store(true, Ordering::Release);
 }
 

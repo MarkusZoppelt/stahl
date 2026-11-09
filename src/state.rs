@@ -1721,6 +1721,7 @@ impl State {
         self.page = page;
         self.more = false;
         self.chart_hover = None;
+        self.chart_point = None;
         self.donut_hover = None;
         self.palette = None;
         if page != Page::Holdings {

@@ -13,8 +13,6 @@ use crate::{
     view::{freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui},
 };
 
-const TABS: [Page; 3] = Page::TABS;
-
 /// Side margin of a page on a phone.
 const MARGIN: f32 = 16.0;
 
@@ -33,7 +31,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             MARGIN,
         )
     } else {
-        let heading = if TABS.contains(&s.page) {
+        let heading = if Page::TABS.contains(&s.page) {
             page_heading(s, t)
         } else {
             col()
@@ -184,7 +182,7 @@ fn tab(key: &'static str, label: &'static str, glyph: &'static Icon, on: bool, t
 
 fn tab_bar(s: &State, t: &Theme) -> El {
     let on_page = |page: Page| !s.more && s.page == page;
-    let more = s.more || !TABS.contains(&s.page);
+    let more = s.more || !Page::TABS.contains(&s.page);
     row()
         .center_y()
         .key("tab-bar")
@@ -193,7 +191,7 @@ fn tab_bar(s: &State, t: &Theme) -> El {
         .px(8.0)
         .fill(t.kit.c.bg_base)
         .child(ui::rule(t).absolute(0.0, 0.0))
-        .children(TABS.map(|page| {
+        .children(Page::TABS.map(|page| {
             tab(page.key(), page.label(), page_icon(page), on_page(page), t)
                 .on_press(move |s: &mut State| s.navigate(page))
         }))
@@ -333,7 +331,7 @@ mod tests {
             .into_iter()
             .chain(Page::PLAN)
             .chain(Page::INSIGHTS);
-        let mut reachable: Vec<Page> = TABS.into_iter().chain(in_more).collect();
+        let mut reachable: Vec<Page> = Page::TABS.into_iter().chain(in_more).collect();
         reachable.sort_by_key(|page| page.key());
         reachable.dedup();
         assert_eq!(reachable.len(), 11, "{reachable:?}");

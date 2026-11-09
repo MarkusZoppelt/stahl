@@ -161,7 +161,7 @@ fn welcome(s: &State, t: &Theme) -> El {
             .fill(if primary { t.accent } else { k.c.layer_03 })
             .child(icon(glyph, 20.0).color(if primary { k.c.bg_base } else { k.c.text_base }));
         let words = col()
-            .gap(4.0)
+            .gap(if compact { 4.0 } else { 12.0 })
             .min_w(0.0)
             .shrink()
             .child(

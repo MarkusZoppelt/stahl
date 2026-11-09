@@ -42,7 +42,7 @@ xcrun actool "$here/Shell/Assets.xcassets" --compile "$out" --platform iphonesim
 /usr/libexec/PlistBuddy -c "Merge $partial" "$out/Info.plist" >/dev/null
 xcrun -sdk iphonesimulator swiftc \
   -target "arm64-apple-ios$IPHONEOS_DEPLOYMENT_TARGET-simulator" \
-  -module-name Stahl -parse-as-library \
+  -module-name Stahl -parse-as-library -D DEBUG \
   -import-objc-header "$here/Shell/stahl.h" \
   "$here"/Shell/*.swift \
   -L "$target_dir/$target/$profile" -lstahl_ios \

@@ -93,8 +93,7 @@ pub fn place(path: &str) -> String {
     if !cfg!(target_os = "ios") {
         return path.to_string();
     }
-    let home = env::var("HOME").unwrap_or_default();
-    let device = env::var("STAHL_DEVICE").unwrap_or_else(|_| "iPhone".to_string());
+    let (home, device) = ios_places();
     place_on_ios(path, &home, &device)
 }
 
@@ -104,9 +103,16 @@ pub fn place_in(text: &str) -> String {
     if !cfg!(target_os = "ios") {
         return text.to_string();
     }
-    let home = env::var("HOME").unwrap_or_default();
-    let device = env::var("STAHL_DEVICE").unwrap_or_else(|_| "iPhone".to_string());
+    let (home, device) = ios_places();
     place_in_on_ios(text, &home, &device)
+}
+
+/// The app's home folder and what this device is called, which Files' names are built from.
+fn ios_places() -> (String, String) {
+    (
+        env::var("HOME").unwrap_or_default(),
+        env::var("STAHL_DEVICE").unwrap_or_else(|_| "iPhone".to_string()),
+    )
 }
 
 fn place_in_on_ios(text: &str, home: &str, device: &str) -> String {

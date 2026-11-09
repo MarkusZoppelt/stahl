@@ -15,7 +15,7 @@ enum Haptics {
 
     static func play(_ flags: UInt32) {
         if flags & UInt32(STAHL_TICK_HAPTIC_TURN) != 0 {
-            knock.impactOccurred(intensity: 0.9)
+            turn()
         } else if flags & UInt32(STAHL_TICK_HAPTIC_WARNING) != 0 {
             notice.notificationOccurred(.warning)
         } else if flags & UInt32(STAHL_TICK_HAPTIC_SUCCESS) != 0 {
