@@ -113,7 +113,7 @@ jobs:
           ls -l installers
           ls installers/*.dmg installers/*.deb installers/*.zip
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/')
         with:
           name: "Stahl Capital ${{ github.ref_name }}"
