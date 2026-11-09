@@ -10,7 +10,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 portfolio_rs = "0.10.1"
-rune = { git = "https://github.com/anomalyco/rune", rev = "bca47138e9c31a7870a79272ee2523b592b1248d" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "2bdfae16568782a56cb93818944d05b93546bce5" }
 stahl = { path = "../.." }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
