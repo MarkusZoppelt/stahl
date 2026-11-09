@@ -1,0 +1,48 @@
+name: Update Rune
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: update-rune
+  cancel-in-progress: true
+
+jobs:
+  update:
+    name: scripts/update-rune.sh
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # rustup reads the version from rust-toolchain.toml.
+      - name: install the Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: update Rune
+        id: rune
+        run: |
+          {
+            echo 'summary<<EOF'
+            scripts/update-rune.sh
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create pull request
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: deps/rune
+          delete-branch: true
+          commit-message: "chore(deps): update Rune"
+          title: "chore(deps): update Rune"
+          labels: dependencies
+          body: |
+            Automated `scripts/update-rune.sh`. Rune is pre-release, so check CI and render the
+            screens before merging.
+
+            ${{ steps.rune.outputs.summary }}
