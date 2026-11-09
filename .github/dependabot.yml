@@ -8,6 +8,15 @@ updates:
     labels:
       - dependencies
 
+  # The iOS library is its own workspace, with its own lockfile.
+  - package-ecosystem: cargo
+    directory: /ios/rust
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

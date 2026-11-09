@@ -45,6 +45,9 @@ gradients come from `src/theme.rs` and the primitives in `src/view/ui.rs`, never
 The UI is [Rune](https://github.com/anomalyco/rune) and `rune-kit`, pinned to one git revision in
 `Cargo.toml`. Rune is pre-release and moves fast, so read the README at the pinned revision rather
 than trusting memory, and expect an update to move its API. Both crates must stay on the same `rev`.
+Update it with `nix develop -c scripts/update-rune.sh [rev]`, which moves every pin (here and in
+`ios/rust`) to one revision, the tip of Rune's `dev` by default, and refreshes both lockfiles. A
+weekly workflow (`.github/workflows/update-rune.yml`) runs it and opens a PR.
 
 The shape of the app: one `State`, and views that are pure functions of it. Rune re-runs them when
 state changes, so a view must not do work or mutate anything.
@@ -140,7 +143,8 @@ To preview it, serve `site/` on loopback with `python3 -m http.server --bind 127
 release workflow, and the flake (through `rust-overlay`, because Rune needs a
 newer compiler than nixpkgs ships). Do not add a second pin.
 
-Dependabot owns Cargo and GitHub Actions. A weekly workflow updates `flake.lock`.
+Dependabot owns Cargo (the app and `ios/rust`) and GitHub Actions, except Rune's git pin,
+which `scripts/update-rune.sh` moves. A weekly workflow updates `flake.lock`.
 
 ## CI
 

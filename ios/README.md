@@ -9,7 +9,8 @@ desktop one unless it's in a narrow split view.
 |---|---|---|
 | ![Overview](screenshots/overview.png) | ![Holdings](screenshots/holdings.png) | ![Allocation](screenshots/allocation.png) |
 
-`rust/` is its own Cargo workspace with its own lockfile. Keep its Rune `rev` the same as the app's.
+`rust/` is its own Cargo workspace with its own lockfile. Keep its Rune `rev` the same as the app's;
+`scripts/update-rune.sh` moves both together.
 
 ## Simulator
 
