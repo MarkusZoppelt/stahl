@@ -18,6 +18,17 @@ pub const HERO: TextStyle = TextStyle::new(60.0, 340.0)
     .lh(66.0)
     .tracking(-1.2)
     .features("'tnum' 1");
+/// [`HERO`] on a phone, where a seven-figure total has to fit the width.
+pub const HERO_COMPACT: TextStyle = TextStyle::new(46.0, 340.0)
+    .family(SERIF)
+    .lh(52.0)
+    .tracking(-0.9)
+    .features("'tnum' 1");
+/// [`STATEMENT`] on a phone.
+pub const STATEMENT_COMPACT: TextStyle = TextStyle::new(32.0, 340.0)
+    .family(SERIF)
+    .lh(38.0)
+    .tracking(-0.5);
 /// A page's name, at the top of it.
 pub const PAGE_TITLE: TextStyle = TextStyle::new(32.0, 340.0)
     .family(SERIF)

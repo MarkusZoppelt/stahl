@@ -118,14 +118,33 @@
           drv = stahl;
         };
 
-        devShells.default = craneLib.devShell {
-          inputsFrom = [stahl];
-          packages = with pkgs; [
-            cargo-watch
-            alejandra
-          ];
-          LD_LIBRARY_PATH = pkgs.lib.optionalString isLinux (pkgs.lib.makeLibraryPath linuxRuntimeLibs);
-        };
+        devShells =
+          {
+            default = craneLib.devShell {
+              inputsFrom = [stahl];
+              packages = with pkgs; [
+                cargo-watch
+                alejandra
+              ];
+              LD_LIBRARY_PATH = pkgs.lib.optionalString isLinux (pkgs.lib.makeLibraryPath linuxRuntimeLibs);
+            };
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.isDarwin {
+            # The iOS app (ios/build-sim.sh): the pinned toolchain with the iOS targets. Nix's
+            # clang only knows macOS, so iOS code compiles and links with Xcode's.
+            ios = pkgs.mkShellNoCC {
+              packages = [
+                (rustToolchain.override {
+                  targets = ["aarch64-apple-ios" "aarch64-apple-ios-sim"];
+                })
+                pkgs.cmake
+              ];
+              CC_aarch64_apple_ios = "/usr/bin/clang";
+              CC_aarch64_apple_ios_sim = "/usr/bin/clang";
+              CARGO_TARGET_AARCH64_APPLE_IOS_LINKER = "/usr/bin/clang";
+              CARGO_TARGET_AARCH64_APPLE_IOS_SIM_LINKER = "/usr/bin/clang";
+            };
+          };
 
         checks = {
           inherit stahl;

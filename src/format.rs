@@ -1,5 +1,7 @@
 //! Number formatting, matching what `Intl.NumberFormat("en-US")` produced in
-//! the previous web UI so figures read the same.
+//! the previous web UI so figures read the same, and places as people name them.
+
+use std::env;
 
 /// The symbol en-US uses for a currency, falling back to its code.
 fn currency_symbol(code: &str) -> String {
@@ -84,9 +86,100 @@ pub fn optional_percent(value: Option<f64>) -> String {
     value.map_or_else(|| "-".to_string(), percent)
 }
 
+/// Where a file or folder is, as the person looking for it would say. On iOS an app's container
+/// path means nothing to anyone: Files calls Stahl's own folder "On My iPhone › Stahl", and
+/// iCloud's "iCloud Drive". Elsewhere a path is already that.
+pub fn place(path: &str) -> String {
+    if !cfg!(target_os = "ios") {
+        return path.to_string();
+    }
+    let (home, device) = ios_places();
+    place_on_ios(path, &home, &device)
+}
+
+/// [`place`] for paths inside a sentence, such as portfolio_rs's health checks: the roots Files
+/// names are renamed wherever they appear, and the rest stays as written.
+pub fn place_in(text: &str) -> String {
+    if !cfg!(target_os = "ios") {
+        return text.to_string();
+    }
+    let (home, device) = ios_places();
+    place_in_on_ios(text, &home, &device)
+}
+
+/// The app's home folder and what this device is called, which Files' names are built from.
+fn ios_places() -> (String, String) {
+    (
+        env::var("HOME").unwrap_or_default(),
+        env::var("STAHL_DEVICE").unwrap_or_else(|_| "iPhone".to_string()),
+    )
+}
+
+fn place_in_on_ios(text: &str, home: &str, device: &str) -> String {
+    const ICLOUD: &str = "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs";
+    let text = text.replace(ICLOUD, "iCloud Drive");
+    if home.is_empty() {
+        return text;
+    }
+    text.replace(
+        &format!("{home}/Documents"),
+        &format!("On My {device}/Stahl"),
+    )
+}
+
+fn place_on_ios(path: &str, home: &str, device: &str) -> String {
+    const ICLOUD: &str = "/Mobile Documents/com~apple~CloudDocs";
+    let (root, rest) = if let Some(rest) = (!home.is_empty())
+        .then(|| path.strip_prefix(&format!("{home}/Documents")))
+        .flatten()
+    {
+        (format!("On My {device} › Stahl"), rest)
+    } else if let Some((_, rest)) = path.split_once(ICLOUD) {
+        ("iCloud Drive".to_string(), rest)
+    } else {
+        return path.to_string();
+    };
+    rest.split('/')
+        .filter(|part| !part.is_empty())
+        .fold(root, |place, part| format!("{place} › {part}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_place_on_ios_reads_as_files_names_it() {
+        let home = "/var/mobile/Containers/Data/Application/ABC";
+        assert_eq!(
+            place_on_ios(&format!("{home}/Documents/My Portfolio"), home, "iPad"),
+            "On My iPad › Stahl › My Portfolio"
+        );
+        assert_eq!(
+            place_on_ios(&format!("{home}/Documents"), home, "iPhone"),
+            "On My iPhone › Stahl"
+        );
+        assert_eq!(
+            place_on_ios(
+                "/private/var/mobile/Library/Mobile Documents/com~apple~CloudDocs/Finance/Stahl",
+                home,
+                "iPhone"
+            ),
+            "iCloud Drive › Finance › Stahl"
+        );
+        assert_eq!(
+            place_on_ios("/elsewhere/x.json", home, "iPhone"),
+            "/elsewhere/x.json"
+        );
+        assert_eq!(
+            place_in_on_ios(
+                &format!("Policy file is valid: {home}/Documents/Mine/portfolio/policy.toml"),
+                home,
+                "iPhone"
+            ),
+            "Policy file is valid: On My iPhone/Stahl/Mine/portfolio/policy.toml"
+        );
+    }
 
     #[test]
     fn formats_currency_like_intl() {

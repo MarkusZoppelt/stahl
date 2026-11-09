@@ -99,7 +99,8 @@ pub fn review(s: &State, t: &Theme) -> El {
             .center_y()
             .w_full()
             .justify_between()
-            .gap(16.0)
+            .flex_wrap()
+            .gaps(16.0, 8.0)
             .child(
                 row()
                     .center_y()
@@ -346,7 +347,8 @@ pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .center_y()
             .w_full()
             .justify_between()
-            .gap(16.0)
+            .flex_wrap()
+            .gaps(16.0, 8.0)
             .child(ui::stat(
                 format!("Toward “{}”", simulation.policy_name),
                 s.money(simulation.portfolio_value),
@@ -370,7 +372,7 @@ pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ),
     )
     .child(
-        ui::columns(ui::is_wide(cx), 2, 1, 16.0).children(
+        ui::columns(ui::room(s, cx), [2, 1, 1], 16.0).children(
             simulation
                 .scenarios
                 .iter()
@@ -411,9 +413,16 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     })),
             )
     });
+    let wide = ui::is_wide(s, cx);
+    // Side by side, the editor takes two thirds; stacked, each takes the width.
+    let share = |card: El, grow: f32| {
+        if wide {
+            card.grow(grow).w(0.0)
+        } else {
+            card.w_full()
+        }
+    };
     let editor = ui::card(t)
-        .grow(2.0)
-        .w(0.0)
         .child(
             col()
                 .key("policy-frame")
@@ -440,7 +449,8 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .child(
             row()
                 .center_y()
-                .gap(8.0)
+                .flex_wrap()
+                .gaps(8.0, 8.0)
                 .child(
                     Button::new("Validate")
                         .disabled(page.loading)
@@ -484,8 +494,6 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .map(|limit| format!("No asset class above {limit}%")),
         ];
         ui::card(t)
-            .grow(1.0)
-            .w(0.0)
             .child(ui::header(
                 policy.name.clone(),
                 format!(
@@ -522,11 +530,7 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .map(|limit| ui::caption(limit, t)),
             )
     });
-    let body = if ui::is_wide(cx) {
-        row().center_y()
-    } else {
-        col()
-    };
+    let body = if wide { row().center_y() } else { col() };
     col()
         .w_full()
         .gap(16.0)
@@ -545,8 +549,8 @@ pub fn policy(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             body.w_full()
                 .gap(16.0)
                 .items_start()
-                .child(editor)
-                .children(summary),
+                .child(share(editor, 2.0))
+                .children(summary.map(|summary| share(summary, 1.0))),
         )
 }
 
@@ -629,7 +633,7 @@ pub fn documents(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         .justify_between()
                         .gap(12.0)
                         .child(
-                            ui::caption(document.file_path.clone(), t)
+                            ui::caption(format::place(&document.file_path), t)
                                 .truncate_middle()
                                 .shrink()
                                 .key("document-file")
@@ -656,7 +660,7 @@ pub fn documents(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(16.0)
         .child(
-            ui::columns(ui::is_wide(cx), 2, 1, 16.0)
+            ui::columns(ui::room(s, cx), [2, 1, 1], 16.0)
                 .child(weekly)
                 .child(decision),
         )

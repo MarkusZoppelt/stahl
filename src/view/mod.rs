@@ -3,8 +3,8 @@
 use std::{env, mem};
 
 use rune::{
-    Align, Cx, El, Icon, Key, KeyEvent, ScrollSpec, Transition, Tx, col, el, icon, row, text,
-    tok::motion::LEAD,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
+    text, tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
@@ -14,10 +14,11 @@ use rune_kit::{
 use crate::{
     icons,
     state::{Page, State, file_name},
-    theme::{PAGE_TITLE, STATEMENT, Theme, WORDMARK},
+    theme::{PAGE_TITLE, STATEMENT, STATEMENT_COMPACT, Theme, WORDMARK},
 };
 
 mod charts;
+mod compact;
 pub mod guide;
 mod insights;
 mod overlays;
@@ -138,66 +139,77 @@ fn splash(t: &Theme) -> El {
 
 /// Rune's windowing library reports no file drags on Wayland, so don't offer them there.
 fn drops_work() -> bool {
-    !cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none()
+    // Nor does the iOS shell pass drops on yet.
+    !cfg!(target_os = "ios")
+        && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
 }
 
 fn welcome(s: &State, t: &Theme) -> El {
     let k = &t.kit;
+    let compact = s.compact;
     let choice = |key: &'static str,
                   glyph: &'static Icon,
                   primary: bool,
                   title: &str,
                   detail: &str,
                   index: usize| {
-        ui::entering(
-            ui::card(t)
-                .key(key)
-                .role("button")
-                .focusable(true)
-                .grow(1.0)
-                .hover(k.c.hover)
-                .press_scale(0.98)
-                .child(
-                    col()
-                        .size(40.0, 40.0)
-                        .radius(8.0)
-                        .continuous_corners()
-                        .center()
-                        .fill(if primary { t.accent } else { k.c.layer_03 })
-                        .child(icon(glyph, 20.0).color(if primary {
-                            k.c.bg_base
-                        } else {
-                            k.c.text_base
-                        })),
-                )
-                .child(
-                    text(title.to_string())
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_base),
-                )
-                .child(ui::muted(detail, t).wrap()),
-            index,
-        )
+        let mark = col()
+            .size(40.0, 40.0)
+            .radius(8.0)
+            .continuous_corners()
+            .center()
+            .fill(if primary { t.accent } else { k.c.layer_03 })
+            .child(icon(glyph, 20.0).color(if primary { k.c.bg_base } else { k.c.text_base }));
+        let words = col()
+            .gap(if compact { 4.0 } else { 12.0 })
+            .min_w(0.0)
+            .shrink()
+            .child(
+                text(title.to_string())
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_base),
+            )
+            .child(ui::muted(detail, t).wrap());
+        let card = ui::card(t)
+            .key(key)
+            .role("button")
+            .focusable(true)
+            .grow(1.0)
+            .hover(k.c.hover)
+            .press_scale(0.98);
+        // A column of cards on a phone, each a row; side by side on a desktop, each a column.
+        let card = if compact {
+            card.padding(14.0)
+                .child(row().center_y().gap(14.0).child(mark).child(words))
+        } else {
+            card.child(mark).child(words)
+        };
+        ui::entering(card, index)
     };
     col()
         .w_full()
         .h_full()
         .center()
         .gap(10.0)
-        .padding(24.0)
+        .padding(if compact { 16.0 } else { 24.0 })
         .child(ui::wash(t, 0.0))
-        .child(ui::door(168.0).mb(14.0))
+        .child(ui::door(if compact { 112.0 } else { 168.0 }).mb(14.0))
         .child(
             text("Stahl Capital has one client.")
-                .font(STATEMENT)
-                .color(k.c.text_base),
+                .font(if compact { STATEMENT_COMPACT } else { STATEMENT })
+                .color(k.c.text_base)
+                .wrap()
+                .align(Align::Center),
         )
         .child(
             col().w_full().max_w(620.0).items_center().mb(26.0).child(
                 ui::muted(
-                    "Track what you own, see how it has done, and check it against your plan. \
-                     Your portfolio stays in plain files on this computer. Looking up prices \
-                     sends only the ticker symbols.",
+                    format!(
+                        "Track what you own, see how it has done, and check it against your \
+                         plan. Your portfolio stays in plain files on this {}. Looking up \
+                         prices sends only the ticker symbols.",
+                        if cfg!(target_os = "ios") { "device" } else { "computer" }
+                    ),
                     t,
                 )
                 .wrap()
@@ -208,9 +220,9 @@ fn welcome(s: &State, t: &Theme) -> El {
             row()
                 .w_full()
                 .max_w(880.0)
-                .gap(16.0)
+                .gap(if compact { 10.0 } else { 16.0 })
                 .items_stretch()
-                .equal_columns(3)
+                .equal_columns(if compact { 1 } else { 3 })
                 .child(
                     choice(
                         "welcome-create",
@@ -589,13 +601,13 @@ fn pane_fits(s: &State, cx: &Cx<State>) -> bool {
     })
 }
 
-fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
-    let _ = &layer;
+/// The current page's content. Without `pane_fits`, a selected holding's details take the
+/// table's place.
+fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
     let selected = s
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
-    let pane_fits = pane_fits(s, cx);
-    let page = match s.page {
+    match s.page {
         Page::Overview => portfolio::overview(s, t, cx),
         Page::Holdings => match selected {
             Some(position) if !pane_fits => portfolio::details_page(s, position, t),
@@ -610,21 +622,42 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         Page::Briefing => insights::briefing(s, t, cx),
         Page::Health => insights::health(s, t),
         Page::Settings => insights::settings(s, t),
-    };
+    }
+}
+
+/// The scrolling page: any error, its heading, what it's for, then `content`. `key` names it, so a
+/// new page replaces the old one with a transition. `margin` is its side margin.
+fn page_column(
+    s: &State,
+    t: &Theme,
+    key: String,
+    heading: El,
+    about: Option<&str>,
+    content: El,
+    margin: f32,
+) -> El {
+    // A scroller per page, so a page opens at its top rather than where the last one was left.
+    // The frame around it keeps one key, which the pages measure their room by.
     let scroller = col()
-        .key("main")
+        .key(format!("{key}-scroll"))
         .w_full()
         .h_full()
         .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
-        })
-        .child(
+        });
+    // On a phone, a pull past the page's top shows the door, and letting go refreshes.
+    let scroller = match s.compact.then(|| s.pull.clone()) {
+        Some(pull) => scroller.on_scroll_offset(move |at: ScrollPos| pull.track(at.offset[1])),
+        None => scroller,
+    };
+    col().key("main").w_full().h_full().min_h(0.0).child(
+        scroller.child(
             col()
-                .key(format!("page-{}", s.page.key()))
+                .key(key)
                 .w_full()
                 .max_w(1240.0)
-                .px(32.0)
+                .px(margin)
                 .pt(20.0)
                 .pb(40.0)
                 .gap(24.0)
@@ -634,14 +667,31 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
                         .combined(Transition::opacity()),
                 )
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
-                .child(page_heading(s, t))
-                .child(
-                    ui::caption(guide::about(s.page), t)
-                        .key("page-about")
-                        .wrap(),
-                )
-                .child(page),
-        );
+                .child(heading)
+                .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
+                .child(content),
+        ),
+    )
+}
+
+fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
+    let _ = &layer;
+    if s.compact {
+        return compact::shell(s, t, cx);
+    }
+    let selected = s
+        .selected
+        .and_then(|id| s.positions.iter().find(|position| position.id == id));
+    let pane_fits = pane_fits(s, cx);
+    let scroller = page_column(
+        s,
+        t,
+        format!("page-{}", s.page.key()),
+        page_heading(s, t),
+        Some(guide::about(s.page)),
+        page_content(s, t, cx, pane_fits),
+        32.0,
+    );
     let main = col()
         .key("main-frame")
         .w_full()

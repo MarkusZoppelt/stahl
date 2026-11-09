@@ -87,6 +87,53 @@ temp directory, so they can't reach the network or replace the running binary. T
 When running the app by hand, use the demo, or isolate it from real data: set `HOME` to a temp
 directory and `PORTFOLIO_RS_QUOTES=offline`. Opening a portfolio records a valuation in its history.
 
+## iOS
+
+`ios/` is the iPhone and iPad app: `ios/rust` is a staticlib that runs the app's own `State` and
+views on a Rune `LayerHost`, and `ios/Shell` is the small UIKit shell around it (window, display
+link, touch, keyboard, trackpad). It is its own Cargo workspace with its own lockfile; keep its Rune
+`rev` the same as the app's. Build and run it with Xcode installed:
+
+```sh
+nix develop .#ios -c ios/build-sim.sh --run [--device "iPad Air 11-inch (M4)"]
+```
+
+To install on a connected iPhone or iPad, run this outside the dev shell, with Xcode signed in to
+the team and the device unlocked and in Developer Mode. Xcode is only used to sign:
+
+```sh
+ios/install-device.sh <device name or UDID> <team id> [bundle id]
+```
+
+The phone layout (`src/view/compact.rs`) is on when `State::compact` is, which the shell sets from
+UIKit's horizontal size class; an iPad otherwise gets the desktop layout. Pages size themselves
+with `ui::room` and `ui::columns`, never by platform. Each phone screen has a `phone-*` scene:
+render those at `--size 390x844`, and the others at an iPad's sizes (`820x1156`, `1180x800`) when a
+page changes. `simctl` can't tap, so the shell plays input from `STAHL_IOS_SCRIPT` (see `play` in
+`ios/Shell/App.swift`): `SIMCTL_CHILD_STAHL_IOS_SCRIPT="wait 2; tap 346 755" xcrun simctl launch …`.
+
+An iOS app can't update itself (`update::SELF_UPDATES`) or take file drops. Rune's file dialogs
+can't show in an embedded view, so with `State::platform_picker` the app asks through
+`State::pick` and the shell answers with UIKit's document picker (`ios/Shell/Documents.swift`),
+keeping security-scoped bookmarks so the last portfolio reopens. The shell opens your real
+portfolio with live prices; `SIMCTL_CHILD_STAHL_IOS_DEMO=1` opens the demo instead, and the
+script's `pick <path>` answers the picker. Config and single-file history live in the app's
+`Library/Application Support` (`XDG_CONFIG_HOME`, `XDG_DATA_HOME`); a workspace keeps its own.
+
+The shell also: moves what the app copies to the system pasteboard (Rune has no iOS clipboard),
+saves unsaved edits when the app leaves the screen, refreshes stale prices when it returns, plays
+haptics for what `stahl_ios_tick` reports, covers the app with the vault door in the app switcher,
+and hides the amounts on a shake. With the lock on (`ios/Shell/Lock.swift`), the vault stays shut
+until Face ID opens it. A pull past a page's top refreshes (`State::pull`), a holding's row slides
+open on a phone (`State::settle_swipes`), and a swipe from the left edge goes back
+(`State::go_back`). Paths shown on iOS go through `format::place`. The app icon is
+rendered with the others, with its dark and tinted versions, by `site/render-icons.sh` into
+`ios/Shell/Assets.xcassets`; restore the other icons after, since a render differs by a few
+pixels. A simulator fakes
+Face ID: `notifyutil -s com.apple.BiometricKit.enrollmentChanged 1`, then `-p` it, and
+`notifyutil -p com.apple.BiometricKit_Sim.pearl.match` (both through `simctl spawn`). To find
+where to tap, `--tree` a scene at the simulator's view size (`--size 402x778` on an iPhone 18 Pro).
+
 ## Landing page
 
 `site/` is the landing page: plain HTML, CSS and JavaScript with no build step, deployed by

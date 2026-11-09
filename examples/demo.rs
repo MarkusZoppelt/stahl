@@ -81,6 +81,11 @@ fn main() {
         s.settle();
         s.updates.dialog = dialog;
     }
+    /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
+    fn phone(s: &mut State, page: Page) {
+        s.compact = true;
+        scene(s, page);
+    }
     fn mac() -> Installation {
         Installation::MacApp {
             bundle: "/Applications/Stahl Capital.app".into(),
@@ -194,6 +199,50 @@ fn main() {
             ("privacy", |s| {
                 scene(s, Page::Overview);
                 s.privacy = true;
+            }),
+            ("phone-overview", |s| phone(s, Page::Overview)),
+            ("phone-holdings", |s| phone(s, Page::Holdings)),
+            ("phone-holding-details", |s| {
+                phone(s, Page::Holdings);
+                s.select_position(0);
+            }),
+            ("phone-allocation", |s| phone(s, Page::Allocation)),
+            ("phone-performance", |s| phone(s, Page::Performance)),
+            ("phone-review", |s| phone(s, Page::Review)),
+            ("phone-rebalance", |s| phone(s, Page::Rebalance)),
+            ("phone-policy", |s| phone(s, Page::Policy)),
+            ("phone-documents", |s| {
+                phone(s, Page::Documents);
+                s.generate_report(true);
+                s.settle();
+            }),
+            ("phone-briefing", |s| phone(s, Page::Briefing)),
+            ("phone-health", |s| phone(s, Page::Health)),
+            ("phone-settings", |s| phone(s, Page::Settings)),
+            ("phone-more", |s| {
+                phone(s, Page::Overview);
+                s.more = true;
+            }),
+            ("phone-add-position", |s| {
+                phone(s, Page::Holdings);
+                s.open_form(None);
+            }),
+            ("phone-palette", |s| {
+                phone(s, Page::Overview);
+                s.open_palette();
+            }),
+            ("phone-guide", |s| {
+                phone(s, Page::Overview);
+                s.toggle_guide();
+            }),
+            ("phone-welcome", |s| {
+                s.compact = true;
+                first_run(s);
+            }),
+            ("phone-light", |s| {
+                phone(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
             }),
             ("light", |s| {
                 scene(s, Page::Overview);

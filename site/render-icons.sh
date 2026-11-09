@@ -55,6 +55,20 @@ for px in (16, 32, 128, 256, 512):
     at(px).save(iconset / f"icon_{px}x{px}.png")
     at(px * 2).save(iconset / f"icon_{px}x{px}@2x.png")
 
+# iOS rounds an icon's corners itself and wants no transparency: the door on the steel wall.
+wall = Image.new("RGBA", (size, size), (10, 15, 19, 255))
+inset = round(size * 0.84)
+wall.alpha_composite(at(inset), ((size - inset) // 2, (size - inset) // 2))
+ios = root / "ios/Shell/Assets.xcassets/AppIcon.appiconset"
+ios.mkdir(parents=True, exist_ok=True)
+wall.convert("RGB").save(ios / "icon.png", optimize=True)
+# Its dark appearance: the door alone, which iOS sets on its own dark tile. Tinted: the same in
+# grey, which iOS colours with the Home Screen's tint.
+alone = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+alone.alpha_composite(at(inset), ((size - inset) // 2, (size - inset) // 2))
+alone.save(ios / "icon-dark.png", optimize=True)
+alone.convert("LA").save(ios / "icon-tinted.png", optimize=True)
+
 # The app draws the door at up to 168 points, so 2x that with room to spare, mipmapped by Rune.
 at(512).save(root / "assets/door.png", optimize=True)
 at(256).save(root / "site/icon.png", optimize=True)

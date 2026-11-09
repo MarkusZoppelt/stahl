@@ -4,12 +4,13 @@ use portfolio_rs::{
     config::ThemeMode, doctor::HealthStatus, mcp::dto::Severity, validate::ValidationSeverity,
 };
 use rune::{Cx, El, TextEdit, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, SegmentedControl, TextInput};
+use rune_kit::{Button, ButtonVariant, Checkbox, SegmentedControl, TextInput};
 
 use crate::{
     format, icons,
     state::State,
     theme::Theme,
+    update,
     view::{ui, updates},
 };
 
@@ -55,7 +56,7 @@ pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ),
         )
         .child(
-            ui::columns(ui::is_wide(cx), 4, 2, 12.0)
+            ui::columns(ui::room(s, cx), [4, 2, 2], 12.0)
                 .child(ui::stat_card(
                     "Total value",
                     s.money(briefing.summary.total_value),
@@ -86,7 +87,7 @@ pub fn briefing(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     {
         page = page.child(ui::entering(
             ui::card(t).child(ui::title("Cash buffer", t)).child(
-                ui::columns(true, 3, 3, 12.0)
+                ui::columns(ui::room(s, cx), [3, 3, 1], 12.0)
                     .child(ui::stat(
                         "Cash",
                         s.money(briefing.summary.cash_value),
@@ -243,14 +244,19 @@ pub fn health(s: &State, t: &Theme) -> El {
         ui::entering(
             ui::card(t)
                 .gap(8.0)
-                .child(ui::header("Workspace", health.dir.clone(), t))
+                .child(ui::header("Workspace", format::place(&health.dir), t))
                 .children(health.checks.iter().map(|check| {
                     let color = match check.status {
                         HealthStatus::Ok => t.up,
                         HealthStatus::Warning => t.warn,
                         HealthStatus::Error => t.down,
                     };
-                    ui::finding(color, check.name.clone(), Some(check.message.clone()), t)
+                    ui::finding(
+                        color,
+                        check.name.clone(),
+                        Some(format::place_in(&check.message)),
+                        t,
+                    )
                 })),
             2,
         )
@@ -289,14 +295,19 @@ fn field(
     t: &Theme,
     access: fn(&mut State) -> &mut TextEdit,
 ) -> El {
-    col().gap(6.0).child(ui::caption(label, t)).child(
-        input
-            .label(label)
-            .width(Some(440.0))
-            .on_edit(access)
-            .build(&t.kit)
-            .key(key),
-    )
+    col()
+        .w_full()
+        .max_w(440.0)
+        .gap(6.0)
+        .child(ui::caption(label, t))
+        .child(
+            input
+                .label(label)
+                .width(None)
+                .on_edit(access)
+                .build(&t.kit)
+                .key(key),
+        )
 }
 
 pub fn settings(s: &State, t: &Theme) -> El {
@@ -346,6 +357,24 @@ pub fn settings(s: &State, t: &Theme) -> El {
                 ))
                 .child(col().gap(6.0).child(ui::caption("Theme", t)).child(theme)),
         )
+        .children(s.lock.map(|on| {
+            ui::card(t)
+                .gap(16.0)
+                .child(ui::header(
+                    "Privacy",
+                    "The app switcher never shows your portfolio. Shake to hide the amounts, \
+                     and again to show them.",
+                    t,
+                ))
+                .child(
+                    Checkbox::new(on)
+                        .label(format!("Lock with {}", s.lock_name))
+                        .description("Stahl asks each time you open it or come back to it.")
+                        .on_toggle(|s: &mut State| s.toggle_lock())
+                        .build(k)
+                        .key("settings-lock"),
+                )
+        }))
         .child(
             ui::card(t)
                 .gap(16.0)
@@ -420,11 +449,15 @@ pub fn settings(s: &State, t: &Theme) -> El {
                         ),
                 ),
         )
-        .child(updates::settings_card(s, t))
+        .children(update::SELF_UPDATES.then(|| updates::settings_card(s, t)))
         .child(
             ui::card(t)
                 .child(ui::title("Data", t))
-                .child(ui::caption(format!("Config file: {config_path}"), t).selectable(true))
+                .child(
+                    ui::caption(format!("Config file: {}", format::place(&config_path)), t)
+                        .wrap()
+                        .selectable(true),
+                )
                 .child(
                     row().center_y().child(
                         Button::new("Forget This Portfolio")

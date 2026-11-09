@@ -5,9 +5,13 @@
 //! here in `poll`.
 
 use std::{
+    collections::HashMap,
     mem,
     path::{Path, PathBuf},
-    sync::mpsc::{Receiver, Sender, channel},
+    sync::{
+        Arc, Mutex,
+        mpsc::{Receiver, Sender, channel},
+    },
     time::{Duration, Instant},
 };
 
@@ -25,7 +29,7 @@ use portfolio_rs::{
     },
     validate::ValidationReport,
 };
-use rune::{ClipboardContent, FileDialogOptions, TextEdit, Tx, Waker};
+use rune::{ClipboardContent, FileDialogOptions, Live, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
@@ -39,6 +43,59 @@ use crate::{
 
 /// How long a chart takes to draw itself in.
 pub const DRAW_IN: f64 = 0.9;
+/// How far (points) a page is pulled past its top before letting go refreshes the prices.
+pub const PULL_TO_REFRESH: f32 = 72.0;
+/// How far a holding's row slides on a phone to show its actions.
+pub const SWIPE_ACTIONS: f32 = 152.0;
+
+/// A page pulled down past its top on a phone, in live values, so the pull moves the door that
+/// shows it without a re-render.
+#[derive(Clone)]
+pub struct Pull {
+    pub distance: Live<f32>,
+    /// 0 to 1 as the pull nears what refreshes.
+    pub shown: Live<f32>,
+    pub scale: Live<f32>,
+}
+
+impl Pull {
+    fn new() -> Pull {
+        Pull {
+            distance: Live::new(0.0),
+            shown: Live::new(0.0),
+            scale: Live::new(0.6),
+        }
+    }
+
+    /// The page's scroll offset, negative while it's pulled past its top.
+    pub fn track(&self, offset: f32) {
+        let distance = (-offset).max(0.0);
+        let near = (distance / PULL_TO_REFRESH).min(1.0);
+        self.distance.set(distance);
+        self.shown.set(near);
+        self.scale.set(0.6 + 0.4 * near);
+    }
+
+    /// Whether letting go now refreshes.
+    pub fn past(&self) -> bool {
+        self.distance.get() >= PULL_TO_REFRESH
+    }
+}
+
+/// How far each holding's row is slid open on a phone, which its scroller reports, and the row a
+/// finger moved last.
+#[derive(Default)]
+pub struct SwipeRows {
+    pub offsets: HashMap<usize, f32>,
+    pub last: Option<usize>,
+}
+
+pub type Swipes = Arc<Mutex<SwipeRows>>;
+
+/// The key of a holding's sliding row on a phone.
+pub fn swipe_key(id: usize) -> String {
+    format!("swipe-{id}")
+}
 /// Refresh prices on returning to the app, if the last refresh is older than this.
 const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
 const TOAST_FOR: Duration = Duration::from_millis(2600);
@@ -67,6 +124,8 @@ impl Page {
     ];
     pub const PLAN: [Page; 4] = [Page::Review, Page::Rebalance, Page::Policy, Page::Documents];
     pub const INSIGHTS: [Page; 2] = [Page::Briefing, Page::Health];
+    /// The pages with a tab of their own on a phone. Everything else is under More.
+    pub const TABS: [Page; 3] = [Page::Overview, Page::Holdings, Page::Performance];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -414,6 +473,25 @@ pub struct Updates {
 
 type Job = Box<dyn FnOnce(&mut State) + Send>;
 
+/// What a picker is for: an existing file, or an existing folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickKind {
+    File,
+    Folder,
+}
+
+/// What to do with a picked path.
+type PickThen = Box<dyn FnOnce(&mut State, String)>;
+
+/// A question for the platform's own picker, where it shows one in place of Rune's dialogs (iOS,
+/// whose embedded views can't show those). The platform answers with [`State::picked`].
+pub struct Pick {
+    pub kind: PickKind,
+    pub title: String,
+    asked: bool,
+    then: PickThen,
+}
+
 pub struct State {
     pub backend: Backend,
     jobs_tx: Sender<Job>,
@@ -452,6 +530,27 @@ pub struct State {
 
     // The window.
     pub page: Page,
+    /// The phone layout: a tab bar instead of the sidebar, one column, the details in place of the
+    /// table. The platform decides (on iOS, UIKit's horizontal size class), not the window's width.
+    pub compact: bool,
+    /// In the phone layout, the More tab's list of pages is showing instead of a page.
+    pub more: bool,
+    /// Quarter turns of the door in the phone's top bar. Four seal the vault.
+    pub door_turns: u32,
+    /// A page pulled past its top on a phone, and whether letting go started the refresh running.
+    pub pull: Pull,
+    pub pull_refreshing: bool,
+    /// Holdings' rows slid open on a phone to show their actions.
+    pub swipes: Swipes,
+    /// Whether opening the app asks for Face ID first: `None` where there's no such lock.
+    pub lock: Option<bool>,
+    /// What the platform calls its lock: "Face ID", "Touch ID" or "Passcode".
+    pub lock_name: String,
+    /// A software keyboard covers the bottom of the screen: the phone layout hides its tab bar.
+    pub keyboard: bool,
+    /// The platform shows its own picker for files and folders: see [`Pick`].
+    pub platform_picker: bool,
+    pub pick: Option<Pick>,
     pub privacy: bool,
     pub sidebar: PaneState,
     pub inspector: PaneState,
@@ -481,6 +580,8 @@ pub struct State {
     /// The newest request. Answers to older ones are for a period nobody is looking at.
     history_request: u64,
     pub chart_hover: Option<f32>,
+    /// The chart's point nearest the pointer or finger, for a tick as it passes each one.
+    pub chart_point: Option<usize>,
     pub donut_hover: Option<usize>,
 
     // Pages.
@@ -649,6 +750,17 @@ impl State {
             price_updates: 0,
             refreshed: None,
             page: Page::Overview,
+            compact: false,
+            more: false,
+            door_turns: 0,
+            pull: Pull::new(),
+            pull_refreshing: false,
+            swipes: Swipes::default(),
+            lock: None,
+            lock_name: String::new(),
+            keyboard: false,
+            platform_picker: false,
+            pick: None,
             privacy: false,
             sidebar: PaneState::new(224.0).range(170.0, 340.0),
             inspector: PaneState::new(320.0).range(260.0, 460.0).collapsed(),
@@ -672,6 +784,7 @@ impl State {
             history_error: None,
             history_request: 0,
             chart_hover: None,
+            chart_point: None,
             donut_hover: None,
             search: TextEdit::new(""),
             sort: SortBy::Value,
@@ -829,6 +942,108 @@ impl State {
     pub fn show_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
         self.toast_armed = true;
+    }
+
+    /// A tap on the door in the phone's top bar turns it a quarter. A full turn seals the vault.
+    pub fn turn_door(&mut self) {
+        self.door_turns += 1;
+        if self.door_turns.is_multiple_of(4) {
+            self.show_toast("Vault sealed. One client, safe inside.");
+        }
+    }
+
+    /// Shaking the phone hides the amounts, or shows them again, from anywhere.
+    pub fn shaken(&mut self) {
+        self.privacy = !self.privacy;
+        self.show_toast(if self.privacy {
+            "Amounts hidden"
+        } else {
+            "Amounts shown"
+        });
+    }
+
+    /// A finger let go of a page: pulled far enough past its top, the prices refresh. Returns
+    /// whether they do.
+    pub fn pull_released(&mut self) -> bool {
+        if !self.pull.past() || self.loading || !self.has_portfolio() {
+            return false;
+        }
+        self.refresh_prices();
+        self.pull_refreshing = self.loading;
+        self.pull_refreshing
+    }
+
+    /// Settle the rows a finger slid: the one it moved last opens if it's more than half open,
+    /// and every other row shuts, so one row's actions show at a time.
+    pub fn settle_swipes(&mut self, tx: &mut Tx) {
+        let Ok(rows) = self.swipes.lock() else {
+            return;
+        };
+        let open = rows.last.filter(|id| {
+            rows.offsets
+                .get(id)
+                .is_some_and(|x| *x > SWIPE_ACTIONS / 2.0)
+        });
+        for (id, offset) in &rows.offsets {
+            let target = if Some(*id) == open {
+                SWIPE_ACTIONS
+            } else {
+                0.0
+            };
+            if (offset - target).abs() > 0.5 {
+                tx.scroll_to(swipe_key(*id), target, 0.0);
+            }
+        }
+    }
+
+    /// The system's back gesture, as a swipe in from the left edge of a phone: it closes what
+    /// floats over the page, then a holding's details, then a page reached through More.
+    /// Returns whether there was anywhere to go back to.
+    pub fn go_back(&mut self) -> bool {
+        if self.palette.take().is_some()
+            || self.form.take().is_some()
+            || self.confirm.take().is_some()
+            || self.new_workspace.take().is_some()
+        {
+            return true;
+        }
+        if self.guide {
+            self.guide = false;
+            return true;
+        }
+        if !self.compact {
+            return false;
+        }
+        if self.page == Page::Holdings && self.selected.is_some() {
+            self.selected = None;
+            self.inspector.set_open(false);
+            return true;
+        }
+        if !self.more && !Page::TABS.contains(&self.page) {
+            self.more = true;
+            return true;
+        }
+        false
+    }
+
+    /// Ask for Face ID on opening the app, or stop asking.
+    pub fn toggle_lock(&mut self) {
+        let Some(on) = self.lock.map(|on| !on) else {
+            return;
+        };
+        self.lock = Some(on);
+        self.show_toast(if on {
+            format!("{} locks the vault", self.lock_name)
+        } else {
+            "The vault opens without asking".to_string()
+        });
+    }
+
+    /// Whether the field with focus takes a number, so a phone can offer digits.
+    pub fn number_focused(&self) -> bool {
+        self.form
+            .as_ref()
+            .is_some_and(|form| form.amount.focused || form.quantity.focused || form.price.focused)
     }
 
     /// 0 to 1 through a chart's draw-in.
@@ -1259,6 +1474,12 @@ impl State {
             ..Default::default()
         }
         .filter("Portfolio", &["json", "gpg"]);
+        if self.platform_picker {
+            self.ask_platform(PickKind::File, options.title, |state, path| {
+                state.load_file(path)
+            });
+            return;
+        }
         tx.open_file(options, |state: &mut State, result, _| match result {
             Ok(Some(path)) => state.load_file(path.to_string_lossy().into_owned()),
             Ok(None) => {}
@@ -1396,6 +1617,10 @@ impl State {
         directory: Option<PathBuf>,
         then: impl FnOnce(&mut State, String) + 'static,
     ) {
+        if self.platform_picker {
+            self.ask_platform(PickKind::Folder, title.to_string(), then);
+            return;
+        }
         let options = FileDialogOptions {
             title: title.into(),
             directory,
@@ -1406,6 +1631,40 @@ impl State {
             Ok(None) => {}
             Err(error) => state.error = Some(error.to_string()),
         });
+    }
+
+    /// Ask the platform's picker, which runs `then` with what was picked. One question at a time,
+    /// as with Rune's dialogs: a second while one is open is dropped.
+    fn ask_platform(
+        &mut self,
+        kind: PickKind,
+        title: String,
+        then: impl FnOnce(&mut State, String) + 'static,
+    ) {
+        if self.pick.is_some() {
+            return;
+        }
+        self.palette = None;
+        self.pick = Some(Pick {
+            kind,
+            title,
+            asked: false,
+            then: Box::new(then),
+        });
+    }
+
+    /// The question for the platform's picker to show, once: nothing while it shows.
+    pub fn take_pick(&mut self) -> Option<(PickKind, String)> {
+        let pick = self.pick.as_mut().filter(|pick| !pick.asked)?;
+        pick.asked = true;
+        Some((pick.kind, pick.title.clone()))
+    }
+
+    /// The platform's picker answered: `path`, or `None` when it was cancelled.
+    pub fn picked(&mut self, path: Option<String>) {
+        if let (Some(pick), Some(path)) = (self.pick.take(), path) {
+            (pick.then)(self, path);
+        }
     }
 
     /// Read the open file again, after fixing it elsewhere.
@@ -1460,7 +1719,9 @@ impl State {
             return;
         }
         self.page = page;
+        self.more = false;
         self.chart_hover = None;
+        self.chart_point = None;
         self.donut_hover = None;
         self.palette = None;
         if page != Page::Holdings {

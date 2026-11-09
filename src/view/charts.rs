@@ -3,7 +3,7 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use chrono::NaiveDate;
-use rune::{Cx, El, Shape, Transition, canvas, col, el, row, text};
+use rune::{Align, Cx, El, Shape, Transition, canvas, col, el, row, text};
 use rune_kit::RollingText;
 
 use crate::{
@@ -72,22 +72,35 @@ pub fn value_chart(
             .center()
             .gap(4.0)
             .child(ui::muted("Your history starts today", t))
+            .px(16.0)
             .child(ui::caption(
                 "Stahl records one valuation a day while you use it. Come back tomorrow for your first line.",
                 t,
-            ));
+            )
+            .wrap()
+            .align(Align::Center));
     }
     let chart_height = height - 22.0;
+    let values: Vec<f64> = points.iter().map(|point| point.value).collect();
+    // Where each day sits across the chart, so the pointer knows which it's nearest.
+    let days: Vec<[f32; 2]> = cx
+        .layout_size(key)
+        .map(|[width, _]| plot(&values, width, chart_height))
+        .unwrap_or_default();
     let holder = el()
         .key(key)
         .role("img")
         .label("Portfolio value over time")
         .w_full()
         .h(chart_height)
-        .on_pointer_move_local(|s: &mut State, event, _| s.chart_hover = Some(event.x))
+        .on_pointer_move_local(move |s: &mut State, event, _| {
+            s.chart_hover = Some(event.x);
+            s.chart_point = nearest(&days, event.x);
+        })
         .on_hover_change(|s: &mut State, over, _| {
             if !over {
                 s.chart_hover = None;
+                s.chart_point = None;
             }
         });
     let dates = |count: usize| -> Vec<El> {
@@ -109,7 +122,6 @@ pub fn value_chart(
         return col().w_full().child(holder).child(axis);
     };
 
-    let values: Vec<f64> = points.iter().map(|point| point.value).collect();
     let plotted = plot(&values, width, chart_height);
     let progress = s.draw_progress(cx.is_reduced_motion());
     let trend = t.change(values[values.len() - 1] - values[0]);

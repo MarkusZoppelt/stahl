@@ -8,9 +8,10 @@ use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toas
 
 use crate::{
     backend::{WorkspaceField, plan_workspace},
-    icons,
+    format, icons,
     state::{Command, Confirm, FormField, Page, PendingOpen, State, file_name},
     theme::Theme,
+    update,
     view::{guide, page_icon, portfolio::matches_search, ui, updates},
 };
 
@@ -254,6 +255,7 @@ pub fn entries(s: &State) -> Vec<Entry> {
         .map_or(String::new(), |palette| palette.query.text.to_lowercase());
     let mut found: Vec<Entry> = all
         .into_iter()
+        .filter(|entry| update::SELF_UPDATES || !matches!(entry.command, Command::CheckForUpdates))
         .filter(|entry| {
             let label = entry.label.to_lowercase();
             query.split_whitespace().all(|word| label.contains(word))
@@ -360,7 +362,10 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         .grow(1.0)
                         .truncate(),
                 )
-                .children((!entry.keys.is_empty()).then(|| Keybind::new(&entry.keys).build(k))),
+                .children(
+                    (!entry.keys.is_empty() && !s.compact)
+                        .then(|| Keybind::new(&entry.keys).build(k)),
+                ),
         );
     }
     let panel = ui::floating(t)
@@ -563,10 +568,13 @@ fn form(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 .padding(12.0)
                 .radius(8.0)
                 .border(1.0, k.c.border_muted)
-                .child(ui::caption(
-                    "Optional: what you paid, so Stahl can show your gain or loss.",
-                    t,
-                ))
+                .child(
+                    ui::caption(
+                        "Optional: what you paid, so Stahl can show your gain or loss.",
+                        t,
+                    )
+                    .wrap(),
+                )
                 .child(
                     row()
                         .w_full()
@@ -696,7 +704,15 @@ fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
         && !s.positions.is_empty();
     let target = plan_workspace(&form.name.text, &form.location.text)
         .ok()
-        .map(|dir| format!("Creates {}", dir.display()));
+        .map(|dir| format!("Creates {}", format::place(&dir.to_string_lossy())));
+    // An iPhone's paths are nothing to type: Files names the place, and Choose… picks another.
+    let location = if cfg!(target_os = "ios") {
+        ui::muted(format::place(&form.location.text), t)
+            .key("workspace-location")
+            .truncate_middle()
+    } else {
+        location
+    };
     let fields = col()
         .w_full()
         .gap(14.0)
@@ -776,9 +792,11 @@ fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
         .open(true)
         .fit()
         .width(520.0)
-        .description(
-            "A folder for your positions, policy, reports and decisions, in plain files you own.",
-        )
+        .description(if s.compact {
+            "A folder of plain files you own."
+        } else {
+            "A folder for your positions, policy, reports and decisions, in plain files you own."
+        })
         .on_close(|s: &mut State| s.new_workspace = None)
         .child(fields)
         .build(k, layer);
