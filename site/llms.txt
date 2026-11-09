@@ -21,7 +21,7 @@ Stahl Capital is software, not a bank, a broker or an adviser. The page's privat
 
 Positions are in a plain JSON file on your machine, shared with the portfolio_rs CLI. A file that doesn't parse shows its line and column. It is never shown as an empty portfolio and never overwritten.
 
-Two things can leave the machine: tickers sent to Yahoo Finance to fetch prices (set `PORTFOLIO_RS_QUOTES=offline` to stop that), and whatever you send an AI provider, if you add one in Settings. There's no account and no telemetry.
+Three things can leave the machine: tickers sent to Yahoo Finance to fetch prices (set `PORTFOLIO_RS_QUOTES=offline` to stop that), whatever you send an AI provider, if you add one in Settings, and one request to api.github.com on launch to check for a newer version (set `STAHL_NO_UPDATE_CHECK=1` to skip it). There's no account and no telemetry.
 
 ## Install
 
