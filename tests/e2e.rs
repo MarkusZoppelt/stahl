@@ -652,6 +652,20 @@ fn tab_goes_through_the_form_in_the_order_it_reads() {
 }
 
 #[test]
+fn asking_for_the_form_again_keeps_what_was_typed_and_where() {
+    let mut app = Harness::boot(true, None);
+    app.command('n', false);
+    app.type_text("Zed");
+    app.click("form-amount");
+    app.type_text("5");
+    app.command('n', false);
+    assert_eq!(focused_label(&app).as_deref(), Some("Amount"));
+    app.type_text("6");
+    let [name, .., amount, _, _] = form_texts(&app);
+    assert_eq!((name.1.as_str(), amount.1.as_str()), ("Zed", "056"));
+}
+
+#[test]
 fn deleting_asks_first() {
     let mut app = Harness::boot(false, Some(demo::POSITIONS));
     app.command('2', false);
