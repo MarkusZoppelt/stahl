@@ -42,6 +42,39 @@ fn compare(a: &PositionDto, b: &PositionDto, sort: SortBy) -> Ordering {
         SortBy::Value => a.value.total_cmp(&b.value),
         SortBy::Pnl => number(a.pnl_percent, b.pnl_percent),
         SortBy::Day => number(a.day_change_percent, b.day_change_percent),
+        SortBy::Impact => number(day_amount(a), day_amount(b)),
+    }
+}
+
+/// A holding's change today, in the portfolio's currency.
+///
+/// `day_change_percent` is the price move, so the amount is that move applied to yesterday's
+/// value. Cash and anything without a previous close contribute nothing. A total loss can't be
+/// recovered from today's value alone, so it is left unknown.
+pub fn day_amount(position: &PositionDto) -> Option<f64> {
+    let percent = position.day_change_percent?;
+    if !position.value.is_finite() || !percent.is_finite() || percent <= -100.0 {
+        return None;
+    }
+    let factor = 1.0 + percent / 100.0;
+    Some(position.value * (percent / 100.0) / factor)
+}
+
+/// `amount` as percentage points of the portfolio's value at the previous close.
+///
+/// A holding that is 40% of the portfolio and down 0.6% moves it by about 0.24 points, which is
+/// more than a 5% holding up 2%. `None` when yesterday's total isn't positive.
+pub fn day_points(amount: Option<f64>, previous_total: f64) -> Option<f64> {
+    let amount = amount?;
+    (previous_total > 0.0 && amount.is_finite()).then_some(amount / previous_total * 100.0)
+}
+
+/// The portfolio's value at the previous close, from today's total and today's move.
+pub fn previous_total(total: f64, day_change: f64) -> f64 {
+    if total.is_finite() && day_change.is_finite() {
+        total - day_change
+    } else {
+        0.0
     }
 }
 
@@ -449,6 +482,9 @@ struct Columns {
     class: bool,
     pnl: bool,
     today: bool,
+    /// How much of the portfolio's move today came from the holding. Narrower tables fold it
+    /// under Today's own percentage instead of dropping it.
+    impact: bool,
 }
 
 impl Columns {
@@ -457,6 +493,8 @@ impl Columns {
             class: width >= 720.0,
             pnl: width >= 560.0,
             today: width >= 340.0,
+            // Beside the details pane the table already drops Class and PnL; this goes with them.
+            impact: width >= 880.0,
         }
     }
 
@@ -515,10 +553,56 @@ fn header_cell(
     if right { cell.justify_end() } else { cell }
 }
 
+/// One holding's share of today's move, for the table and the details.
+struct TodayShare {
+    /// Change in the portfolio's currency. `None` when it can't be known.
+    amount: Option<f64>,
+    /// Percentage points of yesterday's portfolio. `None` when it can't be known.
+    points: Option<f64>,
+    /// `|amount|` against the largest holding's, for the bar. Zero when nothing moved.
+    bar: f32,
+}
+
+fn today_share(position: &PositionDto, previous: f64, largest: f64) -> TodayShare {
+    let amount = day_amount(position);
+    TodayShare {
+        points: day_points(amount, previous),
+        bar: amount
+            .filter(|_| largest > 0.0)
+            .map(|amount| (amount.abs() / largest) as f32)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0),
+        amount,
+    }
+}
+
+/// How much of today's move this is, as a bar against the largest holding. It grows from the
+/// right, in the gain or loss colour, so the lengths compare down the column.
+fn share_bar(share: &TodayShare, t: &Theme) -> El {
+    let color = share
+        .amount
+        .map_or(t.kit.c.text_muted, |amount| t.change(amount));
+    el().w_full()
+        .h(4.0)
+        .radius(2.0)
+        .fill(t.kit.c.layer_03)
+        .a11y_hidden()
+        .child(
+            row().center_y().w_full().h_full().justify_end().child(
+                el().h_full()
+                    .w_frac(share.bar)
+                    .radius(2.0)
+                    .fill(color)
+                    .motion(LEAD),
+            ),
+        )
+}
+
 fn holding_row(
     s: &State,
     position: &PositionDto,
     columns: Columns,
+    share: &TodayShare,
     first: bool,
     last: bool,
     t: &Theme,
@@ -538,6 +622,14 @@ fn holding_row(
     let name = display_name(position);
     let context_name = name.clone();
     let class_color = t.class_color(&position.asset_class);
+    let share_label = share
+        .points
+        .map_or_else(|| "-".to_string(), format::percent);
+    let named = if share.points.is_some() {
+        format!("{name}, {share_label} of today's move")
+    } else {
+        name.clone()
+    };
     let total = s
         .summary
         .as_ref()
@@ -552,7 +644,7 @@ fn holding_row(
         .key(format!("holding-{id}"))
         .matched(format!("position-{id}"))
         .role("row")
-        .label(name.clone())
+        .label(named)
         .focusable(true)
         .w_full()
         .gap(12.0)
@@ -676,15 +768,51 @@ fn holding_row(
             )
         }))
         .children(columns.today.then(|| {
-            cell(
-                number(
-                    format::optional_percent(position.day_change_percent),
-                    t.optional_change(position.day_change_percent),
-                ),
-                true,
-                1.0,
-            )
+            let own = number(
+                format::optional_percent(position.day_change_percent),
+                t.optional_change(position.day_change_percent),
+            );
+            // No room for the column: the bar under the holding's own percentage still says
+            // which move mattered. The number is a tap away, in the details.
+            let content = if columns.impact {
+                own
+            } else {
+                col()
+                    .w_full()
+                    .items_end()
+                    .gap(4.0)
+                    .child(own)
+                    .child(share_bar(share, t).max_w(72.0))
+                    .help("The bar is this holding's share of today's move")
+            };
+            cell(content, true, 1.0)
         }))
+        .children(
+            columns
+                .impact
+                .then(|| cell(share_figure(s, share, &share_label, t), true, 1.0)),
+        )
+}
+
+/// The share of today's move: the points, and a bar against the largest holding.
+fn share_figure(s: &State, share: &TodayShare, label: &str, t: &Theme) -> El {
+    let color = share
+        .points
+        .map_or(t.kit.c.text_muted, |points| t.change(points));
+    let help = match share.amount {
+        Some(amount) if !s.privacy => {
+            format!("Moved the portfolio by {} today", s.signed_money(amount))
+        }
+        _ => "How many percentage points of the portfolio this holding moved today".to_string(),
+    };
+    col()
+        .w_full()
+        .min_w(88.0)
+        .items_end()
+        .gap(4.0)
+        .help(help)
+        .child(ui::number(label.to_string(), color))
+        .child(share_bar(share, t))
 }
 
 /// A holding's row on a phone, which slides left to show Edit and Delete, as rows in iOS do.
@@ -861,6 +989,19 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let end = rows.len().saturating_sub(1);
     let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
     let columns = Columns::for_width(width);
+    let previous = s.summary.as_ref().map_or(0.0, |summary| {
+        previous_total(summary.total_value, summary.day_change)
+    });
+    // Against what's on screen, so a holding the search hid doesn't shrink the bars.
+    let largest = rows
+        .iter()
+        .filter_map(|position| day_amount(position))
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    let shares: Vec<TodayShare> = rows
+        .iter()
+        .map(|position| today_share(position, previous, largest))
+        .collect();
     let roomy = width >= ROOM_FOR_COUNT;
     let search = search_input(s)
         .width(roomy.then_some(240.0))
@@ -932,7 +1073,12 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         columns.today.then(|| {
                             header_cell(s, "sort-day", "Today", SortBy::Day, true, 1.0, t)
                         }),
-                    ),
+                    )
+                    .children(columns.impact.then(|| {
+                        header_cell(s, "sort-impact", "Of today", SortBy::Impact, true, 1.0, t).help(
+                            "How many percentage points of the portfolio this holding moved today",
+                        )
+                    })),
             )
             .children(
                 rows.is_empty()
@@ -946,14 +1092,24 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .focus_group()
                     .focus_follows()
                     .w_full()
-                    .children(rows.into_iter().enumerate().map(|(index, position)| {
-                        let row = holding_row(s, position, columns, index == 0, index == end, t);
-                        if s.compact {
-                            swipe_row(s, position, row, t)
-                        } else {
-                            row
-                        }
-                    })),
+                    .children(rows.into_iter().zip(shares).enumerate().map(
+                        |(index, (position, share))| {
+                            let row = holding_row(
+                                s,
+                                position,
+                                columns,
+                                &share,
+                                index == 0,
+                                index == end,
+                                t,
+                            );
+                            if s.compact {
+                                swipe_row(s, position, row, t)
+                            } else {
+                                row
+                            }
+                        },
+                    )),
             ),
     )
 }
@@ -1040,6 +1196,17 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .child(detail(
                     "Today",
                     format::optional_percent(position.day_change_percent),
+                    t,
+                ))
+                .child(detail(
+                    "Of today",
+                    day_points(
+                        day_amount(position),
+                        s.summary.as_ref().map_or(0.0, |summary| {
+                            previous_total(summary.total_value, summary.day_change)
+                        }),
+                    )
+                    .map_or_else(|| "-".to_string(), format::percent),
                     t,
                 )),
         )
@@ -1458,6 +1625,47 @@ mod tests {
         let known = position(Some("A"), None, Some(-50.0));
         let unknown = position(Some("B"), None, None);
         assert_eq!(compare(&known, &unknown, SortBy::Pnl), Ordering::Greater);
+    }
+
+    fn holding(value: f64, day: Option<f64>) -> PositionDto {
+        PositionDto {
+            value,
+            day_change_percent: day,
+            ..position(Some("Held"), None, None)
+        }
+    }
+
+    #[test]
+    fn a_large_holding_moves_the_portfolio_more_than_a_lively_small_one() {
+        // 40% of yesterday's 100, down 0.6%: about -0.24 points.
+        let heavy = holding(40.0 * 0.994, Some(-0.6));
+        // 5% of it, up 2%: about +0.10 points.
+        let light = holding(5.0 * 1.02, Some(2.0));
+        let heavy_points = day_points(day_amount(&heavy), 100.0).unwrap();
+        let light_points = day_points(day_amount(&light), 100.0).unwrap();
+        assert!(
+            (heavy_points + 0.24).abs() < 0.01,
+            "heavy moved {heavy_points}"
+        );
+        assert!(
+            (light_points - 0.10).abs() < 0.01,
+            "light moved {light_points}"
+        );
+        assert!(heavy_points.abs() > light_points.abs());
+        assert_eq!(
+            compare(&heavy, &light, SortBy::Impact),
+            Ordering::Less,
+            "the loss sorts below the gain"
+        );
+    }
+
+    #[test]
+    fn cash_and_a_total_loss_contribute_nothing_known() {
+        assert_eq!(day_amount(&holding(30_000.0, None)), None);
+        assert_eq!(day_amount(&holding(0.0, Some(-100.0))), None);
+        assert_eq!(day_points(None, 100.0), None);
+        assert_eq!(day_points(Some(1.0), 0.0), None);
+        assert_eq!(previous_total(107_400.0, 280.0), 107_120.0);
     }
 
     #[test]

@@ -197,6 +197,8 @@ pub enum SortBy {
     Value,
     Pnl,
     Day,
+    /// How much of the portfolio's move today came from the holding.
+    Impact,
 }
 
 /// Data a page fetches when it opens. A failed reload keeps the last result.

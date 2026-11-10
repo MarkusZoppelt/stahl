@@ -97,6 +97,11 @@ fn main() {
         &[
             ("overview", |s| scene(s, Page::Overview)),
             ("holdings", |s| scene(s, Page::Holdings)),
+            ("holdings-light", |s| {
+                scene(s, Page::Holdings);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("holding-details", |s| {
                 scene(s, Page::Holdings);
                 s.select_position(0);

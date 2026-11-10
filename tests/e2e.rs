@@ -1242,6 +1242,7 @@ fn columns_of(app: &Harness) -> Vec<&'static str> {
         "sort-value",
         "sort-pnl",
         "sort-day",
+        "sort-impact",
     ]
     .into_iter()
     .filter(|key| app.exists(key))
@@ -1251,7 +1252,7 @@ fn columns_of(app: &Harness) -> Vec<&'static str> {
 #[test]
 fn the_table_drops_columns_rather_than_overlap_them() {
     let mut app = on_holdings();
-    assert_eq!(columns_of(&app).len(), 5, "a wide window has them all");
+    assert_eq!(columns_of(&app).len(), 6, "a wide window has them all");
 
     // The smallest window Stahl allows, with the pane open beside the table.
     narrowed_to(&mut app, 960.0, 640.0);
@@ -1266,6 +1267,26 @@ fn the_table_drops_columns_rather_than_overlap_them() {
         add[0] + add[2] <= pane[0],
         "the Add button stays clear of the pane"
     );
+}
+
+#[test]
+fn of_today_weights_a_holding_by_how_much_of_the_portfolio_it_is() {
+    let mut app = on_holdings();
+    assert!(app.has_text("Of today"));
+    // S&P 500 is down 0.60% but is most of the book, so it moves the portfolio more than Gold,
+    // which is up 2.04% on a small slice. The figures are percentage points of yesterday.
+    assert!(app.has_text("-0.22%"), "S&P 500's share of the move");
+    assert!(app.has_text("+0.42%"), "Bitcoin's share of the move");
+    assert!(app.has_text("+0.09%"), "Gold's share of the move");
+
+    app.click("sort-impact");
+    let y = |id: usize| app.rt.find(&format!("holding-{id}")).unwrap().1;
+    assert!(
+        y(0) < y(3) && y(3) < y(1),
+        "Bitcoin, then Gold, then S&P 500"
+    );
+    app.click("holding-1");
+    assert!(app.has_text("Of today"), "the details name it too");
 }
 
 #[test]
