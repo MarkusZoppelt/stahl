@@ -978,6 +978,46 @@ fn the_same_position_and_class_fly_between_pages_without_clashing() {
     assert!(!app.exists("legend-0"));
 }
 
+/// The same stock at a second broker is a second position: `portfolio_rs` keeps positions apart by
+/// id and only warns that the ticker repeats.
+#[test]
+fn a_ticker_held_twice_is_two_positions_counted_once_each() {
+    let mut app = Harness::boot(true, None);
+    let total = |app: &Harness| app.rt.state.summary.as_ref().unwrap().total_value;
+    let before = total(&app);
+    app.command('2', false);
+    app.command('n', false);
+    app.type_text("S&P 500 at the other broker");
+    for (key, text) in [
+        ("form-ticker", "SPY"),
+        ("form-quantity", "10"),
+        ("form-price", "400"),
+    ] {
+        app.click(key);
+        app.type_text(text);
+    }
+    app.click("form-submit");
+
+    assert!(app.rt.state.form.is_none(), "the form accepts it");
+    let spy: Vec<_> = app
+        .rt
+        .state
+        .positions
+        .iter()
+        .filter(|position| position.ticker.as_deref() == Some("SPY"))
+        .map(|position| (position.id, position.value))
+        .collect();
+    assert_eq!(spy, [(1, 40_000.0), (5, 5_000.0)], "each at SPY's €500");
+    assert!(
+        (total(&app) - before - 5_000.0).abs() < 1e-6,
+        "counted once"
+    );
+    assert!(app.exists("holding-1") && app.exists("holding-5"));
+
+    app.command('1', false);
+    assert!(app.has_text("Ticker SPY appears in 2 positions."));
+}
+
 #[test]
 fn a_foreign_holding_without_an_fx_rate_still_shows_its_quote() {
     let quotes = r#"{"latest": {"BTC-USD": {"price": 60000.0, "currency": "USD"}}}"#;
