@@ -98,6 +98,11 @@ pub fn swipe_key(id: usize) -> String {
 }
 /// Refresh prices on returning to the app, if the last refresh is older than this.
 const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Into the welcome door's flight, when its dial starts turning: as it nears the mark.
+pub const DOOR_TURN_AT: f64 = 0.45;
+/// When the flight hands over to the mark: once the dial has turned and settled.
+pub const DOOR_FLIGHT_ENDS: f64 = DOOR_TURN_AT + 1.35;
+
 const TOAST_FOR: Duration = Duration::from_millis(2600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -526,6 +531,27 @@ pub struct State {
     pub updated_at: Option<String>,
     /// How many times prices have landed, to mark the moment on screen.
     pub price_updates: u64,
+    /// One full turn when a portfolio's door first appears: as it lands from the welcome screen,
+    /// or on its own when the app opened straight into a portfolio. Not a price refresh, and not
+    /// replayed by one.
+    pub door_arrivals: u64,
+    /// The door has been painted at rest for this portfolio, so the next frame can start the turn.
+    door_seen: bool,
+    /// The arrival turn has started for the portfolio now open.
+    door_landed: bool,
+    /// Show the welcome screen until this time even with a portfolio open, so a scene can paint
+    /// the large door and then let it fly. `None` in the running app.
+    pub hold_welcome_until: Option<f64>,
+    /// When the welcome door started its flight to the mark, while it is still travelling.
+    pub door_flight: Option<f64>,
+    /// The flying door has been drawn where the welcome door was, and now heads for the mark.
+    pub door_released: bool,
+    /// Where the welcome door and the mark were last laid out, in window points: the flight's
+    /// two ends.
+    pub welcome_door: Option<[f32; 4]>,
+    pub mark_door: Option<[f32; 4]>,
+    /// The welcome screen was showing at the last poll.
+    welcome_showing: bool,
     /// What the last refresh moved: each position (by id) whose price changed, and by how much,
     /// as a fraction. Empty when it moved nothing.
     pub price_moves: Vec<(usize, f64)>,
@@ -753,6 +779,15 @@ impl State {
             error: None,
             updated_at: None,
             price_updates: 0,
+            door_arrivals: 0,
+            door_seen: false,
+            door_landed: false,
+            hold_welcome_until: None,
+            door_flight: None,
+            door_released: false,
+            welcome_door: None,
+            mark_door: None,
+            welcome_showing: false,
             price_moves: Vec::new(),
             refreshed: None,
             page: Page::Overview,
@@ -901,7 +936,10 @@ impl State {
     /// Runs at the start of every frame. True when something on screen changed.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.now = now;
+        let from_welcome = self.welcome_showing;
         let mut changed = self.drain() || mem::take(&mut self.settled);
+        changed |= self.door_arrives(now, from_welcome, tx);
+        self.welcome_showing = self.on_welcome();
         if self.quit_requested {
             tx.quit();
         }
@@ -1128,6 +1166,74 @@ impl State {
         // A folder prompt is a decision about a folder that did not open. The portfolio
         // underneath is not what's on screen, and commands must not change it.
         self.folder_prompt.is_none() && self.open.is_open() && self.open.parse_error.is_none()
+    }
+
+    /// The shell is up: a portfolio is open, and a scene isn't still holding the welcome screen.
+    fn shell_showing(&self) -> bool {
+        self.has_portfolio() && self.hold_welcome_until.is_none_or(|at| self.now >= at)
+    }
+
+    /// The welcome screen, with its large door, is what the window shows.
+    fn on_welcome(&self) -> bool {
+        !self.starting
+            && self.folder_prompt.is_none()
+            && self.open.parse_error.is_none()
+            && !self.shell_showing()
+    }
+
+    /// The door's arrival when a portfolio's shell first shows. From the welcome screen, the
+    /// welcome door flies to the mark and its dial turns as it lands; launched straight into a
+    /// portfolio, the mark's dial just turns. Once per opened portfolio: a refresh, a page
+    /// change or a redraw never comes through here again. Returns whether anything changed.
+    fn door_arrives(&mut self, now: f64, from_welcome: bool, tx: &mut Tx) -> bool {
+        if !self.shell_showing() {
+            if !self.has_portfolio() {
+                self.door_seen = false;
+                self.door_landed = false;
+                self.door_flight = None;
+            }
+            return false;
+        }
+        let mut changed = false;
+        if !self.door_seen {
+            // The first poll with the shell up. The turn waits a frame at least, so the dial is
+            // painted at rest before it turns.
+            self.door_seen = true;
+            if from_welcome && self.welcome_door.is_some() {
+                self.door_flight = Some(now);
+                self.door_released = false;
+                tx.wake_after(Duration::from_millis(20));
+                tx.wake_at(now + DOOR_TURN_AT);
+                tx.wake_at(now + DOOR_FLIGHT_ENDS);
+                changed = true;
+            } else {
+                tx.wake_after(Duration::from_millis(30));
+            }
+        } else if self.door_flight.is_some() && !self.door_released {
+            // It has been drawn at the welcome door's place: now it can set off.
+            if self.mark_door.is_some() {
+                self.door_released = true;
+                changed = true;
+            } else {
+                tx.wake_after(Duration::from_millis(20));
+            }
+        } else if !self.door_landed
+            && self
+                .door_flight
+                .is_none_or(|start| now >= start + DOOR_TURN_AT)
+        {
+            self.door_landed = true;
+            self.door_arrivals += 1;
+            changed = true;
+        }
+        if self
+            .door_flight
+            .is_some_and(|start| now >= start + DOOR_FLIGHT_ENDS)
+        {
+            self.door_flight = None;
+            changed = true;
+        }
+        changed
     }
 
     pub fn theme_mode(&self) -> ThemeMode {

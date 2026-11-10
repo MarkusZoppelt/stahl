@@ -270,10 +270,25 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
-            // The door: its dial turns once as prices land, and it marks what needs attention.
-            ("door-turn", |s| {
+            // Launched into a portfolio, the door's dial turns once, a frame after it is painted
+            // at rest, so the frames from 0.05 s to 1.2 s show it turning.
+            ("door-turn", |s| scene(s, Page::Overview)),
+            // The welcome door flies to the mark. Held on the welcome screen until 0.08s, after
+            // the large door has been painted, then the shell mounts and the door travels.
+            ("door-open", |s| {
                 scene(s, Page::Overview);
-                s.refresh_prices();
+                s.hold_welcome_until = Some(0.08);
+            }),
+            ("door-open-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.hold_welcome_until = Some(0.08);
+            }),
+            ("phone-door-open", |s| {
+                s.compact = true;
+                scene(s, Page::Overview);
+                s.hold_welcome_until = Some(0.08);
             }),
             // A refresh that moves two prices: what moved flashes once in its colour.
             ("price-moves", |s| {

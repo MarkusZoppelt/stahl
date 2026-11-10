@@ -3,8 +3,8 @@
 use std::{env, mem};
 
 use rune::{
-    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Tx, col, el, icon, row, text,
-    tok::motion::LEAD,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
+    text, tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
@@ -103,11 +103,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         folder_prompt(s, &t)
     } else if s.open.parse_error.is_some() {
         overlays::parse_failure(s, &t)
-    } else if !s.has_portfolio() {
+    } else if !s.has_portfolio() || s.hold_welcome_until.is_some_and(|at| s.now < at) {
         welcome(s, &t)
     } else {
         shell(s, &t, cx, &mut layer)
     };
+    layer.extend(door::flight(s, &t));
     overlays::build(s, &t, &mut layer);
 
     let body = body
@@ -188,6 +189,9 @@ fn welcome(s: &State, t: &Theme) -> El {
         };
         ui::entering(card, index)
     };
+    // The door is a sibling of the rest, not a child of a fading column: a fade on its parent
+    // would be copied into the flight and the door would vanish on the way. The rest is gone
+    // at once, so it doesn't sit on the page.
     col()
         .w_full()
         .h_full()
@@ -196,9 +200,15 @@ fn welcome(s: &State, t: &Theme) -> El {
         .padding(if compact { 16.0 } else { 24.0 })
         .child(ui::wash(t, 0.0))
         .child(
-            door::vault(s, t, if compact { 112.0 } else { 168.0 }, "welcome").mb(14.0),
+            door::welcome(s, t, if compact { 112.0 } else { 168.0 }).mb(14.0),
         )
         .child(
+            col()
+                .w_full()
+                .items_center()
+                .gap(10.0)
+                .transition(Transition::none())
+                .child(
             text("Stahl Capital has one client.")
                 .font(if compact { STATEMENT_COMPACT } else { STATEMENT })
                 .color(k.c.text_base)
@@ -280,6 +290,7 @@ fn welcome(s: &State, t: &Theme) -> El {
             s.error
                 .as_ref()
                 .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(880.0)),
+        ),
         )
 }
 
@@ -382,7 +393,7 @@ fn sidebar(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .px(8.0)
         .pb(8.0)
-        .child(door::vault(s, t, 28.0, "sidebar").help(door::describe(door::attention(s))))
+        .child(door::mark(s, t, 28.0, "sidebar").help(door::describe(door::attention(s))))
         .child(
             col()
                 .shrink()
@@ -723,8 +734,7 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .child(ui::wash(t, 12.0))
-        .child(scroller)
-        .child(door::opening(s, 200.0));
+        .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
         .toolbar(toolbar(s, t))

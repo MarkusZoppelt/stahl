@@ -197,7 +197,7 @@ pub fn flash(key: impl Into<String>, updates: u64, color: Color, radius: f32) ->
         .w_full()
         .h_full()
         .radius(radius)
-        .fill(color.alpha(0.10))
+        .fill(color.alpha(0.22))
         .a11y_hidden()
         .sequence(Sequence::new(FLASH))
 }

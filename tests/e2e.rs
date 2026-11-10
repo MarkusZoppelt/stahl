@@ -2711,24 +2711,121 @@ fn element(app: &Harness, key: &str) -> rune::ElementInfo {
 }
 
 #[test]
-fn the_door_opens_once_turns_on_a_refresh_and_marks_what_needs_attention() {
+fn the_door_flies_once_from_welcome_and_a_refresh_does_not_replay_it() {
+    let mut app = Harness::boot(true, None);
+    let dir = app
+        .rt
+        .state
+        .open
+        .workspace_dir
+        .clone()
+        .expect("the demo workspace");
+    app.rt.update(|state, _| state.reset());
+    app.settle();
+    assert!(app.exists("door-welcome"), "back on the welcome screen");
+    let from = element(&app, "door-welcome").rect;
+    assert!(
+        from[2] > 100.0,
+        "the welcome door is the large one: {from:?}"
+    );
+
+    let arrivals = app.rt.state.door_arrivals;
+    app.rt.update(|state, _| state.load_workspace(dir.clone()));
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.has_text("Total value"),
+        "the page is there while the door travels"
+    );
+    // One door, over everything: the mark's place waits empty while it travels.
+    let flying = element(&app, "door-flying");
+    assert!(
+        (flying.rect[0] - from[0]).abs() < 8.0 && (flying.rect[2] - from[2]).abs() < 8.0,
+        "it sets off from the welcome door: {from:?} -> {:?}",
+        flying.rect
+    );
+    assert!(!app.exists("door-sidebar"), "the mark waits for it");
+    for _ in 0..12 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let mid = element(&app, "door-flying").rect;
+    assert!(mid[0] < from[0] - 20.0, "it travels: {mid:?}");
+    assert!(mid[2] < from[2] - 10.0, "and shrinks as it goes: {mid:?}");
+
+    app.settle();
+    app.settle();
+    assert!(
+        !app.exists("door-flying"),
+        "landed, it hands over to the mark"
+    );
+    let landed = element(&app, "door-sidebar");
+    assert!(
+        landed.rect[2] < 40.0,
+        "the mark is in its place: {:?}",
+        landed.rect
+    );
+    assert_eq!(
+        app.rt.state.door_arrivals,
+        arrivals + 1,
+        "the dial turned once"
+    );
+
+    // A page change leaves it where it landed.
+    app.click(Page::Holdings.key());
+    app.rt.frame(1.0 / 60.0);
+    let stayed = element(&app, "door-sidebar");
+    assert!((stayed.rect[2] - landed.rect[2]).abs() < 1.0);
+    assert!(
+        !app.exists("door-flying"),
+        "a page change does not fly it again"
+    );
+
+    // A refresh turns the dial and does not send the door travelling.
+    let rest = element(&app, "door-dial-sidebar").rect;
+    let door_at = element(&app, "door-sidebar").rect;
+    let (x, y) = app.rt.find("refresh-prices").unwrap();
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let turning = element(&app, "door-dial-sidebar").rect;
+    assert!(turning[2] > rest[2] + 1.0, "the dial turns: {turning:?}");
+    let door_now = element(&app, "door-sidebar").rect;
+    assert!(
+        (door_now[2] - door_at[2]).abs() < 1.0 && !app.exists("door-flying"),
+        "the refresh does not fly the door again: {door_at:?} -> {door_now:?}"
+    );
+    assert_eq!(
+        app.rt.state.door_arrivals,
+        arrivals + 1,
+        "nor counts as an arrival"
+    );
+
+    // Closing and opening another portfolio flies once more.
+    app.rt.update(|state, _| state.reset());
+    app.settle();
+    assert!(app.exists("door-welcome"));
+    app.rt.update(|state, _| state.load_workspace(dir));
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.exists("door-flying"), "a new portfolio flies again");
+}
+
+#[test]
+fn launched_into_a_portfolio_the_dial_turns_once_and_marks_what_needs_attention() {
     use portfolio_rs::mcp::dto::{Category, Finding, Severity};
 
     let mut app = Harness::boot(true, None);
-    // Opening the portfolio parted the door over the page, and it has gone.
-    let opening = app
-        .rt
-        .elements()
-        .into_iter()
-        .find(|element| {
-            element
-                .key
-                .as_deref()
-                .is_some_and(|key| key.starts_with("door-opening-"))
-        })
-        .expect("the door opened over the page");
-    assert!(opening.opacity < 0.01, "and is gone once it has opened");
-    // It doesn't stand in the way of the page under it.
+    // Launched straight into a portfolio: no welcome door, so nothing travelled; the dial turned.
+    assert!(!app.exists("door-flying"));
+    assert_eq!(app.rt.state.door_arrivals, 1);
     app.click(Page::Holdings.key());
     assert_eq!(app.rt.state.page, Page::Holdings);
 

@@ -1,15 +1,17 @@
 //! The vault door as a living mark: still at rest, its dial turns once when prices land, it
-//! carries a single mark when something needs attention, and it flies from the welcome screen
-//! into the sidebar when a portfolio opens.
+//! carries a single mark when something needs attention, and when a portfolio opens from the
+//! welcome screen it travels to the mark's place and shrinks to it, the dial turning once as it
+//! lands. Nothing covers the page.
 //!
 //! It is built from the shader-lit picture of the door (`ui::door`) and Rune's own transforms:
 //! the dial is the same picture clipped to the dial's disc and turned on a spring, so at rest it
-//! draws exactly the icon, and nothing animates while the app is idle.
+//! draws exactly the icon, and nothing animates while the app is idle. The welcome door and the
+//! mark share one matched id, so the flight is the same element moving between the two places.
 
 use std::f32::consts::TAU;
 
 use portfolio_rs::mcp::dto::Severity;
-use rune::{Beat, El, Sequence, Spring, SpringPair, Transition, el, row};
+use rune::{El, Spring, Transition, el};
 
 use crate::{state::State, theme::Theme};
 
@@ -21,6 +23,10 @@ const DIAL: f32 = 0.7969;
 
 /// A heavy dial: it takes its time and settles with a small give, as steel would.
 pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
+
+/// The flight from the welcome door to the mark: long enough to read as one object travelling,
+/// settling without a bounce, as something heavy would.
+pub const DOOR_LAND: Spring = Spring::new(0.9, 0.0);
 
 /// How many things need the owner's attention, as the Overview's "Needs attention" list counts
 /// them: warnings and critical findings, not information.
@@ -38,11 +44,16 @@ fn attention_is_critical(s: &State) -> bool {
         .any(|finding| matches!(finding.severity, Severity::Critical))
 }
 
-/// The angle the dial rests at: one full turn per price refresh, so every rest looks the same and
-/// the spring between them is the turn.
+/// The angle the dial rests at: one full turn per price refresh and per portfolio opened, so
+/// every rest looks the same and the spring between them is the turn.
 pub fn dial_angle(turns: u64) -> f32 {
     // Wrapped, so a long session doesn't lose precision; the spring only ever sees one turn.
     (turns % 1024) as f32 * TAU
+}
+
+/// Turns the dial has to show: each refresh, and one when a portfolio's door first appears.
+pub fn dial_turns(s: &State) -> u64 {
+    s.price_updates + s.door_arrivals
 }
 
 /// What the door says about the portfolio, for assistive technology and the tooltip.
@@ -71,7 +82,7 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
                 .radius(dial / 2.0)
                 .clip_rounded(dial / 2.0)
                 .a11y_hidden()
-                .rotate(dial_angle(s.price_updates))
+                .rotate(dial_angle(dial_turns(s)))
                 .rotate_motion(DIAL_TURN)
                 .child(ui::door(size).absolute(-inset, -inset)),
         );
@@ -99,48 +110,72 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
         .label(format!("Stahl Capital. {}", describe(count)))
 }
 
-/// The door holds closed for a moment, then fades as its halves part.
-const OPENING: &[Beat] = &[Beat::new(0.0), Beat::new(0.2), Beat::new(0.75).opacity(0.0)];
-
-/// How far each half slides as the door opens, as a fraction of the door's size.
-const PARTING: f32 = 0.36;
-
-/// The door opening into a portfolio: when one opens, a large door stands over the page and its
-/// two halves part along the seam, once. Keyed by the document, so it plays again only for a
-/// different portfolio or after closing one, and never on moving between pages. Under reduced
-/// motion it lands open at once: nothing shows.
-pub fn opening(s: &State, size: f32) -> El {
-    let document = s
-        .open
-        .workspace_dir
-        .as_deref()
-        .or(s.open.file_path.as_deref())
-        .unwrap_or_default();
-    let half = |left: bool| {
-        let travel = size * PARTING * if left { -1.0 } else { 1.0 };
-        el().size(size / 2.0, size)
-            .clip_rounded(0.0)
-            // At rest it is parted; it enters from closed, so the spring is the opening.
-            .offset(travel, 0.0)
-            .transition(
-                Transition::offset(-travel, 0.0).springs(SpringPair::new(DOOR_PARTS, DOOR_PARTS)),
-            )
-            .child(ui::door(size).absolute(if left { 0.0 } else { -size / 2.0 }, 0.0))
-    };
-    row()
-        .key(format!("door-opening-{document}"))
-        .absolute(0.0, 0.0)
-        .w_full()
-        .h_full()
-        .center()
-        .a11y_hidden()
-        .sequence(Sequence::new(OPENING))
-        .child(half(true))
-        .child(half(false))
+/// The large door on the welcome screen. It says where it is, so that opening a portfolio can fly
+/// it from here to the mark.
+pub fn welcome(s: &State, t: &Theme, size: f32) -> El {
+    // It leaves at once: the flying door takes its place in the same frame.
+    vault(s, t, size, "welcome")
+        .transition(Transition::none())
+        .on_layout(|s: &mut State, rect| {
+            if s.welcome_door != Some(rect) {
+                s.welcome_door = Some(rect);
+            }
+        })
 }
 
-/// The halves part slowly at first and glide to rest.
-pub const DOOR_PARTS: Spring = Spring::new(0.75, 0.0);
+/// The mark's place: in the sidebar's header, or the phone's top bar. It holds the mark, except
+/// while the welcome door is flying in to take its place.
+pub fn mark(s: &State, t: &Theme, size: f32, place: &str) -> El {
+    el().key(format!("door-slot-{place}"))
+        .size(size, size)
+        .on_layout(|s: &mut State, rect| {
+            if s.mark_door != Some(rect) {
+                s.mark_door = Some(rect);
+            }
+        })
+        .children(
+            s.door_flight
+                .is_none()
+                .then(|| vault(s, t, size, place).transition(Transition::none())),
+        )
+}
+
+/// The welcome door on its way to the mark, over everything: it starts where the welcome door
+/// was, at its size, and springs to the mark's place and size, its dial turning as it lands. It
+/// is the large door drawn scaled down, so it stays sharp all the way. When it has landed and the
+/// dial has settled, the mark takes its place, at the same angle, and nothing jumps. Nothing
+/// covers the page. Under reduced motion it lands at once.
+pub fn flight(s: &State, t: &Theme) -> Option<El> {
+    s.door_flight?;
+    let from = s.welcome_door?;
+    let size = from[2];
+    // Drawn first exactly where the welcome door was; then, released, it springs to the mark.
+    let (at, scale) = match s.mark_door.filter(|_| s.door_released) {
+        Some(to) => (
+            [
+                to[0] + to[2] / 2.0 - size / 2.0,
+                to[1] + to[3] / 2.0 - size / 2.0,
+            ],
+            to[2] / size,
+        ),
+        None => ([from[0], from[1]], 1.0),
+    };
+    let door = vault(s, t, size, "flying")
+        .absolute(at[0], at[1])
+        .scale(scale)
+        .motion(DOOR_LAND)
+        .scale_motion(DOOR_LAND)
+        .transition(Transition::none());
+    Some(
+        el().key("door-flight-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .transition(Transition::none())
+            .a11y_hidden()
+            .child(door),
+    )
+}
 
 #[cfg(test)]
 mod tests {
