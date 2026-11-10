@@ -6,7 +6,7 @@ use rune::{Color, El, Key, KeyEvent, Tx, col, el, text, tok::motion::LEAD};
 use crate::{
     format,
     state::{Page, State},
-    theme::{NUMBER, Theme},
+    theme::{HOLDING_TITLE, NUMBER, SECTION, Theme},
     view::{portfolio, ui},
 };
 
@@ -310,12 +310,76 @@ fn direction(key: &Key) -> Option<[f32; 2]> {
     }
 }
 
-/// A wash of today's move over the card, never a painted block. Quiet days stay close to steel;
-/// a large move reads, and only in the gain or loss colour.
-fn wash(change: Option<f64>, up: Color, down: Color) -> Option<Color> {
+/// The wash's opacity for the smallest visible move, and for the largest on the map.
+const WASH_FLOOR: f32 = 0.07;
+const WASH_CAP: f32 = 0.26;
+
+/// A wash of today's change over the card, never a painted block, only in the gain or loss
+/// colour. Its strength is the move against the largest on the map, which is never taken as
+/// less than 1%, so a calm day stays calm. The floor keeps a small move visibly a gain or a loss.
+fn wash(change: Option<f64>, largest: f64, up: Color, down: Color) -> Option<Color> {
     let change = change.filter(|change| change.is_finite() && *change != 0.0)?;
-    let strength = ((change.abs() / 2.5) as f32).clamp(0.0, 1.0);
-    Some((if change > 0.0 { up } else { down }).alpha(0.08 + 0.16 * strength))
+    let strength = (change.abs() / largest.max(1.0)).clamp(0.0, 1.0) as f32;
+    Some(
+        (if change > 0.0 { up } else { down })
+            .alpha(WASH_FLOOR + (WASH_CAP - WASH_FLOOR) * strength),
+    )
+}
+
+/// How much a tile says, from everything down to its name, which goes last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Detail {
+    Name,
+    Today,
+    Figures,
+    Full,
+}
+
+impl Detail {
+    fn for_tile(w: f32, h: f32) -> Detail {
+        if w >= 250.0 && h >= 150.0 {
+            Detail::Full
+        } else if w >= 140.0 && h >= 104.0 {
+            Detail::Figures
+        } else if w >= 72.0 && h >= 56.0 {
+            Detail::Today
+        } else {
+            Detail::Name
+        }
+    }
+
+    /// Where the text ends, from the tile's top, so a line below it never runs into it.
+    fn text_bottom(self, big_name: bool) -> f32 {
+        match self {
+            Detail::Full if big_name => 128.0,
+            Detail::Full => 120.0,
+            Detail::Figures => 118.0,
+            Detail::Today => 50.0,
+            Detail::Name => 30.0,
+        }
+    }
+}
+
+/// How tall a mid-sized tile must be to also say its share of the portfolio.
+const WEIGHT_ROOM: f32 = 124.0;
+
+/// A small labelled figure inside a large tile.
+fn figure(label: &str, value: String, color: Color, t: &Theme) -> El {
+    col()
+        .gap(2.0)
+        .min_w(0.0)
+        .child(ui::caption(label.to_string(), t))
+        .child(text(value).font(NUMBER).color(color).truncate())
+}
+
+/// A figure with its label after it, on one line, for a mid-sized tile.
+fn labelled(value: String, label: &str, color: Color, t: &Theme) -> El {
+    rune::row()
+        .center_y()
+        .gap(6.0)
+        .min_w(0.0)
+        .child(text(value).font(NUMBER).color(color))
+        .child(ui::caption(label.to_string(), t).truncate().shrink())
 }
 
 /// The map. Area is value, the tint is today's move, and a hairline keeps the asset class.
@@ -338,6 +402,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
         .zip(&rects)
         .map(|(position, rect)| (position.id, *rect))
         .collect();
+    let largest = rows
+        .iter()
+        .filter_map(|position| position.day_change_percent)
+        .filter(|change| change.is_finite())
+        .fold(0.0, |largest: f64, change| largest.max(change.abs()));
+    let total: f64 = weights.iter().sum();
     let k = &t.kit;
     el().key("holdings-map")
         .role("grid")
@@ -361,8 +431,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
             let change = position.day_change_percent;
             let points = portfolio::day_points(portfolio::day_amount(position), previous);
             let share = points.map_or_else(|| "-".to_string(), format::percent);
-            let show_value = rect.w >= 140.0 && rect.h >= 88.0;
-            let show_share = rect.w >= 72.0 && rect.h >= 56.0;
+            let own = format::optional_percent(change);
+            let weight = if total > 0.0 {
+                format!("{:.1}%", position.value.max(0.0) / total * 100.0)
+            } else {
+                "-".to_string()
+            };
             let neighbors = placed.clone();
             let gap = 3.0;
             let (x, y, w, h) = (
@@ -371,10 +445,14 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                 (rect.w - gap * 2.0).max(1.0),
                 (rect.h - gap * 2.0).max(1.0),
             );
-            let label = if points.is_some() {
-                format!("{name}, {share} of today's move")
-            } else {
-                name.clone()
+            let detail = Detail::for_tile(w, h);
+            let big_name = w >= 320.0 && h >= 200.0;
+            let label = match (change, points) {
+                (Some(_), Some(_)) => {
+                    format!("{name}, {own} today, {share} of the portfolio's move")
+                }
+                (Some(_), None) => format!("{name}, {own} today"),
+                _ => name.clone(),
             };
             el().key(format!("tile-{id}"))
                 .matched(format!("position-{id}"))
@@ -421,7 +499,7 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                     true
                 })
                 .children(
-                    wash(change, t.up, t.down)
+                    wash(change, largest, t.up, t.down)
                         .map(|wash| el().absolute(0.0, 0.0).size(w, h).fill(wash).a11y_hidden()),
                 )
                 .child(
@@ -431,34 +509,85 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                         .fill(t.class_color(&position.asset_class))
                         .a11y_hidden(),
                 )
-                .child(
-                    col()
+                .child({
+                    let name_font = match detail {
+                        Detail::Full if big_name => HOLDING_TITLE,
+                        Detail::Full => SECTION,
+                        _ => k.ty.ui_medium,
+                    };
+                    let own_color = t.optional_change(change);
+                    let share_color = t.optional_change(points);
+                    let body = col()
                         .absolute(0.0, 0.0)
                         .size(w, h)
                         .px(12.0)
                         .pt(10.0)
                         .pl(14.0)
                         .gap(2.0)
-                        .child(
-                            text(shown)
-                                .font(k.ty.ui_medium)
-                                .color(k.c.text_base)
-                                .truncate(),
-                        )
-                        .children(show_value.then(|| {
-                            text(s.money(position.value))
-                                .font(NUMBER)
-                                .color(k.c.text_muted)
-                                .truncate()
-                        }))
-                        .children(show_share.then(|| {
-                            text(share)
-                                .font(NUMBER)
-                                .color(t.optional_change(points))
-                                .truncate()
-                        })),
-                )
-                .children(tile_line(s, position, w, h, progress, t))
+                        .child(text(shown).font(name_font).color(k.c.text_base).truncate());
+                    match detail {
+                        Detail::Full => body
+                            .child(
+                                text(s.money(position.value))
+                                    .font(NUMBER)
+                                    .color(k.c.text_muted)
+                                    .truncate(),
+                            )
+                            .child(
+                                rune::row()
+                                    .w_full()
+                                    .mt(14.0)
+                                    .gap(20.0)
+                                    // Cash has no move today: no dashes, just its share.
+                                    .children(
+                                        change
+                                            .is_some()
+                                            .then(|| figure("Today", own.clone(), own_color, t)),
+                                    )
+                                    .children(
+                                        points.is_some().then(|| {
+                                            figure("Of today", share.clone(), share_color, t)
+                                        }),
+                                    )
+                                    .child(figure("Of portfolio", weight, k.c.text_base, t)),
+                            ),
+                        Detail::Figures => body
+                            .child(
+                                text(s.money(position.value))
+                                    .font(NUMBER)
+                                    .color(k.c.text_muted)
+                                    .truncate(),
+                            )
+                            .children(
+                                change
+                                    .is_some()
+                                    .then(|| labelled(own.clone(), "today", own_color, t).mt(6.0)),
+                            )
+                            .children(
+                                points
+                                    .is_some()
+                                    .then(|| labelled(share.clone(), "of today", share_color, t)),
+                            )
+                            // The first figure to go when the tile is short.
+                            .children(
+                                (h >= WEIGHT_ROOM)
+                                    .then(|| labelled(weight, "of portfolio", k.c.text_base, t)),
+                            ),
+                        Detail::Today => {
+                            body.child(text(own).font(NUMBER).color(own_color).truncate())
+                        }
+                        Detail::Name => body,
+                    }
+                })
+                .children(tile_line(
+                    s,
+                    position,
+                    w,
+                    h,
+                    detail.text_bottom(big_name),
+                    progress,
+                    t,
+                ))
         }))
 }
 
@@ -468,10 +597,13 @@ fn tile_line(
     position: &PositionDto,
     width: f32,
     height: f32,
+    text_bottom: f32,
     progress: f32,
     t: &Theme,
 ) -> Option<El> {
-    if height < 72.0 {
+    // Below the text, with a margin: no line at all rather than one squeezed flat.
+    let room = height - text_bottom - 20.0;
+    if room < 22.0 {
         return None;
     }
     let values = position.position_id.as_deref().and_then(|id| {
@@ -480,14 +612,15 @@ fn tile_line(
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;
-    let line_h = (height * 0.34).clamp(22.0, 96.0);
+    let line_h = (height * 0.45).clamp(22.0, 150.0).min(room);
     let line_w = (width - 28.0).max(8.0);
     Some(
         super::charts::sparkline(
             &values,
             line_w,
             line_h,
-            super::charts::spark_color(&values, t).alpha(0.85),
+            // Steel: the tint already says which way today went, and the line is a month.
+            t.kit.c.text_muted.alpha(0.7),
             progress,
         )
         .absolute(14.0, height - line_h - 10.0),
@@ -651,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn wash_uses_only_gain_and_loss_and_grows_with_the_move() {
+    fn wash_uses_only_gain_and_loss_and_scales_with_the_move() {
         let up = Color {
             r: 0.0,
             g: 1.0,
@@ -664,13 +797,44 @@ mod tests {
             b: 0.2,
             a: 1.0,
         };
-        assert_eq!(wash(None, up, down), None);
-        assert_eq!(wash(Some(0.0), up, down), None);
-        let quiet = wash(Some(0.4), up, down).unwrap();
-        let loud = wash(Some(3.0), up, down).unwrap();
-        let loss = wash(Some(-2.0), up, down).unwrap();
-        assert!(loud.a > quiet.a, "a bigger gain tints more");
-        assert!(loud.g > 0.5 && loss.r > 0.5);
-        assert!(loud.a < 0.3, "a wash, not a painted tile");
+        assert_eq!(wash(None, 2.0, up, down), None);
+        assert_eq!(wash(Some(0.0), 2.0, up, down), None);
+        let biggest = wash(Some(2.0), 2.0, up, down).unwrap();
+        let half = wash(Some(1.0), 2.0, up, down).unwrap();
+        let tiny = wash(Some(0.03), 2.0, up, down).unwrap();
+        let loss = wash(Some(-2.0), 2.0, up, down).unwrap();
+        assert!(
+            biggest.a > half.a && half.a > tiny.a,
+            "a bigger move tints more"
+        );
+        assert!(
+            (biggest.a - WASH_CAP).abs() < 1e-6,
+            "the largest move reaches the cap"
+        );
+        assert!(tiny.a >= WASH_FLOOR, "a small move still reads as a gain");
+        assert_eq!(
+            loss.a, biggest.a,
+            "a loss and a gain of one size weigh the same"
+        );
+        assert!(biggest.g > 0.5 && loss.r > 0.5);
+        assert!(biggest.a < 0.3, "a wash, not a painted tile");
+        // A calm day is measured against 1%, so its largest move doesn't glow.
+        let calm = wash(Some(0.2), 0.2, up, down).unwrap();
+        assert!(calm.a < half.a);
+    }
+
+    #[test]
+    fn a_tile_drops_detail_as_it_shrinks_and_keeps_its_name_last() {
+        assert_eq!(Detail::for_tile(400.0, 300.0), Detail::Full);
+        assert_eq!(Detail::for_tile(200.0, 120.0), Detail::Figures);
+        assert_eq!(Detail::for_tile(90.0, 60.0), Detail::Today);
+        assert_eq!(Detail::for_tile(40.0, 30.0), Detail::Name);
+        // Shrinking either side never adds detail.
+        let mut last = Detail::Full;
+        for size in (20..400).rev().step_by(10) {
+            let detail = Detail::for_tile(size as f32, size as f32 * 0.75);
+            assert!(detail <= last);
+            last = detail;
+        }
     }
 }

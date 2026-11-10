@@ -1140,6 +1140,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     },
                     t,
                 )
+                .wrap()
                 .key("map-about"),
             )
             .child(super::treemap::view(
