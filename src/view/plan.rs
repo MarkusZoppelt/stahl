@@ -1,6 +1,6 @@
 //! The workspace pages: Review, Rebalance, Policy and Documents.
 
-use portfolio_rs::{review::Severity, simulate::RebalanceScenario};
+use portfolio_rs::review::Severity;
 use rune::{Color, Cx, DragItem, El, ScrollSpec, col, icon, row, text, text_input};
 use rune_kit::{Button, ButtonVariant, Markdown, TextInput};
 
@@ -8,7 +8,7 @@ use crate::{
     format, icons,
     state::{Page, State},
     theme::Theme,
-    view::{guide, ui},
+    view::ui,
 };
 
 fn tone(severity: &Severity, t: &Theme) -> Color {
@@ -225,96 +225,7 @@ pub fn review(s: &State, t: &Theme) -> El {
     page
 }
 
-fn scenario_card(s: &State, scenario: &RebalanceScenario, t: &Theme) -> El {
-    let k = &t.kit;
-    let shares: Vec<_> = scenario
-        .new_allocation
-        .iter()
-        .map(|item| (item.percent, t.class_color(&item.asset_class)))
-        .collect();
-    // In the same order as afterwards, so a class that moves stays in its place.
-    let today: Vec<_> = scenario
-        .new_allocation
-        .iter()
-        .map(|item| {
-            let percent = s
-                .allocation
-                .iter()
-                .find(|current| current.asset_class == item.asset_class)
-                .map_or(0.0, |current| current.percent);
-            (percent, t.class_color(&item.asset_class))
-        })
-        .collect();
-    let trades = if scenario.trades.is_empty() {
-        text("No trades needed.").font(k.ty.ui).color(t.up)
-    } else {
-        ui::table(
-            &["Asset class", "Action", "Amount", "Share"],
-            scenario
-                .trades
-                .iter()
-                .map(|trade| {
-                    let color = if trade.action == "Reduce" {
-                        t.down
-                    } else {
-                        t.up
-                    };
-                    vec![
-                        text(trade.asset_class.clone())
-                            .font(k.ty.ui)
-                            .color(k.c.text_base),
-                        ui::badge(trade.action.clone(), color),
-                        ui::number(s.money(trade.amount), k.c.text_base),
-                        ui::number(
-                            format!("{:.1}%", trade.percent_of_portfolio),
-                            k.c.text_muted,
-                        ),
-                    ]
-                })
-                .collect(),
-            t,
-        )
-    };
-    ui::card(t)
-        .child(ui::header(
-            scenario.name.clone(),
-            scenario.description.clone(),
-            t,
-        ))
-        .child(trades)
-        // portfolio_rs doesn't project every scenario, so there may be nothing to draw.
-        .children((!scenario.new_allocation.is_empty()).then(|| {
-            col()
-                .w_full()
-                .gap(8.0)
-                .child(ui::caption("Allocation today", t))
-                .child(ui::stacked_bar(&today, t))
-                .child(ui::caption("Allocation afterwards", t).mt(4.0))
-                .child(ui::stacked_bar(&shares, t))
-                .child(row().center_y().flex_wrap().gaps(4.0, 12.0).children(
-                    scenario.new_allocation.iter().map(|item| {
-                        row()
-                            .center_y()
-                            .gap(4.0)
-                            .center_y()
-                            .child(ui::dot(t.class_color(&item.asset_class)))
-                            .child(ui::caption(
-                                format!("{} {:.1}%", item.asset_class, item.percent),
-                                t,
-                            ))
-                    }),
-                ))
-        }))
-        .child(
-            ui::caption(
-                format!("Cash impact: {}", s.signed_money(scenario.cash_impact)),
-                t,
-            )
-            .help(guide::CASH_IMPACT),
-        )
-}
-
-pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+pub fn rebalance(s: &State, t: &Theme, _cx: &Cx<State>) -> El {
     if !s.has_policy {
         return no_policy(
             "rebalance-no-policy",
@@ -361,26 +272,17 @@ pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .gap(4.0)
                     .child(ui::copy_button(
                         "copy-simulation",
-                        simulation.to_markdown(),
+                        super::rebalance::markdown(s),
                         t,
                     ))
                     .child(ui::refresh_button(
                         "refresh-simulation",
-                        State::load_simulation,
+                        State::refresh_rebalance,
                         t,
                     )),
             ),
     )
     .child(super::rebalance::instrument(s, t))
-    .child(
-        ui::columns(ui::room(s, cx), [2, 1, 1], 16.0).children(
-            simulation
-                .scenarios
-                .iter()
-                .enumerate()
-                .map(|(index, scenario)| ui::entering(scenario_card(s, scenario, t), index)),
-        ),
-    )
 }
 
 const STRATEGIES: [(&str, &str); 4] = [

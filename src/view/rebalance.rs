@@ -1,7 +1,7 @@
 //! The rebalance bar: a split the owner can drag, with the trades that would get there.
 
 use rune::{Color, Cursor, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, el, row, text};
-use rune_kit::{RollingText, TextInput};
+use rune_kit::{Button, ButtonVariant, RollingText, TextInput};
 
 use crate::{
     format,
@@ -112,6 +112,8 @@ fn shown(s: &State, classes: &[Class]) -> Plan {
         RebalanceOrigin::Flow(amount) => {
             rebalance::place(classes, amount).unwrap_or_else(|_| rebalance::today(classes))
         }
+        RebalanceOrigin::Full => rebalance::full(classes),
+        RebalanceOrigin::Conservative => rebalance::conservative(classes),
         RebalanceOrigin::Today | RebalanceOrigin::Custom => rebalance::today(classes),
     }
 }
@@ -136,6 +138,7 @@ fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
         .child(policy_track(classes, t))
         .child(bar(s, t, classes, plan))
         .child(legend(s, t, classes, plan))
+        .child(presets(s, t))
         .child(amount_field(s, t, plan))
 }
 
@@ -454,6 +457,91 @@ fn shown_value(s: &State, index: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn presets(s: &State, t: &Theme) -> El {
+    let button = |label: &'static str, origin: RebalanceOrigin, key: &'static str| {
+        let active = s.rebalance.origin == origin;
+        let mut button = Button::new(label).on_press(move |s: &mut State| choose(s, origin));
+        if active {
+            button = button.variant(ButtonVariant::Submit);
+        }
+        button.build(&t.kit).key(key)
+    };
+    row()
+        .center_y()
+        .flex_wrap()
+        .gaps(8.0, 8.0)
+        .child(button("Today", RebalanceOrigin::Today, "rebalance-today"))
+        .child(button(
+            "Full Rebalance to Targets",
+            RebalanceOrigin::Full,
+            "rebalance-full",
+        ))
+        .child(button(
+            "Conservative Partial Rebalance",
+            RebalanceOrigin::Conservative,
+            "rebalance-conservative",
+        ))
+}
+
+fn choose(s: &mut State, origin: RebalanceOrigin) {
+    s.rebalance.origin = origin;
+    s.rebalance.amount.replace_text("");
+    s.rebalance.amount_error = None;
+    glide(s);
+}
+
+/// The plan on screen, as Markdown, whatever produced it.
+pub fn markdown(s: &State) -> String {
+    let classes = load_classes(s);
+    let plan = shown(s, &classes);
+    let (heading, detail) = plan_copy(s);
+    let policy = s
+        .simulation
+        .data
+        .as_ref()
+        .map(|simulation| simulation.policy_name.clone())
+        .unwrap_or_default();
+    let currency = s.currency();
+    rebalance::to_markdown(
+        &plan,
+        &classes,
+        heading,
+        detail,
+        &policy,
+        &currency,
+        format::amount,
+    )
+}
+
+fn plan_copy(s: &State) -> (&'static str, &'static str) {
+    match s.rebalance.origin {
+        RebalanceOrigin::Flow(amount) if amount >= 0.0 => (
+            "Where new money goes",
+            "Buying only, selling nothing, as close to the targets as that gets.",
+        ),
+        RebalanceOrigin::Flow(_) => (
+            "Where a withdrawal comes from",
+            "Selling only, buying nothing, as close to the targets as that gets.",
+        ),
+        RebalanceOrigin::Full => (
+            "Full Rebalance to Targets",
+            "Rebalance all asset classes to policy targets.",
+        ),
+        RebalanceOrigin::Conservative => (
+            "Conservative Partial Rebalance",
+            "Only rebalance positions that exceed tolerance bands, by half the drift.",
+        ),
+        RebalanceOrigin::Custom => (
+            "This split",
+            "What the bar is showing now. Nothing has been traded.",
+        ),
+        RebalanceOrigin::Today => (
+            "As it is",
+            "The portfolio as it is. Drag a boundary, or say how much you have to invest.",
+        ),
+    }
+}
+
 fn amount_field(s: &State, t: &Theme, plan: &Plan) -> El {
     let input = TextInput::new(&s.rebalance.amount)
         .placeholder("2000")
@@ -538,24 +626,7 @@ fn glide(s: &mut State) {
 }
 
 fn trades_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let (heading, detail) = match s.rebalance.origin {
-        RebalanceOrigin::Flow(amount) if amount >= 0.0 => (
-            "Where new money goes",
-            "Buying only, selling nothing, as close to the targets as that gets.",
-        ),
-        RebalanceOrigin::Flow(_) => (
-            "Where a withdrawal comes from",
-            "Selling only, buying nothing, as close to the targets as that gets.",
-        ),
-        RebalanceOrigin::Custom => (
-            "This split",
-            "What the bar is showing now. Nothing has been traded.",
-        ),
-        RebalanceOrigin::Today => (
-            "As it is",
-            "The portfolio as it is. Drag a boundary, or say how much you have to invest.",
-        ),
-    };
+    let (heading, detail) = plan_copy(s);
     ui::card(t)
         .child(ui::header(heading, detail, t))
         .child(trade_table(s, t, classes, plan))

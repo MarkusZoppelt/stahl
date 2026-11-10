@@ -438,6 +438,10 @@ pub enum RebalanceOrigin {
     Today,
     /// New money, or a withdrawal, placed by buying or selling only.
     Flow(f64),
+    /// Every class at its policy target.
+    Full,
+    /// Halfway back, and only for classes outside their band.
+    Conservative,
     /// A boundary the owner dragged or stepped.
     Custom,
 }
@@ -1884,6 +1888,15 @@ impl State {
             |backend| async move { backend.review().await },
             |state, result| state.review.finish(result),
         );
+    }
+
+    /// Prices again, and the bar goes back to the portfolio as it is.
+    pub fn refresh_rebalance(&mut self) {
+        self.rebalance.origin = RebalanceOrigin::Today;
+        self.rebalance.amount.replace_text("");
+        self.rebalance.amount_error = None;
+        self.load_simulation();
+        self.load_review();
     }
 
     pub fn load_simulation(&mut self) {
