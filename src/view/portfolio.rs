@@ -1169,6 +1169,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .on_hover_change(move |s: &mut State, over, _| {
                 s.donut_hover = over.then_some(index);
             })
+            .children(ui::class_flash(s, &item.asset_class, 8.0, t))
             .child(
                 row()
                     .center_y()

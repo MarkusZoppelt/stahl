@@ -526,10 +526,15 @@ pub struct State {
     pub updated_at: Option<String>,
     /// How many times prices have landed, to mark the moment on screen.
     pub price_updates: u64,
+    /// What the last refresh moved: each position (by id) whose price changed, and by how much,
+    /// as a fraction. Empty when it moved nothing.
+    pub price_moves: Vec<(usize, f64)>,
     refreshed: Option<Instant>,
 
     // The window.
     pub page: Page,
+    /// The page before this one, so the way between them can show which way the owner went.
+    pub previous_page: Page,
     /// The phone layout: a tab bar instead of the sidebar, one column, the details in place of the
     /// table. The platform decides (on iOS, UIKit's horizontal size class), not the window's width.
     pub compact: bool,
@@ -748,8 +753,10 @@ impl State {
             error: None,
             updated_at: None,
             price_updates: 0,
+            price_moves: Vec::new(),
             refreshed: None,
             page: Page::Overview,
+            previous_page: Page::Overview,
             compact: false,
             more: false,
             door_turns: 0,
@@ -1718,6 +1725,9 @@ impl State {
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
+        if page != self.page {
+            self.previous_page = self.page;
+        }
         self.page = page;
         self.more = false;
         self.chart_hover = None;
@@ -1836,9 +1846,15 @@ impl State {
         }
         // History follows the file on disk, so unsaved edits don't record.
         let record = !self.dirty;
+        let before: Vec<(usize, f64)> = self
+            .positions
+            .iter()
+            .map(|position| (position.id, position.price))
+            .collect();
         self.change_and_reload(
             record,
-            |state| {
+            move |state| {
+                state.price_moves = price_moves(&before, &state.positions);
                 state.price_updates += 1;
                 state.show_toast("Prices updated");
             },
@@ -2497,8 +2513,48 @@ pub fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Which positions a refresh moved, and by what fraction of their old price. A position that
+/// wasn't there before, or had no price, didn't move: nothing is compared with nothing.
+pub fn price_moves(before: &[(usize, f64)], after: &[PositionDto]) -> Vec<(usize, f64)> {
+    after
+        .iter()
+        .filter_map(|position| {
+            let (_, old) = before.iter().find(|(id, _)| *id == position.id)?;
+            let change = (position.price - old) / old;
+            (old.abs() > f64::EPSILON && change.is_finite() && change.abs() > 1e-9)
+                .then_some((position.id, change))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refresh_moves_only_the_prices_that_changed() {
+        let position = |id: usize, price: f64| {
+            serde_json::from_value::<PositionDto>(serde_json::json!({
+                "id": id, "assetClass": "Stocks", "amount": 1.0, "price": price, "value": price,
+                "purchases": []
+            }))
+            .unwrap()
+        };
+        let before = [(0, 100.0), (1, 50.0), (2, 0.0)];
+        let after = [
+            position(0, 101.0),
+            position(1, 50.0),
+            position(2, 3.0),
+            position(3, 9.0),
+        ];
+        let moves = price_moves(&before, &after);
+        assert_eq!(
+            moves.len(),
+            1,
+            "unchanged, unpriced and new positions didn't move"
+        );
+        assert_eq!(moves[0].0, 0);
+        assert!((moves[0].1 - 0.01).abs() < 1e-12);
+    }
+
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

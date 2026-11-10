@@ -6,8 +6,8 @@ use std::{
 };
 
 use rune::{
-    Align, Color, Cx, Cycle, El, Icon, Image, ImageCache, LoopSpec, Shape, Transition, canvas, col,
-    el, icon, row, text, theme::hex, tok::motion::LEAD,
+    Align, Beat, Color, Cx, Cycle, El, Icon, Image, ImageCache, LoopSpec, Sequence, Shape,
+    Transition, canvas, col, el, icon, row, text, theme::hex, tok::motion::LEAD,
 };
 use rune_kit::{Button, ButtonVariant};
 
@@ -117,16 +117,138 @@ pub fn rule(t: &Theme) -> El {
 
 /// A card that sharpens into place after the ones before it.
 pub fn entering(card: El, index: usize) -> El {
-    card.enter_delay(index as f32 * 0.05).transition(
-        Transition::offset(0.0, 12.0)
-            .combined(Transition::blur(5.0))
-            .combined(Transition::opacity()),
-    )
+    card.enter_delay(index as f32 * STAGGER)
+        .transition(arrive())
+}
+
+// --- Motion ---
+//
+// The few ways things move, decided once (DESIGN.md, "Motion"). A page reaches for these rather
+// than writing its own offsets and springs.
+
+/// Between cards arriving one after another.
+pub const STAGGER: f32 = 0.05;
+
+/// How far a page travels as it arrives, in the direction the owner moved.
+pub const PAGE_TRAVEL: f32 = 10.0;
+
+/// Press feedback: a card or tile gives a little, a row in a list barely.
+pub const PRESS_CARD: f32 = 0.98;
+pub const PRESS_ROW: f32 = 0.995;
+
+/// Content arriving: it rises a little and sharpens into place.
+pub fn arrive() -> Transition {
+    Transition::offset(0.0, 12.0)
+        .combined(Transition::blur(5.0))
+        .combined(Transition::opacity())
 }
 
 /// A small thing arriving or leaving in place: a mark, a badge, a button that wasn't there.
 pub fn appear() -> Transition {
     Transition::scale(0.9).combined(Transition::opacity())
+}
+
+/// Something that floats over the page: the palette, a menu, a dialog of our own.
+pub fn float_in() -> Transition {
+    Transition::scale(0.96)
+        .combined(Transition::blur(4.0))
+        .combined(Transition::opacity())
+}
+
+/// A banner or an error, dropping in from above where it sits.
+pub fn notice_in() -> Transition {
+    Transition::offset(0.0, -6.0).combined(Transition::opacity())
+}
+
+/// Which way the owner moved through the app's pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Travel {
+    /// Further down the sidebar, or right along the phone's tabs.
+    Forward,
+    /// Back up, or left.
+    Back,
+}
+
+/// A page arriving: it comes from the side the owner moved towards, down the sidebar or along
+/// a phone's tabs, and the page it replaces just fades. `across` is the phone's horizontal tabs.
+pub fn page_arrive(travel: Travel, across: bool) -> Transition {
+    let distance = match travel {
+        Travel::Forward => PAGE_TRAVEL,
+        Travel::Back => -PAGE_TRAVEL,
+    };
+    let (x, y) = if across {
+        (distance * 2.0, 0.0)
+    } else {
+        (0.0, distance)
+    };
+    Transition::asymmetric(
+        Transition::offset(x, y)
+            .combined(Transition::blur(3.0))
+            .combined(Transition::opacity()),
+        Transition::opacity(),
+    )
+}
+
+/// A refresh moved this: a wash of the gain or loss colour that shows once and fades. Keyed by
+/// the refresh, so the next one replays it; under reduced motion it lands faded, showing nothing.
+pub fn flash(key: impl Into<String>, updates: u64, color: Color, radius: f32) -> El {
+    el().key(format!("{}-flash-{updates}", key.into()))
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(radius)
+        .fill(color.alpha(0.10))
+        .a11y_hidden()
+        .sequence(Sequence::new(FLASH))
+}
+
+/// The flash: quickly in, then a slow fade.
+pub const FLASH: &[Beat] = &[
+    Beat::new(0.0).opacity(0.0),
+    Beat::new(0.12).opacity(1.0),
+    Beat::new(0.9).opacity(0.0),
+];
+
+/// How the last refresh moved an asset class, as the change in its value: positive, negative,
+/// or `None` if none of its prices moved.
+pub fn class_move(s: &State, asset_class: &str) -> Option<f64> {
+    let mut moved = false;
+    let mut change = 0.0;
+    for position in s.positions.iter().filter(|p| p.asset_class == asset_class) {
+        if let Some((_, fraction)) = s.price_moves.iter().find(|(id, _)| *id == position.id) {
+            moved = true;
+            // The value it had before, times how far its price moved.
+            change += position.value / (1.0 + fraction) * fraction;
+        }
+    }
+    (moved && change != 0.0).then_some(change)
+}
+
+/// The flash for an asset class whose prices the last refresh moved.
+pub fn class_flash(s: &State, asset_class: &str, radius: f32, t: &Theme) -> Option<El> {
+    class_move(s, asset_class).map(|change| {
+        flash(
+            format!("class-{asset_class}"),
+            s.price_updates,
+            t.change(change),
+            radius,
+        )
+    })
+}
+
+/// The flash for position `id` if the last refresh moved its price, in the direction it moved.
+pub fn price_flash(s: &State, id: usize, radius: f32, t: &Theme) -> Option<El> {
+    s.price_moves
+        .iter()
+        .find(|(moved, _)| *moved == id)
+        .map(|(_, change)| {
+            flash(
+                format!("position-{id}"),
+                s.price_updates,
+                t.change(*change),
+                radius,
+            )
+        })
 }
 
 /// One soft light from above, on the wall behind a page.
@@ -343,7 +465,7 @@ pub fn danger(message: impl Into<String>, t: &Theme) -> El {
         .fill(t.down.alpha(0.12))
         .border(1.0, t.down.alpha(0.6))
         .role("alert")
-        .transition(Transition::offset(0.0, -6.0).combined(Transition::opacity()))
+        .transition(notice_in())
         .child(icon(&icons::TRIANGLE_ALERT, 15.0).color(t.down))
         .child(
             text(message.into())

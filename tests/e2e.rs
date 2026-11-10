@@ -2725,3 +2725,38 @@ fn the_door_opens_once_turns_on_a_refresh_and_marks_what_needs_attention() {
         Some("Stahl Capital. 1 thing needs attention")
     );
 }
+
+#[test]
+fn moving_between_pages_knows_which_way_and_a_refresh_flashes_what_moved() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Review.key());
+    assert_eq!(app.rt.state.previous_page, Page::Overview);
+    app.click(Page::Allocation.key());
+    assert_eq!(app.rt.state.previous_page, Page::Review);
+
+    // The demo's quotes are fixed, so a refresh moves nothing and nothing flashes.
+    app.click("refresh-prices");
+    assert!(app.rt.state.price_moves.is_empty());
+    let flashes = |app: &Harness| {
+        app.rt
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.contains("-flash-"))
+            })
+            .count()
+    };
+    assert_eq!(flashes(&app), 0);
+
+    // When one does move, its asset class washes once in its colour.
+    let id = app.rt.state.positions[0].id;
+    app.rt.update(move |state, _| {
+        state.price_moves = vec![(id, 0.01)];
+        state.price_updates += 1;
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(flashes(&app) > 0, "what moved flashes");
+}

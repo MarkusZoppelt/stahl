@@ -84,6 +84,24 @@ fn main() {
         s.settle();
         s.updates.dialog = dialog;
     }
+    /// What a refresh that moved two prices leaves behind: stocks up, long bonds down. The
+    /// demo's quotes are fixed, so the figures on screen stay as they were; this shows the flash.
+    fn moved_prices(s: &mut State) {
+        let id = |s: &State, ticker: &str| {
+            s.positions
+                .iter()
+                .find(|position| position.ticker.as_deref() == Some(ticker))
+                .map(|position| position.id)
+        };
+        s.price_moves = [
+            id(s, "SPY").map(|id| (id, 0.012)),
+            id(s, "TLT").map(|id| (id, -0.01)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        s.price_updates += 1;
+    }
     /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
     fn phone(s: &mut State, page: Page) {
         s.compact = true;
@@ -256,6 +274,15 @@ fn main() {
             ("door-turn", |s| {
                 scene(s, Page::Overview);
                 s.refresh_prices();
+            }),
+            // A refresh that moves two prices: what moved flashes once in its colour.
+            ("price-moves", |s| {
+                scene(s, Page::Allocation);
+                moved_prices(s);
+            }),
+            ("phone-price-moves", |s| {
+                phone(s, Page::Allocation);
+                moved_prices(s);
             }),
             ("door-attention", |s| {
                 scene(s, Page::Overview);

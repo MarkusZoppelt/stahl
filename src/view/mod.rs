@@ -3,8 +3,8 @@
 use std::{env, mem};
 
 use rune::{
-    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
-    text, tok::motion::LEAD,
+    Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Tx, col, el, icon, row, text,
+    tok::motion::LEAD,
 };
 use rune_kit::{
     Button, ButtonVariant, IconButton, IconButtonVariant, RollingText, Spinner, root,
@@ -177,7 +177,7 @@ fn welcome(s: &State, t: &Theme) -> El {
             .focusable(true)
             .grow(1.0)
             .hover(k.c.hover)
-            .press_scale(0.98);
+            .press_scale(ui::PRESS_CARD);
         // A column of cards on a phone, each a row; side by side on a desktop, each a column.
         let card = if compact {
             card.padding(14.0)
@@ -513,7 +513,7 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
                 .build(k)
                 .key("save")
                 .mr(6.0)
-                .transition(Transition::scale(0.9).combined(Transition::opacity()))
+                .transition(ui::appear())
         }))
         .child(
             tool(&icons::CIRCLE_HELP, "Guide", t)
@@ -628,6 +628,31 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
     }
 }
 
+/// Every page in the order the sidebar lists them.
+const PAGE_ORDER: [Page; 11] = [
+    Page::Overview,
+    Page::Holdings,
+    Page::Allocation,
+    Page::Performance,
+    Page::Review,
+    Page::Rebalance,
+    Page::Policy,
+    Page::Documents,
+    Page::Briefing,
+    Page::Health,
+    Page::Settings,
+];
+
+/// Which way the owner went to reach this page: down the sidebar is forward.
+fn travel(s: &State) -> ui::Travel {
+    let at = |page: Page| PAGE_ORDER.iter().position(|each| *each == page);
+    if at(s.page) >= at(s.previous_page) {
+        ui::Travel::Forward
+    } else {
+        ui::Travel::Back
+    }
+}
+
 /// The scrolling page: any error, its heading, what it's for, then `content`. `key` names it, so a
 /// new page replaces the old one with a transition. `margin` is its side margin.
 fn page_column(
@@ -664,11 +689,7 @@ fn page_column(
                 .pt(20.0)
                 .pb(40.0)
                 .gap(24.0)
-                .transition(
-                    Transition::offset(0.0, 8.0)
-                        .combined(Transition::blur(3.0))
-                        .combined(Transition::opacity()),
-                )
+                .transition(ui::page_arrive(travel(s), s.compact))
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
                 .child(heading)
                 .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
@@ -725,6 +746,18 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_page_has_a_place_in_the_order() {
+        for page in Page::PORTFOLIO
+            .into_iter()
+            .chain(Page::PLAN)
+            .chain(Page::INSIGHTS)
+            .chain([Page::Settings])
+        {
+            assert!(PAGE_ORDER.contains(&page), "{page:?}");
+        }
+    }
 
     #[test]
     fn freshness_never_calls_doubtful_prices_live() {

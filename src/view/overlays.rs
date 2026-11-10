@@ -1,9 +1,6 @@
 //! What floats above the window: the command palette, dialogs, toasts, and the parse failure.
 
-use rune::{
-    El, Icon, Key, ScrollSpec, TextEdit, Transition, Tx, col, el, icon, row, text,
-    tok::motion::LEAD,
-};
+use rune::{El, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, tok::motion::LEAD};
 use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toast, ToastRegion};
 
 use crate::{
@@ -375,11 +372,7 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
         .w_full()
         .max_w(560.0)
         .h(440.0)
-        .transition(
-            Transition::scale(0.96)
-                .combined(Transition::blur(4.0))
-                .combined(Transition::opacity()),
-        )
+        .transition(ui::float_in())
         .modal(true, |s: &mut State| s.palette = None)
         .child(col().w_full().padding(6.0).child(input))
         .child(el().w_full().h(1.0).fill(k.c.border_muted))
