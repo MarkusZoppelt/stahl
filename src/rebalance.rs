@@ -307,6 +307,14 @@ fn trades(classes: &[Class], values: &[f64], total: f64) -> Vec<Trade> {
         .collect()
 }
 
+/// A plan with these class values. Lengths that don't match are ignored.
+pub fn from_values(classes: &[Class], values: Vec<f64>, external: f64) -> Plan {
+    if values.len() != classes.len() {
+        return today(classes);
+    }
+    plan(classes, values, external)
+}
+
 fn plan(classes: &[Class], values: Vec<f64>, external: f64) -> Plan {
     let total = values.iter().sum();
     let trades = trades(classes, &values, total);

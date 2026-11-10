@@ -109,6 +109,11 @@ fn main() {
             ("performance", |s| scene(s, Page::Performance)),
             ("review", |s| scene(s, Page::Review)),
             ("rebalance", |s| scene(s, Page::Rebalance)),
+            ("rebalance-light", |s| {
+                scene(s, Page::Rebalance);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {
                 scene(s, Page::Documents);

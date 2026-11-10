@@ -2644,3 +2644,66 @@ fn a_phone_can_lock_the_vault_and_ticks_along_the_chart() {
     app.rt.frame(1.0 / 60.0);
     assert!(first.is_some() && app.rt.state.chart_point > first);
 }
+
+#[test]
+fn a_rebalance_boundary_moves_by_drag_and_by_key() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    assert!(app.has_text("Stahl never trades."));
+    let handle = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-handle-0"))
+        .expect("the first boundary");
+    assert_eq!(handle.role, "slider");
+    assert!(
+        handle
+            .label
+            .as_deref()
+            .is_some_and(|label| label.contains("Stocks") && label.contains("Bonds")),
+        "the handle names the classes it separates"
+    );
+
+    let bar = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-bar"))
+        .expect("the bar");
+    let [x, y, w, h] = bar.rect;
+    // Stocks is about 37% of the demo book. Grab the boundary and pull it right.
+    let from = x + w * 0.37;
+    let mid = y + h / 2.0;
+    app.rt.pointer_move(from, mid);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(from, mid);
+    app.rt.frame(1.0 / 60.0);
+    let skipped = app.rt.live_only_events();
+    app.rt.pointer_move(from + 90.0, mid);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(from + 140.0, mid);
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.rt.live_only_events() > skipped,
+        "a drag must not rebuild the view on every move"
+    );
+    app.rt.pointer_up(from + 140.0, mid);
+    app.settle();
+    assert!(app.rt.state.rebalance.custom, "letting go keeps the split");
+    assert!(app.has_text("Increase") || app.has_text("Reduce"));
+
+    app.rt.update(|_, tx| tx.focus("rebalance-handle-0", true));
+    app.rt.frame(1.0 / 60.0);
+    let before = app.rt.state.rebalance.values.clone();
+    app.press(Key::Left);
+    assert_ne!(
+        app.rt.state.rebalance.values, before,
+        "Left moves the boundary"
+    );
+    app.press(Key::Enter);
+    assert!(
+        app.rt.state.rebalance.custom,
+        "Enter snaps toward a target and stays a plan"
+    );
+}

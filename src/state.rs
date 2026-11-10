@@ -29,7 +29,7 @@ use portfolio_rs::{
     },
     validate::ValidationReport,
 };
-use rune::{ClipboardContent, FileDialogOptions, Live, TextEdit, Tx, Waker};
+use rune::{ClipboardContent, Color, FileDialogOptions, Live, LiveText, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
@@ -428,6 +428,75 @@ pub struct SettingsForm {
     pub error: Option<String>,
 }
 
+/// How many classes the rebalance bar prepares live values for.
+const REBALANCE_SLOTS: usize = 12;
+
+/// The allocation being dragged on the Rebalance page. Live values move the bar without
+/// rebuilding the view; the view must not read `press`, `held` or `drag_values`.
+pub struct RebalancePage {
+    /// Class names `values` belong to. A mismatch means the portfolio changed under a drag.
+    pub names: Vec<String>,
+    pub values: Vec<f64>,
+    pub custom: bool,
+    /// A boundary is held. The view reads this to show live amounts instead of rolling ones.
+    pub dragging: bool,
+    /// The bar has been measured, so its segments can follow live rects.
+    pub placed: bool,
+    pub bar_width: f32,
+    pub boundary: Option<usize>,
+    pub press: Vec<f64>,
+    pub held: Option<f64>,
+    pub drag_values: Vec<f64>,
+    pub rects: Vec<Live<[f32; 4]>>,
+    pub offsets: Vec<Live<[f32; 2]>>,
+    pub amounts: Vec<LiveText>,
+    pub percents: Vec<LiveText>,
+    pub actions: Vec<LiveText>,
+    pub bands: Vec<Live<Color>>,
+    pub inks: Vec<Live<Color>>,
+}
+
+impl RebalancePage {
+    fn new() -> Self {
+        Self {
+            names: Vec::new(),
+            values: Vec::new(),
+            custom: false,
+            dragging: false,
+            placed: false,
+            bar_width: 0.0,
+            boundary: None,
+            press: Vec::new(),
+            held: None,
+            drag_values: Vec::new(),
+            rects: (0..REBALANCE_SLOTS)
+                .map(|_| Live::new([0.0, 0.0, 0.0, BAR_RECT]))
+                .collect(),
+            offsets: (0..REBALANCE_SLOTS)
+                .map(|_| Live::new([0.0, 0.0]))
+                .collect(),
+            amounts: (0..REBALANCE_SLOTS)
+                .map(|_| LiveText::new("€000,000.00"))
+                .collect(),
+            percents: (0..REBALANCE_SLOTS)
+                .map(|_| LiveText::new("100.0%"))
+                .collect(),
+            actions: (0..REBALANCE_SLOTS)
+                .map(|_| LiveText::new("Increase"))
+                .collect(),
+            bands: (0..REBALANCE_SLOTS)
+                .map(|_| Live::new(Color::TRANSPARENT))
+                .collect(),
+            inks: (0..REBALANCE_SLOTS)
+                .map(|_| Live::new(Color::TRANSPARENT))
+                .collect(),
+        }
+    }
+}
+
+/// Placeholder height so a live rect is a bar, not a point, before the first layout.
+const BAR_RECT: f32 = 48.0;
+
 pub struct PolicyPage {
     pub policy: Option<Policy>,
     pub editor: TextEdit,
@@ -591,6 +660,8 @@ pub struct State {
     pub selected: Option<usize>,
     pub review: Loadable<Review>,
     pub simulation: Loadable<RebalanceSimulation>,
+    /// The allocation the Rebalance page is being played with.
+    pub rebalance: RebalancePage,
     pub briefing: Loadable<Briefing>,
     pub validation: Loadable<ValidationReport>,
     pub doctor: Loadable<WorkspaceHealth>,
@@ -792,6 +863,7 @@ impl State {
             selected: None,
             review: Loadable::default(),
             simulation: Loadable::default(),
+            rebalance: RebalancePage::new(),
             briefing: Loadable::default(),
             validation: Loadable::default(),
             doctor: Loadable::default(),
@@ -1737,7 +1809,11 @@ impl State {
         match self.page {
             Page::Overview | Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
-            Page::Rebalance => self.load_simulation(),
+            Page::Rebalance => {
+                self.load_simulation();
+                // Targets and tolerance bands live on the review, not the simulation.
+                self.load_review();
+            }
             Page::Briefing => self.load_briefing(),
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),

@@ -371,6 +371,7 @@ pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     )),
             ),
     )
+    .child(super::rebalance::instrument(s, t))
     .child(
         ui::columns(ui::room(s, cx), [2, 1, 1], 16.0).children(
             simulation
