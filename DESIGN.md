@@ -34,6 +34,7 @@ All of these live in `src/theme.rs`. A page never defines its own.
 |---|---|
 | `HERO` | The total value. Newsreader 60, light, tabular figures (`HERO_COMPACT`, 46, on a phone) |
 | `STATEMENT` | The welcome screen's sentence. Newsreader 46 (`STATEMENT_COMPACT`, 32, on a phone) |
+| `LEDE` | The Overview's sentences about what changed. Newsreader 26 (`LEDE_COMPACT`, 21, on a phone) |
 | `PAGE_TITLE` | Every page's name, with its section in a caption above. Newsreader 32 |
 | `HOLDING_TITLE` | A holding's name in the details pane. Newsreader 24 |
 | `FIGURE` | Key figures beside a label (`ui::stat`). Newsreader 24, tabular |

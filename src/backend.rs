@@ -40,9 +40,11 @@ use portfolio_rs::{
     validate::ValidationReport,
     workspace,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Error as JsonError, from_value, to_value};
 use tokio::{runtime::Handle, sync::RwLock};
+
+use crate::statement::{Change, Contribution, Seen};
 
 pub type BackendResult<T> = Result<T, String>;
 
@@ -54,6 +56,33 @@ fn report<E: Display>(error: E) -> String {
 /// The id `portfolio_rs snapshot` records under by default, so history made
 /// here and on the command line is the same history.
 const HISTORY_ID: &str = "main";
+
+/// Beside a portfolio's history: the days its owner looked at it.
+const SEEN_FILE: &str = "seen.json";
+
+#[derive(Serialize, Deserialize)]
+struct SeenFile {
+    last: String,
+    #[serde(default)]
+    before: Option<String>,
+}
+
+fn read_seen(text: &str) -> Option<Seen> {
+    let file: SeenFile = serde_json::from_str(text).ok()?;
+    Some(Seen {
+        last: snapshots::strict_date(&file.last)?,
+        before: file.before.as_deref().and_then(snapshots::strict_date),
+    })
+}
+
+fn write_seen(seen: Seen) -> String {
+    let day = |day: NaiveDate| day.format("%Y-%m-%d").to_string();
+    let file = SeenFile {
+        last: day(seen.last),
+        before: seen.before.map(day),
+    };
+    serde_json::to_string(&file).unwrap_or_default() + "\n"
+}
 
 /// What a positions file holds before anything is added to it.
 const NO_POSITIONS: &str = "[]\n";
@@ -893,6 +922,103 @@ impl Backend {
         self.state.refresh_prices().await;
     }
 
+    // --- Since the last look ---
+
+    /// Where the days the owner looked at this portfolio are kept: beside its history, so a
+    /// workspace keeps its own, and a test's data directory keeps the test's. Dates only.
+    async fn seen_path(&self) -> Option<PathBuf> {
+        Some(self.history_path().await?.parent()?.join(SEEN_FILE))
+    }
+
+    /// Note a look at the open portfolio today, and return the record as it stood before it.
+    pub async fn visit(&self) -> BackendResult<Option<Seen>> {
+        let Some(path) = self.seen_path().await else {
+            return Ok(None);
+        };
+        let previous = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| read_seen(&text));
+        let next = Seen::after_visit(previous, Local::now().date_naive());
+        if Some(next) != previous {
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).map_err(report)?;
+            }
+            atomic_write::write_atomic_private(&path, write_seen(next).as_bytes())
+                .map_err(report)?;
+        }
+        Ok(previous)
+    }
+
+    /// The portfolio between the last stored valuation on or before `since` (the oldest one, for
+    /// `None`) and now. `None` when there is nothing to compare: no such valuation, a price
+    /// missing today, a flow of unknown size, or an encrypted portfolio, which has no history.
+    pub async fn change_since(&self, since: Option<NaiveDate>) -> BackendResult<Option<Change>> {
+        let encrypted = self
+            .state
+            .file_path()
+            .await
+            .is_none_or(|path| path.ends_with(".gpg"));
+        let Some(path) = self.history_path().await.filter(|_| !encrypted) else {
+            return Ok(None);
+        };
+        let (mut points, _skipped) = snapshots::read(&path);
+        let portfolio = self.state.portfolio().await;
+        let today = self.today_point(&portfolio).await;
+        if !today.complete {
+            return Ok(None);
+        }
+        points.retain(|point| {
+            point.complete && point.base_currency == today.base_currency && point.date < today.date
+        });
+        let start = match since {
+            Some(day) => {
+                let day = day.format("%Y-%m-%d").to_string();
+                points.iter().rev().find(|point| point.date <= day)
+            }
+            None => points.first(),
+        };
+        let Some(start) = start else {
+            return Ok(None);
+        };
+        let Some(from) = snapshots::strict_date(&start.date) else {
+            return Ok(None);
+        };
+        let base = self.state.currency().await;
+        let transactions = analytics::transactions(&portfolio, &base, None);
+        let Some(effects) = performance::position_effects(start, &today, &transactions) else {
+            return Ok(None);
+        };
+        let total = performance::total(&effects);
+        let market = today.total_base - start.total_base - total.net_contributions;
+        let names = self.state.get_positions().await;
+        let leader = effects
+            .iter()
+            .map(|(id, (_, effect))| (id, effect.market_effect + effect.manual_revaluation))
+            .filter(|(_, amount)| amount * market > 0.0)
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .and_then(|(id, amount)| {
+                let position = names
+                    .iter()
+                    .find(|position| position.position_id.as_deref() == Some(id.as_str()))?;
+                let name = position.name.clone().or_else(|| position.ticker.clone())?;
+                Some(Contribution { name, amount })
+            });
+        Ok(Some(Change {
+            from,
+            start: start.total_base,
+            end: today.total_base,
+            added: total.net_contributions,
+            leader,
+            previous_high: points
+                .iter()
+                .map(|point| point.total_base)
+                .max_by(f64::total_cmp),
+            history_from: points
+                .first()
+                .and_then(|point| snapshots::strict_date(&point.date)),
+        }))
+    }
+
     pub async fn add_position(&self, request: CreatePositionRequest) -> BackendResult<()> {
         self.state
             .add_position(request)
@@ -1078,6 +1204,7 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::*;
+    use crate::demo;
 
     const CASH_ONLY: &str = r#"[{"Name":"Cash","AssetClass":"Cash","Amount":1000.0}]"#;
 
@@ -1646,6 +1773,73 @@ mod tests {
             backend.record_today().await.unwrap();
         });
         assert!(!dir.path().join("main").exists());
+    }
+
+    #[test]
+    fn a_look_is_remembered_beside_the_history_and_measured_from() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("portfolio");
+        demo::seed_workspace(&root);
+        let seen = root.join("portfolio/history/main").join(SEEN_FILE);
+        fs::remove_file(&seen).ok();
+        let backend = demo::backend(dir.path(), Some(&root), runtime.handle().clone());
+        let today = Local::now().date_naive();
+
+        runtime.block_on(async {
+            backend.startup(None).await.unwrap();
+            assert_eq!(backend.visit().await.unwrap(), None, "the first look");
+            let again = backend.visit().await.unwrap();
+            assert_eq!(
+                again,
+                Some(Seen {
+                    last: today,
+                    before: None
+                })
+            );
+            let written = fs::read_to_string(&seen).unwrap();
+            assert_eq!(
+                written,
+                format!(
+                    "{{\"last\":\"{}\",\"before\":null}}\n",
+                    today.format("%Y-%m-%d")
+                ),
+                "dates and nothing else"
+            );
+
+            let week = backend
+                .change_since(Some(today - Duration::days(7)))
+                .await
+                .unwrap()
+                .expect("the demo has 90 days of history");
+            assert_eq!(week.from, today - Duration::days(7));
+            assert!(week.added.abs() < 0.01, "only prices moved: {}", week.added);
+            assert!(week.leader.is_some());
+            assert_eq!(week.history_from, Some(today - Duration::days(90)));
+
+            let oldest = backend.change_since(None).await.unwrap().unwrap();
+            assert_eq!(oldest.from, today - Duration::days(90));
+            assert!(
+                backend
+                    .change_since(Some(today - Duration::days(400)))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "nothing that old to compare with"
+            );
+        });
+    }
+
+    #[test]
+    fn a_broken_record_of_looks_counts_as_none() {
+        assert_eq!(read_seen("not json"), None);
+        assert_eq!(read_seen(r#"{"last":"2026-11-10T00:00"}"#), None);
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let seen = Seen {
+            last: day,
+            before: Some(day - Duration::days(3)),
+        };
+        assert_eq!(read_seen(&write_seen(seen)), Some(seen));
     }
 
     #[test]

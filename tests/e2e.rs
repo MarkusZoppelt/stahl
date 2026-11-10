@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::Local;
+use chrono::{Days, Local};
 use portfolio_rs::{
     AppConfig, FixtureProvider,
     services::quotes::AnyProvider,
@@ -669,6 +669,40 @@ fn privacy_mode_hides_money() {
     assert!(!app.has_text("€107,400.00"));
     app.click("privacy");
     assert!(app.has_text("€107,400.00"));
+}
+
+#[test]
+fn overview_says_what_changed_since_the_last_look() {
+    let mut app = Harness::boot(true, None);
+    let today = Local::now().date_naive();
+    let last = today - Days::new(5);
+    let since = format!("Since {},", last.format("%A"));
+    let statement = |app: &Harness| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some("statement-text"))
+            .and_then(|element| element.text.clone())
+            .expect("the Statement is on screen")
+    };
+    let said = statement(&app);
+    assert!(said.starts_with(&since), "{said}");
+    assert!(said.contains('€'), "{said}");
+
+    // This look is noted beside the history, as a date and nothing else.
+    let seen = app
+        .dir
+        .path()
+        .join("portfolio/portfolio/history/main/seen.json");
+    let written = fs::read_to_string(seen).unwrap();
+    assert!(written.contains(&today.format("%Y-%m-%d").to_string()));
+    assert!(written.contains(&last.format("%Y-%m-%d").to_string()));
+
+    // Privacy keeps amounts out of the sentences too.
+    app.command('h', true);
+    let hidden = statement(&app);
+    assert!(hidden.starts_with(&since), "{hidden}");
+    assert!(!hidden.contains('€'), "{hidden}");
 }
 
 #[test]
@@ -2635,8 +2669,9 @@ fn a_phone_can_lock_the_vault_and_ticks_along_the_chart() {
     assert_eq!(app.rt.state.lock, Some(true));
     assert!(app.has_text("Face ID locks the vault"));
 
-    app.click(Page::Overview.key());
-    let (x, y) = app.rt.find("overview-chart").unwrap();
+    // On a phone, Overview's chart is below the fold; Performance's is near the top.
+    app.click(Page::Performance.key());
+    let (x, y) = app.rt.find("performance-chart").unwrap();
     app.rt.pointer_move(x - 100.0, y);
     app.rt.frame(1.0 / 60.0);
     let first = app.rt.state.chart_point;

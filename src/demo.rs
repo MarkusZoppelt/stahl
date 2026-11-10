@@ -128,6 +128,14 @@ pub fn seed_workspace(dir: &Path) {
         .collect();
     fs::write(history.join("snapshots.jsonl"), lines.join("\n") + "\n")
         .expect("demo workspace is writable");
+
+    // The owner last looked five days ago, so the Overview has something to tell them.
+    let day = |days_ago| (today - Duration::days(days_ago)).format("%Y-%m-%d");
+    fs::write(
+        history.join("seen.json"),
+        format!("{{\"last\":\"{}\",\"before\":\"{}\"}}\n", day(5), day(12)),
+    )
+    .expect("demo workspace is writable");
 }
 
 /// A workspace as a new user has it: the files `portfolio_rs` sets up, and no positions.

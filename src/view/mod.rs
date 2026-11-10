@@ -22,6 +22,7 @@ mod compact;
 pub mod guide;
 mod insights;
 mod overlays;
+mod overview;
 mod plan;
 mod portfolio;
 pub mod ui;

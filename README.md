@@ -69,6 +69,10 @@ has a price. It writes the same file as `portfolio_rs snapshot`, so both add to 
 `$XDG_DATA_HOME/portfolio_rs/main/snapshots.jsonl` (or `PORTFOLIO_RS_DATA_DIR`). Encrypted (`.gpg`)
 portfolios are never recorded, so their values don't end up on disk in plaintext.
 
+Beside that file, `seen.json` holds the last two days you opened the portfolio, and nothing else,
+so the Overview can say what changed since you last looked. It holds only dates, so it is kept for
+encrypted portfolios too.
+
 ## Building
 
 ```sh

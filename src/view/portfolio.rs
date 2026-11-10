@@ -19,7 +19,7 @@ use crate::{
     format, icons,
     state::{Confirm, Page, SWIPE_ACTIONS, SortBy, State, file_name, swipe_key},
     theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
-    view::{charts, guide, ui},
+    view::{charts, guide, overview, ui},
 };
 
 fn display_name(position: &PositionDto) -> String {
@@ -433,12 +433,17 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     if s.positions.is_empty() {
         return first_steps(s, t);
     }
-    col().w_full().gap(28.0).child(hero(s, t, cx)).child(
-        ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
-            .child(ui::entering(allocation_card(s, t), 0))
-            .child(ui::entering(movers_card(s, t), 1))
-            .child(ui::entering(attention_card(s, t), 2)),
-    )
+    col()
+        .w_full()
+        .gap(28.0)
+        .children(overview::statement(s, t, cx))
+        .child(hero(s, t, cx))
+        .child(
+            ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
+                .child(ui::entering(allocation_card(s, t), 0))
+                .child(ui::entering(movers_card(s, t), 1))
+                .child(ui::entering(attention_card(s, t), 2)),
+        )
 }
 
 // --- Holdings ---

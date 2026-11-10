@@ -6,6 +6,7 @@ pub mod demo;
 pub mod format;
 pub mod icons;
 pub mod state;
+pub mod statement;
 pub mod theme;
 pub mod update;
 pub mod view;

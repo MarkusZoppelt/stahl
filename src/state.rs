@@ -38,6 +38,7 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
 };
 
@@ -599,6 +600,14 @@ pub struct State {
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
+
+    // Since the last look.
+    /// The portfolio this session's look was noted for, so reopening it doesn't count again.
+    seen_for: Option<String>,
+    /// When the owner last looked before this time: `None` until it's known.
+    pub since: Option<Since>,
+    /// The portfolio since then, from the stored valuations.
+    pub change: Option<Change>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -828,6 +837,9 @@ impl State {
                 check_is_quiet: false,
                 restart_error: None,
             },
+            seen_for: None,
+            since: None,
+            change: None,
         }
     }
 
@@ -1191,6 +1203,7 @@ impl State {
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
+        self.load_since();
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -1826,6 +1839,84 @@ impl State {
                 |state, result| state.doctor.finish(result),
             );
         }
+    }
+
+    // --- Since the last look ---
+
+    /// Note this look at a newly opened portfolio, then measure what changed since the last one.
+    /// After that, every snapshot measures again, because the prices just moved.
+    fn load_since(&mut self) {
+        let key = self
+            .open
+            .workspace_dir
+            .clone()
+            .or_else(|| self.open.file_path.clone());
+        // An empty portfolio isn't a look at anything yet.
+        if key.is_none() || self.positions.is_empty() {
+            return;
+        }
+        if key != self.seen_for {
+            self.seen_for = key;
+            self.since = None;
+            self.change = None;
+            self.run(
+                |backend| async move {
+                    let previous = backend.visit().await?;
+                    let since = Seen::since(previous, Local::now().date_naive());
+                    let change = match since {
+                        Since::Day(day) => backend.change_since(Some(day)).await?,
+                        Since::First => backend.change_since(None).await?,
+                        Since::EarlierToday => None,
+                    };
+                    Ok((since, change))
+                },
+                |state, result| {
+                    if let Ok((since, change)) = result {
+                        state.since = Some(since);
+                        state.change = change;
+                    }
+                },
+            );
+            return;
+        }
+        let from = match self.since {
+            Some(Since::Day(day)) => Some(day),
+            Some(Since::First) => None,
+            _ => return,
+        };
+        self.run(
+            move |backend| async move { backend.change_since(from).await },
+            |state, result| {
+                if let Ok(change) = result {
+                    state.change = change;
+                }
+            },
+        );
+    }
+
+    /// What changed since the owner last looked, in words, or `None` with nothing worth saying.
+    pub fn statement(&self) -> Option<Statement> {
+        let summary = self.summary.as_ref()?;
+        let currency = self.currency();
+        let encrypted = self
+            .open
+            .file_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(".gpg"));
+        statement::compose(&Facts {
+            today: Local::now().date_naive(),
+            since: self.since?,
+            currency: &currency,
+            hidden: self.privacy,
+            complete: summary.complete,
+            encrypted,
+            change: self.change.clone(),
+            today_move: Some(statement::today_move(
+                summary.day_change,
+                summary.day_change_percent,
+                &self.positions,
+            )),
+        })
     }
 
     // --- Portfolio ---

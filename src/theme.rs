@@ -44,6 +44,18 @@ pub const STATEMENT: TextStyle = TextStyle::new(46.0, 340.0)
     .family(SERIF)
     .lh(52.0)
     .tracking(-0.9);
+/// The Overview's sentences about what changed since the owner last looked.
+pub const LEDE: TextStyle = TextStyle::new(26.0, 360.0)
+    .family(SERIF)
+    .lh(34.0)
+    .tracking(-0.3)
+    .features("'tnum' 1");
+/// [`LEDE`] on a phone.
+pub const LEDE_COMPACT: TextStyle = TextStyle::new(21.0, 360.0)
+    .family(SERIF)
+    .lh(28.0)
+    .tracking(-0.2)
+    .features("'tnum' 1");
 /// A section's name, on a page.
 pub const SECTION: TextStyle = TextStyle::new(18.0, 400.0)
     .family(SERIF)
