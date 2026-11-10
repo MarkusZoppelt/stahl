@@ -719,6 +719,63 @@ fn the_palette_filters_runs_commands_and_finds_holdings() {
     assert!(app.rt.state.palette.is_none());
 }
 
+fn palette_row(app: &Harness, key: &str) -> String {
+    app.rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .and_then(|element| element.label)
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_palette_answers_a_figure_and_opens_its_page() {
+    let mut app = Harness::boot(true, None);
+    app.command('k', false);
+    app.type_text("today");
+    assert_eq!(
+        palette_row(&app, "palette-0"),
+        "Today's change, +€280.00",
+        "the amount is in the row, before going anywhere"
+    );
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert_eq!(app.rt.state.page, Page::Overview);
+
+    // An asset class answers with its value, and Enter opens Allocation.
+    app.command('k', false);
+    app.type_text("gold");
+    assert_eq!(palette_row(&app, "palette-0"), "Gold, €5,000.00");
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert_eq!(app.rt.state.page, Page::Allocation);
+
+    // A holding's row carries its value, and Enter opens that holding.
+    app.command('k', false);
+    app.type_text("spy");
+    assert_eq!(palette_row(&app, "palette-0"), "S&P 500, €40,000.00");
+    let spy = app
+        .rt
+        .state
+        .positions
+        .iter()
+        .find(|position| position.ticker.as_deref() == Some("SPY"))
+        .unwrap()
+        .id;
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Holdings);
+    assert_eq!(app.rt.state.selected, Some(spy));
+
+    app.command('h', true);
+    app.command('k', false);
+    app.type_text("total");
+    assert_eq!(
+        palette_row(&app, "palette-0"),
+        "Total value, ••••••",
+        "privacy hides the amount in the row"
+    );
+}
+
 #[test]
 fn a_generated_document_previews_without_writing_anything() {
     let mut app = Harness::boot(true, None);

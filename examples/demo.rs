@@ -310,6 +310,30 @@ fn main() {
                     detail: None,
                 });
             }),
+            // The palette answering, before anyone goes anywhere: a class's value, share and day.
+            ("palette-answer", |s| {
+                scene(s, Page::Overview);
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
+            }),
+            ("palette-answer-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
+            }),
+            ("phone-palette-answer", |s| {
+                phone(s, Page::Overview);
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
+            }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),
             ("update-installing", |s| {

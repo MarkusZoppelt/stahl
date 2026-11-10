@@ -9,7 +9,12 @@ use crate::{
     state::{Command, Confirm, FormField, Page, PendingOpen, State, file_name},
     theme::Theme,
     update,
-    view::{guide, page_icon, portfolio::matches_search, ui, updates},
+    view::{
+        answers::{self, Figure},
+        guide, page_icon,
+        portfolio::matches_search,
+        ui, updates,
+    },
 };
 
 pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
@@ -115,6 +120,10 @@ pub struct Entry {
     pub keys: Vec<String>,
     pub command: Command,
     pub group: &'static str,
+    /// A figure that answers the query: a holding's value, a class's share, the total.
+    pub figure: Option<Figure>,
+    /// An asset class, drawn in its colour instead of a muted icon.
+    pub class: Option<String>,
 }
 
 fn page_entry(page: Page) -> Entry {
@@ -127,6 +136,8 @@ fn page_entry(page: Page) -> Entry {
             .unwrap_or_default(),
         command: Command::Go(page),
         group: "Go to",
+        figure: None,
+        class: None,
     }
 }
 
@@ -138,6 +149,8 @@ pub fn entries(s: &State) -> Vec<Entry> {
         keys: keys.map_or_else(Vec::new, |(shift, key)| ui::chord_keys(shift, key)),
         command,
         group: "Actions",
+        figure: None,
+        class: None,
     };
     // Without a portfolio, only what can start one, or doesn't need one, has any effect.
     let mut all: Vec<Entry> = Vec::new();
@@ -258,6 +271,36 @@ pub fn entries(s: &State) -> Vec<Entry> {
             query.split_whitespace().all(|word| label.contains(word))
         })
         .collect();
+    // Figures the query asks for by name come first: Enter goes to where they come from.
+    if s.has_portfolio() {
+        let answer = |group: &'static str| {
+            move |answer: answers::Answer| {
+                let page = match &answer.command {
+                    Command::Go(page) => *page,
+                    _ => Page::Overview,
+                };
+                Entry {
+                    label: answer.label,
+                    icon: page_icon(page),
+                    keys: Vec::new(),
+                    command: answer.command,
+                    group,
+                    figure: Some(answer.figure),
+                    class: answer.class,
+                }
+            }
+        };
+        let figures: Vec<Entry> = answers::figures(s, &query)
+            .into_iter()
+            .map(answer("Figures"))
+            .collect();
+        found.splice(0..0, figures);
+        found.extend(
+            answers::classes(s, &query)
+                .into_iter()
+                .map(answer("Asset classes")),
+        );
+    }
     // Holdings only when asked for: they'd bury the commands otherwise.
     if !query.trim().is_empty() {
         found.extend(
@@ -274,10 +317,43 @@ pub fn entries(s: &State) -> Vec<Entry> {
                     keys: Vec::new(),
                     command: Command::Reveal(position.id),
                     group: "Holdings",
+                    figure: Some(answers::holding(s, position)),
+                    class: None,
                 }),
         );
     }
     found
+}
+
+/// The row's mark: a class in its own colour, anything else the muted icon of where it goes.
+fn mark(entry: &Entry, t: &Theme) -> El {
+    match &entry.class {
+        Some(class) => icon(&icons::CHART_PIE, 15.0).color(t.class_color(class)),
+        None => icon(entry.icon, 15.0).color(t.kit.c.icon_muted),
+    }
+}
+
+/// A figure at the end of a palette row: the amount, its share, and today's change.
+fn figure_row(figure: &Figure, compact: bool, t: &Theme) -> El {
+    let k = &t.kit;
+    row()
+        .center_y()
+        .gap(10.0)
+        .child(ui::number(
+            figure.value.clone(),
+            figure.signed.map_or(k.c.text_base, |value| t.change(value)),
+        ))
+        .children(
+            figure
+                .share
+                .filter(|_| !compact)
+                .map(|share| ui::number(format!("{share:.1}%"), k.c.text_muted)),
+        )
+        .children(
+            figure
+                .today
+                .map(|today| ui::badge(format::percent(today), t.change(today))),
+        )
 }
 
 fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
@@ -326,12 +402,16 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
             rows.push(ui::caption(entry.group, t).px(10.0).pt(8.0).pb(4.0));
         }
         let command = entry.command.clone();
+        let name = match &entry.figure {
+            Some(figure) => format!("{}, {}", entry.label, figure.value),
+            None => entry.label.clone(),
+        };
         rows.push(
             row()
                 .center_y()
                 .key(format!("palette-{index}"))
                 .role("option")
-                .label(entry.label.clone())
+                .label(name)
                 .w_full()
                 .h(34.0)
                 .gap(10.0)
@@ -351,13 +431,20 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                         .fill(k.c.text_base.alpha(0.1))
                         .motion(LEAD)
                 }))
-                .child(icon(entry.icon, 15.0).color(k.c.icon_muted))
+                .child(mark(&entry, t))
                 .child(
                     text(entry.label)
                         .font(k.ty.ui)
                         .color(k.c.text_base)
                         .grow(1.0)
+                        .shrink()
                         .truncate(),
+                )
+                .children(
+                    entry
+                        .figure
+                        .as_ref()
+                        .map(|figure| figure_row(figure, s.compact, t)),
                 )
                 .children(
                     (!entry.keys.is_empty() && !s.compact)
