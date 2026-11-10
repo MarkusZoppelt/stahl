@@ -2644,3 +2644,84 @@ fn a_phone_can_lock_the_vault_and_ticks_along_the_chart() {
     app.rt.frame(1.0 / 60.0);
     assert!(first.is_some() && app.rt.state.chart_point > first);
 }
+
+fn element(app: &Harness, key: &str) -> rune::ElementInfo {
+    app.rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("no element {key}"))
+}
+
+#[test]
+fn the_door_opens_once_turns_on_a_refresh_and_marks_what_needs_attention() {
+    use portfolio_rs::mcp::dto::{Category, Finding, Severity};
+
+    let mut app = Harness::boot(true, None);
+    // Opening the portfolio parted the door over the page, and it has gone.
+    let opening = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| {
+            element
+                .key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("door-opening-"))
+        })
+        .expect("the door opened over the page");
+    assert!(opening.opacity < 0.01, "and is gone once it has opened");
+    // It doesn't stand in the way of the page under it.
+    app.click(Page::Holdings.key());
+    assert_eq!(app.rt.state.page, Page::Holdings);
+
+    let door = element(&app, "door-sidebar");
+    assert_eq!(
+        door.label.as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
+    );
+    assert!(!app.exists("door-attention-sidebar"));
+
+    // A refresh turns the dial once, and it comes to rest where it started.
+    let rest = element(&app, "door-dial-sidebar").rect;
+    let updates = app.rt.state.price_updates;
+    let (x, y) = app.rt.find("refresh-prices").unwrap();
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    assert_eq!(app.rt.state.price_updates, updates + 1);
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    // Turned, its upright bounds are wider than the dial.
+    let turning = element(&app, "door-dial-sidebar").rect;
+    assert!(turning[2] > rest[2] + 1.0, "the dial turns: {turning:?}");
+    app.settle();
+    app.settle();
+    let settled = element(&app, "door-dial-sidebar").rect;
+    for (a, b) in settled.iter().zip(rest) {
+        assert!((a - b).abs() < 0.01, "and rests where it was: {settled:?}");
+    }
+
+    app.rt.update(|state, _| {
+        state.findings.push(Finding {
+            code: "cash_below_minimum_amount".into(),
+            severity: Severity::Warning,
+            category: Category::Policy,
+            message: "Cash is below the minimum your policy sets".into(),
+            position_id: None,
+            asset_class: None,
+            detail: None,
+        })
+    });
+    app.settle();
+    assert!(app.exists("door-attention-sidebar"));
+    assert_eq!(
+        element(&app, "door-sidebar").label.as_deref(),
+        Some("Stahl Capital. 1 thing needs attention")
+    );
+}

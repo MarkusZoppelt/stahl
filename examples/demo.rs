@@ -9,7 +9,10 @@
 
 use std::{env, fs, process, time::SystemTime};
 
-use portfolio_rs::config::ThemeMode;
+use portfolio_rs::{
+    config::ThemeMode,
+    mcp::dto::{Category, Finding, Severity},
+};
 use stahl::{
     app, demo,
     state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
@@ -248,6 +251,37 @@ fn main() {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // The door: its dial turns once as prices land, and it marks what needs attention.
+            ("door-turn", |s| {
+                scene(s, Page::Overview);
+                s.refresh_prices();
+            }),
+            ("door-attention", |s| {
+                scene(s, Page::Overview);
+                s.findings.push(Finding {
+                    code: "cash_below_minimum_amount".into(),
+                    severity: Severity::Warning,
+                    category: Category::Policy,
+                    message: "Cash is below the minimum your policy sets".into(),
+                    position_id: None,
+                    asset_class: None,
+                    detail: None,
+                });
+            }),
+            ("door-attention-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.findings.push(Finding {
+                    code: "cash_below_minimum_amount".into(),
+                    severity: Severity::Warning,
+                    category: Category::Policy,
+                    message: "Cash is below the minimum your policy sets".into(),
+                    position_id: None,
+                    asset_class: None,
+                    detail: None,
+                });
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

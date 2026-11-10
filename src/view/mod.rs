@@ -19,6 +19,7 @@ use crate::{
 
 mod charts;
 mod compact;
+pub mod door;
 pub mod guide;
 mod insights;
 mod overlays;
@@ -193,7 +194,9 @@ fn welcome(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .padding(if compact { 16.0 } else { 24.0 })
         .child(ui::wash(t, 0.0))
-        .child(ui::door(if compact { 112.0 } else { 168.0 }).mb(14.0))
+        .child(
+            door::vault(s, t, if compact { 112.0 } else { 168.0 }, "welcome").mb(14.0),
+        )
         .child(
             text("Stahl Capital has one client.")
                 .font(if compact { STATEMENT_COMPACT } else { STATEMENT })
@@ -378,7 +381,7 @@ fn sidebar(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .px(8.0)
         .pb(8.0)
-        .child(ui::door(28.0))
+        .child(door::vault(s, t, 28.0, "sidebar").help(door::describe(door::attention(s))))
         .child(
             col()
                 .shrink()
@@ -698,7 +701,8 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .child(ui::wash(t, 12.0))
-        .child(scroller);
+        .child(scroller)
+        .child(door::opening(s, 200.0));
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
         .toolbar(toolbar(s, t))

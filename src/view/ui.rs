@@ -124,6 +124,11 @@ pub fn entering(card: El, index: usize) -> El {
     )
 }
 
+/// A small thing arriving or leaving in place: a mark, a badge, a button that wasn't there.
+pub fn appear() -> Transition {
+    Transition::scale(0.9).combined(Transition::opacity())
+}
+
 /// One soft light from above, on the wall behind a page.
 /// `radius` follows whatever it fills: the rounded main pane, or a whole window.
 pub fn wash(t: &Theme, radius: f32) -> El {
