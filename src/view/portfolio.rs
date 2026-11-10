@@ -559,48 +559,62 @@ struct TodayShare {
     amount: Option<f64>,
     /// Percentage points of yesterday's portfolio. `None` when it can't be known.
     points: Option<f64>,
-    /// `|amount|` against the largest holding's, for the bar. Zero when nothing moved.
-    bar: f32,
 }
 
-fn today_share(position: &PositionDto, previous: f64, largest: f64) -> TodayShare {
+fn today_share(position: &PositionDto, previous: f64) -> TodayShare {
     let amount = day_amount(position);
     TodayShare {
         points: day_points(amount, previous),
-        bar: amount
-            .filter(|_| largest > 0.0)
-            .map(|amount| (amount.abs() / largest) as f32)
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0),
         amount,
     }
 }
 
-/// How much of today's move this is, as a bar against the largest holding. It grows from the
-/// right, in the gain or loss colour, so the lengths compare down the column.
-fn share_bar(share: &TodayShare, t: &Theme) -> El {
-    let color = share
-        .amount
-        .map_or(t.kit.c.text_muted, |amount| t.change(amount));
-    el().w_full()
-        .h(4.0)
-        .radius(2.0)
-        .fill(t.kit.c.layer_03)
+/// How far a move reaches from the centre, as a fraction of one half. A loss and a gain of the
+/// same size reach equally far, on opposite sides.
+pub(super) fn diverge_reach(amount: Option<f64>, largest: f64) -> (f32, bool) {
+    let Some(amount) = amount.filter(|amount| amount.is_finite() && *amount != 0.0) else {
+        return (0.0, true);
+    };
+    let reach = if largest > 0.0 {
+        (amount.abs() / largest) as f32
+    } else {
+        1.0
+    };
+    (reach.clamp(0.0, 1.0), amount > 0.0)
+}
+
+/// Who moved the portfolio today: losses grow left of a centre line, gains right, both scaled
+/// to the largest move.
+fn share_bar(share: &TodayShare, largest: f64, t: &Theme) -> El {
+    let (reach, gain) = diverge_reach(share.amount, largest);
+    let fill = |on: bool, color: Color| {
+        el().h(3.0)
+            .w_frac(if on { reach } else { 0.0 })
+            .radius(1.0)
+            .fill(color)
+            .motion(LEAD)
+    };
+    row()
+        .center_y()
+        .w_full()
+        .h(7.0)
         .a11y_hidden()
         .child(
-            row().center_y().w_full().h_full().justify_end().child(
-                el().h_full()
-                    .w_frac(share.bar)
-                    .radius(2.0)
-                    .fill(color)
-                    .motion(LEAD),
-            ),
+            row()
+                .center_y()
+                .grow(1.0)
+                .h_full()
+                .justify_end()
+                .child(fill(!gain, t.down)),
         )
+        .child(el().w(1.0).h_full().fill(t.kit.c.text_faint))
+        .child(row().center_y().grow(1.0).h_full().child(fill(gain, t.up)))
 }
 
 struct RowFace<'a> {
     columns: Columns,
     share: &'a TodayShare,
+    largest: f64,
     progress: f32,
     first: bool,
     last: bool,
@@ -610,6 +624,7 @@ fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) 
     let RowFace {
         columns,
         share,
+        largest,
         progress,
         first,
         last,
@@ -797,7 +812,7 @@ fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) 
                     .items_end()
                     .gap(4.0)
                     .child(own)
-                    .child(share_bar(share, t).max_w(72.0))
+                    .child(share_bar(share, largest, t).max_w(72.0))
                     .help("The bar is this holding's share of today's move")
             };
             cell(content, true, 1.0)
@@ -805,7 +820,7 @@ fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) 
         .children(
             columns
                 .impact
-                .then(|| cell(share_figure(s, share, &share_label, t), true, 1.0)),
+                .then(|| cell(share_figure(s, share, largest, &share_label, t), true, 1.0)),
         )
 }
 
@@ -837,7 +852,7 @@ fn sparkline(
 }
 
 /// The share of today's move: the points, and a bar against the largest holding.
-fn share_figure(s: &State, share: &TodayShare, label: &str, t: &Theme) -> El {
+fn share_figure(s: &State, share: &TodayShare, largest: f64, label: &str, t: &Theme) -> El {
     let color = share
         .points
         .map_or(t.kit.c.text_muted, |points| t.change(points));
@@ -854,7 +869,7 @@ fn share_figure(s: &State, share: &TodayShare, label: &str, t: &Theme) -> El {
         .gap(4.0)
         .help(help)
         .child(ui::number(label.to_string(), color))
-        .child(share_bar(share, t))
+        .child(share_bar(share, largest, t))
 }
 
 /// A holding's row on a phone, which slides left to show Edit and Delete, as rows in iOS do.
@@ -1046,7 +1061,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .fold(0.0, f64::max);
     let shares: Vec<TodayShare> = rows
         .iter()
-        .map(|position| today_share(position, previous, largest))
+        .map(|position| today_share(position, previous))
         .collect();
     let roomy = width >= ROOM_FOR_COUNT;
     let search = search_input(s)
@@ -1183,6 +1198,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                                 RowFace {
                                     columns,
                                     share: &share,
+                                    largest,
                                     progress: s.draw_progress(cx.is_reduced_motion()),
                                     first: index == 0,
                                     last: index == end,
@@ -1750,6 +1766,22 @@ mod tests {
             Ordering::Less,
             "the loss sorts below the gain"
         );
+    }
+
+    #[test]
+    fn a_loss_and_a_gain_reach_opposite_ways_from_the_centre() {
+        let (loss, loss_gain) = diverge_reach(Some(-240.0), 450.0);
+        let (gain, is_gain) = diverge_reach(Some(100.0), 450.0);
+        let (full, _) = diverge_reach(Some(450.0), 450.0);
+        assert!(!loss_gain && is_gain);
+        assert!((loss - 240.0 / 450.0).abs() < 0.001);
+        assert!(gain < loss, "the smaller move reaches less far");
+        assert!(
+            (full - 1.0).abs() < 0.001,
+            "the largest move fills its half"
+        );
+        assert_eq!(diverge_reach(None, 450.0).0, 0.0);
+        assert_eq!(diverge_reach(Some(0.0), 450.0).0, 0.0);
     }
 
     #[test]
