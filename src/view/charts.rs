@@ -25,6 +25,31 @@ fn short_date(date: &str) -> String {
     )
 }
 
+/// A holding's line over the period the page states. No line, and no placeholder, without two
+/// points. The stroke draws in with the value chart and holds still under reduced motion.
+pub fn sparkline(values: &[f64], width: f32, height: f32, color: Color, progress: f32) -> El {
+    if values.len() < 2 || width < 4.0 || height < 4.0 {
+        return el();
+    }
+    let inset = 1.0;
+    let points: Vec<[f32; 2]> = plot(values, width - inset * 2.0, height - inset * 2.0)
+        .into_iter()
+        .map(|[x, y]| [x + inset, y + inset])
+        .collect();
+    let line = Shape::new().stroke(points, 1.25, color).drawn(progress);
+    canvas(line).size(width, height).a11y_hidden()
+}
+
+/// Gain or loss over the series, or steel when it is flat. The shape is the data; the colour
+/// says which way it went.
+pub fn spark_color(values: &[f64], t: &Theme) -> Color {
+    match (values.first(), values.last()) {
+        (Some(first), Some(last)) if last > first => t.up,
+        (Some(first), Some(last)) if last < first => t.down,
+        _ => t.kit.c.text_muted,
+    }
+}
+
 /// Where each value lands in a chart `width` by `height`.
 fn plot(values: &[f64], width: f32, height: f32) -> Vec<[f32; 2]> {
     let (low, high) = values

@@ -1,5 +1,6 @@
 //! A squarified treemap of the holdings. Area is value. The layout is a pure function.
 
+use portfolio_rs::state::PositionDto;
 use rune::{Color, El, Key, KeyEvent, Tx, col, el, text, tok::motion::LEAD};
 
 use crate::{
@@ -318,7 +319,7 @@ fn wash(change: Option<f64>, up: Color, down: Color) -> Option<Color> {
 }
 
 /// The map. Area is value, the tint is today's move, and a hairline keeps the asset class.
-pub fn view(s: &State, t: &Theme, width: f32, height: f32) -> El {
+pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El {
     let rows = portfolio::holding_rows(s);
     if rows.is_empty() {
         return ui::muted("No holdings match.", t).padding(12.0);
@@ -457,7 +458,40 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32) -> El {
                                 .truncate()
                         })),
                 )
+                .children(tile_line(s, position, w, h, progress, t))
         }))
+}
+
+/// A quiet line across the lower part of a tile tall enough to hold one. No placeholder.
+fn tile_line(
+    s: &State,
+    position: &PositionDto,
+    width: f32,
+    height: f32,
+    progress: f32,
+    t: &Theme,
+) -> Option<El> {
+    if height < 72.0 {
+        return None;
+    }
+    let values = position.position_id.as_deref().and_then(|id| {
+        s.history
+            .as_ref()
+            .and_then(|history| history.series(id))
+            .map(<[f64]>::to_vec)
+    })?;
+    let line_h = (height * 0.28).clamp(22.0, 56.0);
+    let line_w = (width - 28.0).max(8.0);
+    Some(
+        super::charts::sparkline(
+            &values,
+            line_w,
+            line_h,
+            super::charts::spark_color(&values, t).alpha(0.85),
+            progress,
+        )
+        .absolute(14.0, height - line_h - 10.0),
+    )
 }
 
 /// How tall the map should be so a short table's empty page becomes the picture.

@@ -476,6 +476,8 @@ impl Period {
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub points: Vec<HistoryValue>,
+    /// One line per holding, for the sparklines. Price when the snapshot recorded one.
+    pub series: Vec<HoldingSeries>,
     pub change: Option<f64>,
     pub net_contributions: Option<f64>,
     pub market_effect: Option<f64>,
@@ -483,6 +485,26 @@ pub struct History {
     pub twr_percent: Option<f64>,
     /// Today's valuation is written here, unless the portfolio is encrypted.
     pub path: Option<String>,
+}
+
+/// A holding's path over the same days as [`History::points`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoldingSeries {
+    pub position_id: String,
+    /// Quote-currency price when the snapshot had one, so a purchase does not read as a jump.
+    /// Value in the base currency only when no price was recorded (cash, a manual holding).
+    pub values: Vec<f64>,
+    pub priced: bool,
+}
+
+impl History {
+    /// The series for a holding, if it has at least two points to draw.
+    pub fn series(&self, position_id: &str) -> Option<&[f64]> {
+        self.series
+            .iter()
+            .find(|series| series.position_id == position_id && series.values.len() >= 2)
+            .map(|series| series.values.as_slice())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -590,6 +612,7 @@ fn build_history(
         market_effect: effects.as_ref().map(|effects| effects.market_effect),
         twr_percent,
         path,
+        series: series_from(&points),
         points: points
             .into_iter()
             .map(|point| HistoryValue {
@@ -598,6 +621,61 @@ fn build_history(
             })
             .collect(),
     }
+}
+
+/// One series per position that appears in the snapshots.
+///
+/// Price, in the quote currency, when at least two days recorded one. A buy changes the
+/// quantity and the value, not the price, so the line is the market and not the purchase.
+/// Value in the base currency is the fallback for cash and anything with no price; a deposit
+/// then does show as a step, because that is the only series those holdings have.
+fn series_from(points: &[HistoryPoint]) -> Vec<HoldingSeries> {
+    let mut ids = Vec::new();
+    for point in points {
+        for position in &point.positions {
+            if !ids.contains(&position.position_id) {
+                ids.push(position.position_id.clone());
+            }
+        }
+    }
+    ids.into_iter()
+        .filter_map(|id| {
+            let prices: Vec<f64> = points
+                .iter()
+                .filter_map(|point| {
+                    point
+                        .positions
+                        .iter()
+                        .find(|position| position.position_id == id)
+                        .and_then(|position| position.price)
+                })
+                .filter(|price| price.is_finite())
+                .collect();
+            if prices.len() >= 2 {
+                return Some(HoldingSeries {
+                    position_id: id,
+                    values: prices,
+                    priced: true,
+                });
+            }
+            let values: Vec<f64> = points
+                .iter()
+                .filter_map(|point| {
+                    point
+                        .positions
+                        .iter()
+                        .find(|position| position.position_id == id)
+                        .and_then(|position| position.value_base)
+                })
+                .filter(|value| value.is_finite())
+                .collect();
+            (values.len() >= 2).then_some(HoldingSeries {
+                position_id: id,
+                values,
+                priced: false,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -1602,6 +1680,59 @@ mod tests {
         let history = build_history(points, &[], None);
         assert_eq!(history.points.len(), 2);
         assert_eq!(history.change, Some(10.0));
+    }
+
+    fn position(
+        id: &str,
+        price: Option<f64>,
+        value: Option<f64>,
+    ) -> portfolio_rs::mcp::snapshots::SnapshotPosition {
+        portfolio_rs::mcp::snapshots::SnapshotPosition {
+            position_id: id.to_string(),
+            kind: if price.is_some() { "market" } else { "cash" }.to_string(),
+            asset_class: "Stocks".to_string(),
+            quantity: 1.0,
+            price,
+            price_currency: price.map(|_| "EUR".to_string()),
+            fx_rate: Some(1.0),
+            value_base: value,
+            ledger_base: None,
+            stale: Some(false),
+        }
+    }
+
+    #[test]
+    fn a_sparkline_uses_price_so_a_purchase_is_not_a_jump() {
+        let mut first = point("2026-03-01", 100.0, true);
+        let mut second = point("2026-03-02", 320.0, true);
+        // Bought another share: value doubles-and-some, price only moves 10%.
+        first.positions = vec![position("pos_spy", Some(100.0), Some(100.0))];
+        second.positions = vec![position("pos_spy", Some(110.0), Some(220.0))];
+        first.positions.push(position("pos_cash", None, Some(50.0)));
+        second
+            .positions
+            .push(position("pos_cash", None, Some(50.0)));
+        let mut once = point("2026-03-03", 1.0, true);
+        once.positions = vec![position("pos_new", Some(5.0), Some(5.0))];
+
+        let history = build_history(vec![first, second, once], &[], None);
+        let spy = history.series("pos_spy").unwrap();
+        assert_eq!(spy, [100.0, 110.0], "price, not the value after the buy");
+        assert!(
+            history
+                .series
+                .iter()
+                .any(|series| series.position_id == "pos_spy" && series.priced)
+        );
+        assert_eq!(history.series("pos_cash"), Some([50.0, 50.0].as_slice()));
+        assert!(
+            history
+                .series
+                .iter()
+                .any(|series| series.position_id == "pos_cash" && !series.priced),
+            "cash has no price, so the line is its value"
+        );
+        assert_eq!(history.series("pos_new"), None, "one point is not a line");
     }
 
     #[test]

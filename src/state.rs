@@ -1787,22 +1787,23 @@ impl State {
     /// Fetch what the current page shows.
     pub fn load_page(&mut self) {
         match self.page {
-            Page::Overview | Page::Performance => self.load_history(),
+            Page::Overview | Page::Holdings | Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
             Page::Rebalance => self.load_simulation(),
             Page::Briefing => self.load_briefing(),
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
-            Page::Holdings | Page::Documents => {}
+            Page::Documents => {}
         }
     }
 
     fn load_history(&mut self) {
-        let period = if self.page == Page::Overview {
-            Period::Month
-        } else {
+        // Holdings sparklines use the same month Overview charts, so the two pages agree.
+        let period = if self.page == Page::Performance {
             self.period
+        } else {
+            Period::Month
         };
         self.history_request += 1;
         let request = self.history_request;

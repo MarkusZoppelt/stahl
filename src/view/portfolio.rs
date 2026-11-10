@@ -598,15 +598,22 @@ fn share_bar(share: &TodayShare, t: &Theme) -> El {
         )
 }
 
-fn holding_row(
-    s: &State,
-    position: &PositionDto,
+struct RowFace<'a> {
     columns: Columns,
-    share: &TodayShare,
+    share: &'a TodayShare,
+    progress: f32,
     first: bool,
     last: bool,
-    t: &Theme,
-) -> El {
+}
+
+fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) -> El {
+    let RowFace {
+        columns,
+        share,
+        progress,
+        first,
+        last,
+    } = face;
     let k = &t.kit;
     let id = position.id;
     let selected = s.selected == Some(id);
@@ -743,6 +750,14 @@ fn holding_row(
             false,
             columns.name_grow(),
         ))
+        .children(sparkline(
+            s,
+            position,
+            if s.compact { 44.0 } else { 72.0 },
+            18.0,
+            progress,
+            t,
+        ))
         .children(columns.class.then(|| {
             cell(
                 ui::muted(position.asset_class.clone(), t)
@@ -792,6 +807,33 @@ fn holding_row(
                 .impact
                 .then(|| cell(share_figure(s, share, &share_label, t), true, 1.0)),
         )
+}
+
+/// The holding's line over the past month, or nothing when it has no series.
+fn sparkline(
+    s: &State,
+    position: &PositionDto,
+    width: f32,
+    height: f32,
+    progress: f32,
+    t: &Theme,
+) -> Option<El> {
+    let values = position.position_id.as_deref().and_then(|id| {
+        s.history
+            .as_ref()
+            .and_then(|history| history.series(id))
+            .map(<[f64]>::to_vec)
+    })?;
+    Some(
+        charts::sparkline(
+            &values,
+            width,
+            height,
+            charts::spark_color(&values, t),
+            progress,
+        )
+        .key(format!("spark-{}", position.id)),
+    )
 }
 
 /// The share of today's move: the points, and a bar against the largest holding.
@@ -1069,6 +1111,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 t,
                 map_width,
                 super::treemap::height(s, cx.layout_size("main")),
+                s.draw_progress(cx.is_reduced_motion()),
             ))
     });
     let table = (!s.holdings_map).then(|| {
@@ -1137,10 +1180,13 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                             let row = holding_row(
                                 s,
                                 position,
-                                columns,
-                                &share,
-                                index == 0,
-                                index == end,
+                                RowFace {
+                                    columns,
+                                    share: &share,
+                                    progress: s.draw_progress(cx.is_reduced_motion()),
+                                    first: index == 0,
+                                    last: index == end,
+                                },
                                 t,
                             );
                             if s.compact {
@@ -1156,6 +1202,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(16.0)
         .child(top)
+        .child(ui::caption("Lines are the past month.", t).key("spark-period"))
         .children(map)
         .children(table)
 }
