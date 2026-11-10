@@ -1873,8 +1873,10 @@ impl State {
         );
     }
 
+    /// Opens the add (`None`) or edit form. One already open stays as it is: asking again (Cmd+N,
+    /// or the File menu's Add Position) would empty it and take focus back to Name.
     pub fn open_form(&mut self, existing: Option<usize>) {
-        if !self.has_portfolio() {
+        if !self.has_portfolio() || self.form.is_some() {
             return;
         }
         let position = existing.and_then(|id| self.positions.iter().find(|p| p.id == id));

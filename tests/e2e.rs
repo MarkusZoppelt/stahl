@@ -576,6 +576,95 @@ fn saving_an_unchanged_form_isnt_an_edit() {
     }
 }
 
+/// The form's fields from top to bottom, with what each holds.
+fn form_texts(app: &Harness) -> [(&'static str, String); 6] {
+    let form = app.rt.state.form.as_ref().expect("the form is open");
+    [
+        ("name", form.name.text.clone()),
+        ("ticker", form.ticker.text.clone()),
+        ("class", form.asset_class.text.clone()),
+        ("amount", form.amount.text.clone()),
+        ("quantity", form.quantity.text.clone()),
+        ("price", form.price.text.clone()),
+    ]
+}
+
+/// What has focus, by its accessible label: a field's inner element has no key of its own.
+fn focused_label(app: &Harness) -> Option<String> {
+    app.rt
+        .elements()
+        .into_iter()
+        .find(|element| element.focused)
+        .and_then(|element| element.label)
+}
+
+#[test]
+fn typing_lands_in_the_field_that_was_clicked() {
+    let mut app = Harness::boot(true, None);
+    app.command('n', false);
+    // A refresh that lands while a field has focus rebuilds the dialog under it.
+    app.rt.state.refresh_prices();
+    for (key, typed) in [
+        ("form-amount", "2"),
+        ("form-quantity", "3"),
+        ("form-price", "4"),
+        ("form-ticker", "T"),
+        ("form-class", "5"),
+        ("form-name", "N"),
+    ] {
+        app.click(key);
+        app.type_text(typed);
+    }
+    assert_eq!(
+        form_texts(&app),
+        [
+            ("name", "N".to_string()),
+            ("ticker", "T".to_string()),
+            ("class", "Stocks5".to_string()),
+            ("amount", "02".to_string()),
+            ("quantity", "3".to_string()),
+            ("price", "4".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn tab_goes_through_the_form_in_the_order_it_reads() {
+    let mut app = Harness::boot(true, None);
+    app.command('n', false);
+    let mut seen = vec![focused_label(&app)];
+    for _ in 0..7 {
+        app.press(Key::Tab);
+        seen.push(focused_label(&app));
+    }
+    let price = format!("Price ({})", app.rt.state.currency());
+    let wanted = [
+        "Name",
+        "Ticker",
+        "Asset class",
+        "Amount",
+        "Quantity",
+        &price,
+        "Cancel",
+        "Add Position",
+    ];
+    assert_eq!(seen, wanted.map(|label| Some(label.to_string())));
+}
+
+#[test]
+fn asking_for_the_form_again_keeps_what_was_typed_and_where() {
+    let mut app = Harness::boot(true, None);
+    app.command('n', false);
+    app.type_text("Zed");
+    app.click("form-amount");
+    app.type_text("5");
+    app.command('n', false);
+    assert_eq!(focused_label(&app).as_deref(), Some("Amount"));
+    app.type_text("6");
+    let [name, .., amount, _, _] = form_texts(&app);
+    assert_eq!((name.1.as_str(), amount.1.as_str()), ("Zed", "056"));
+}
+
 #[test]
 fn deleting_asks_first() {
     let mut app = Harness::boot(false, Some(demo::POSITIONS));
