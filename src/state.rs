@@ -588,6 +588,8 @@ pub struct State {
 
     // Pages.
     pub search: TextEdit,
+    /// Holdings drawn as a treemap instead of the table.
+    pub holdings_map: bool,
     pub sort: SortBy,
     pub ascending: bool,
     pub selected: Option<usize>,
@@ -789,6 +791,7 @@ impl State {
             chart_point: None,
             donut_hover: None,
             search: TextEdit::new(""),
+            holdings_map: false,
             sort: SortBy::Value,
             ascending: false,
             selected: None,

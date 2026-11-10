@@ -907,7 +907,7 @@ fn search_input(s: &State) -> TextInput {
 }
 
 /// The rows of the Holdings table, top to bottom.
-fn holding_rows(s: &State) -> Vec<&PositionDto> {
+pub(super) fn holding_rows(s: &State) -> Vec<&PositionDto> {
     let mut rows: Vec<&PositionDto> = s
         .positions
         .iter()
@@ -945,6 +945,10 @@ pub fn holdings_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         };
         s.open_form(Some(id));
         return true;
+    }
+    if s.holdings_map {
+        return matches!(event.key, Key::Up | Key::Down | Key::Left | Key::Right)
+            && super::treemap::focus_tile(s, tx);
     }
     if !matches!(event.key, Key::Up | Key::Down) {
         return false;
@@ -1015,6 +1019,19 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .on_press(|s: &mut State| s.open_form(None))
         .build(k)
         .key("add-position");
+    let view = SegmentedControl::new(&["Table", "Map"], Some(usize::from(s.holdings_map)))
+        .label("View")
+        .fit()
+        .on_pick(|s: &mut State, index, tx: &mut Tx| {
+            s.holdings_map = index == 1;
+            if s.holdings_map
+                && let Some(id) = s.selected
+            {
+                tx.focus(format!("tile-{id}"), false);
+            }
+        })
+        .build(k)
+        .key("holdings-view");
     let top = if roomy {
         row()
             .center_y()
@@ -1022,16 +1039,39 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .justify_between()
             .gap(16.0)
             .child(ui::muted(format!("{} positions", s.positions.len()), t))
-            .child(row().center_y().gap(8.0).child(search).child(add))
+            .child(
+                row()
+                    .center_y()
+                    .gap(8.0)
+                    .child(view)
+                    .child(search)
+                    .child(add),
+            )
     } else {
-        row()
-            .center_y()
+        col().w_full().gap(8.0).child(view).child(
+            row()
+                .center_y()
+                .w_full()
+                .gap(8.0)
+                .child(search.grow(1.0).min_w(0.0))
+                .child(add),
+        )
+    };
+    let map = s.holdings_map.then(|| {
+        let measured = cx.layout_size("holdings-map").map(|[width, _]| width);
+        let map_width = measured.unwrap_or((width - 64.0).max(1.0));
+        col()
             .w_full()
             .gap(8.0)
-            .child(search.grow(1.0).min_w(0.0))
-            .child(add)
-    };
-    col().w_full().gap(16.0).child(top).child(
+            .child(ui::caption("Area is value. The tint is today's move.", t).key("map-about"))
+            .child(super::treemap::view(
+                s,
+                t,
+                map_width,
+                super::treemap::height(s, cx.layout_size("main")),
+            ))
+    });
+    let table = (!s.holdings_map).then(|| {
         ui::card(t)
             .padding(8.0)
             .pt(12.0)
@@ -1110,8 +1150,14 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                             }
                         },
                     )),
-            ),
-    )
+            )
+    });
+    col()
+        .w_full()
+        .gap(16.0)
+        .child(top)
+        .children(map)
+        .children(table)
 }
 
 fn detail(label: impl Into<String>, value: String, t: &Theme) -> El {

@@ -857,7 +857,7 @@ fn the_guide_opens_from_anywhere_and_never_on_its_own() {
     assert!(!app.rt.state.guide, "not forced on a returning user");
     app.command('2', false);
     assert!(
-        app.has_text("one row per position"),
+        app.has_text("as a table or a map"),
         "the page says what it is"
     );
 
@@ -1287,6 +1287,43 @@ fn of_today_weights_a_holding_by_how_much_of_the_portfolio_it_is() {
     );
     app.click("holding-1");
     assert!(app.has_text("Of today"), "the details name it too");
+}
+
+#[test]
+fn the_holdings_map_selects_like_a_row_and_arrows_cross_it() {
+    let mut app = on_holdings();
+    app.click("segment1");
+    assert!(app.rt.state.holdings_map);
+    assert!(app.exists("tile-1"), "a holding becomes a tile");
+    assert!(!app.exists("sort-name"), "the table is the other view");
+    assert!(app.has_text("Area is value"));
+
+    app.click("tile-1");
+    assert_eq!(app.rt.state.selected, Some(1));
+    assert!(app.exists("edit-position"), "a tile opens the same details");
+    app.press(Key::Right);
+    assert_ne!(
+        app.rt.state.selected,
+        Some(1),
+        "right leaves the tile on the left"
+    );
+
+    app.click("segment0");
+    assert!(!app.rt.state.holdings_map);
+    assert!(app.exists("holding-1"), "back to the row");
+}
+
+#[test]
+fn a_phone_can_open_the_holdings_map() {
+    let mut app = Harness::phone();
+    app.click(Page::Holdings.key());
+    app.tap("segment1");
+    app.click("segment1");
+    assert!(app.exists("tile-0"));
+    app.tap("tile-0");
+    app.click("tile-0");
+    assert_eq!(app.rt.state.selected, Some(0));
+    assert!(app.exists("edit-position"), "the details take the map's place");
 }
 
 #[test]

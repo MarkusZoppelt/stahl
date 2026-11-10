@@ -34,7 +34,7 @@ pub fn about(page: Page) -> &'static str {
     match page {
         Page::Overview => "Your total value today, how it got here, and what needs a look.",
         Page::Holdings => {
-            "Everything you own, one row per position. Select a row for its cost and purchases."
+            "Everything you own, as a table or a map. Select one for its cost and purchases."
         }
         Page::Allocation => {
             "How your money splits across asset classes, and how that compares with your policy."

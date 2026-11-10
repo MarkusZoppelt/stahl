@@ -97,6 +97,16 @@ fn main() {
         &[
             ("overview", |s| scene(s, Page::Overview)),
             ("holdings", |s| scene(s, Page::Holdings)),
+            ("holdings-map", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("holdings-map-light", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("holdings-light", |s| {
                 scene(s, Page::Holdings);
                 s.set_theme(ThemeMode::Light);
@@ -207,6 +217,10 @@ fn main() {
             }),
             ("phone-overview", |s| phone(s, Page::Overview)),
             ("phone-holdings", |s| phone(s, Page::Holdings)),
+            ("phone-holdings-map", |s| {
+                phone(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
             ("phone-holding-details", |s| {
                 phone(s, Page::Holdings);
                 s.select_position(0);
