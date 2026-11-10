@@ -40,6 +40,7 @@ All of these live in `src/theme.rs`. A page never defines its own.
 | `FIGURE` | Key figures beside a label (`ui::stat`). Newsreader 24, tabular |
 | `SECTION` | A section's name (`ui::title`). Newsreader 18 |
 | `WORDMARK` | "Stahl Capital" in the sidebar. Newsreader 16 |
+| `FACT` | The figures under the Overview's sentences. Inter 15, medium, tabular |
 | `NUMBER` | Numbers in tables and badges. Inter 13, medium, tabular |
 | `kit.ty.*` | Every other piece of text, from rune-kit, in Inter |
 | `Theme::up/down/warn/info` | Gain, loss, warning, information. Nothing else |

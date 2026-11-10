@@ -67,6 +67,8 @@ pub const FIGURE: TextStyle = TextStyle::new(24.0, 360.0)
     .lh(30.0)
     .tracking(-0.3)
     .features("'tnum' 1");
+/// A figure under the Overview's sentences: quieter than [`FIGURE`], louder than [`NUMBER`].
+pub const FACT: TextStyle = TextStyle::new(15.0, 500.0).lh(20.0).features("'tnum' 1");
 pub const NUMBER: TextStyle = TextStyle::new(13.0, 500.0).features("'tnum' 1");
 
 /// Colours for allocation charts, cycled by slice.

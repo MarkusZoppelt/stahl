@@ -701,6 +701,10 @@ mod tests {
         assert_eq!(statement.figures[0].note.as_deref(), Some("-1.1%"));
         assert_eq!(statement.figures[1].value, "None", "no money moved");
         assert_eq!(
+            statement.figures[1].note.as_deref(),
+            Some("All of it was the market")
+        );
+        assert_eq!(
             statement.figures.len(),
             3,
             "the change, the money, and the leader"

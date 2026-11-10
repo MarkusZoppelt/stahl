@@ -64,18 +64,51 @@ const FLASH: &[Beat] = &[
     Beat::new(0.9).opacity(0.0),
 ];
 
-fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+/// The total, with today's move under it. The hero of the page.
+fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
     let k = &t.kit;
     let Some(summary) = &s.summary else {
         return col();
     };
-    let points = s
-        .history
-        .as_ref()
-        .map_or(&[][..], |history| &history.points[..]);
     let day = t.change(summary.day_change_percent);
-    let room = ui::room(s, cx);
-    let narrow = room == ui::Room::Narrow;
+    col()
+        .gap(2.0)
+        .child(ui::caption("Total value", t))
+        .child(
+            RollingText::new("hero-total", s.money(summary.total_value))
+                .font(if narrow { HERO_COMPACT } else { HERO })
+                .color(k.c.text_base)
+                .value(summary.total_value)
+                .build(k)
+                .key("total-value"),
+        )
+        .child(
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    RollingText::new(
+                        "hero-day",
+                        format!(
+                            "{} ({})",
+                            s.signed_money(summary.day_change),
+                            format::percent(summary.day_change_percent),
+                        ),
+                    )
+                    .font(k.ty.ui_medium)
+                    .color(day)
+                    .value(summary.day_change)
+                    .build(k),
+                )
+                .child(ui::muted("today", t)),
+        )
+}
+
+/// How the total splits. Beside it when there's room; under it, or below the agenda on a phone.
+fn hero_figures(s: &State, t: &Theme, room: ui::Room) -> El {
+    let Some(summary) = &s.summary else {
+        return col();
+    };
     let figures = [
         ui::stat(
             "Unrealized PnL",
@@ -87,25 +120,41 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         ui::stat("Securities", s.money(summary.securities_value), None, t),
         ui::stat("Cash", s.money(summary.cash_value), None, t),
     ];
-    // Beside the total when there's room; under it otherwise, in two columns on a phone.
-    let figures = match room {
+    match room {
         ui::Room::Wide => row().center_y().gap(36.0).pb(2.0).children(figures),
         _ => ui::columns(room, [3, 3, 2], 16.0).children(figures),
+    }
+}
+
+fn hero(s: &State, t: &Theme, cx: &Cx<State>, with_figures: bool) -> El {
+    let Some(summary) = &s.summary else {
+        return col();
     };
-    let top = if room != ui::Room::Wide {
-        col().w_full().gap(20.0)
-    } else {
+    let room = ui::room(s, cx);
+    let narrow = room == ui::Room::Narrow;
+    let day = t.change(summary.day_change_percent);
+    let total = hero_total(s, t, narrow);
+    let body = if !with_figures {
+        total
+    } else if room == ui::Room::Wide {
         row()
             .center_y()
             .w_full()
             .justify_between()
             .items_end()
             .gap(32.0)
+            .child(total)
+            .child(hero_figures(s, t, room))
+    } else {
+        col()
+            .w_full()
+            .gap(16.0)
+            .child(total)
+            .child(hero_figures(s, t, room))
     };
     col()
         .key("hero")
         .w_full()
-        .gap(12.0)
         .child(
             // A new key each refresh, which replays it: the numbers just changed, look here.
             el().key(format!("hero-flash-{}", s.price_updates))
@@ -117,50 +166,7 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .a11y_hidden()
                 .sequence(Sequence::new(FLASH)),
         )
-        .child(
-            top.child(
-                col()
-                    .gap(2.0)
-                    .child(ui::caption("Total value", t))
-                    .child(
-                        RollingText::new("hero-total", s.money(summary.total_value))
-                            .font(if narrow { HERO_COMPACT } else { HERO })
-                            .color(k.c.text_base)
-                            .value(summary.total_value)
-                            .build(k)
-                            .key("total-value"),
-                    )
-                    .child(
-                        row()
-                            .center_y()
-                            .gap(8.0)
-                            .child(
-                                RollingText::new(
-                                    "hero-day",
-                                    format!(
-                                        "{} ({})",
-                                        s.signed_money(summary.day_change),
-                                        format::percent(summary.day_change_percent),
-                                    ),
-                                )
-                                .font(k.ty.ui_medium)
-                                .color(day)
-                                .value(summary.day_change)
-                                .build(k),
-                            )
-                            .child(ui::muted("today", t)),
-                    ),
-            )
-            .child(figures),
-        )
-        .child(col().w_full().child(charts::value_chart(
-            s,
-            points,
-            t,
-            cx,
-            "overview-chart",
-            230.0,
-        )))
+        .child(body)
 }
 
 fn allocation_card(s: &State, t: &Theme) -> El {
@@ -380,8 +386,8 @@ fn first_steps(s: &State, t: &Theme) -> El {
             .gap(4.0)
             .child(ui::header(
                 "Your portfolio is empty",
-                "Once it has positions, this page shows their total value, how it has moved, and \
-                 anything that needs a look.",
+                "Once it has positions, this page says what changed, where you stand, and what to \
+                 look at.",
                 t,
             ))
             .child(col().w_full().mt(8.0).children(steps)),
@@ -389,20 +395,27 @@ fn first_steps(s: &State, t: &Theme) -> El {
     )
 }
 
+/// Overview reads top to bottom: what happened, where you stand, what to do. The month's chart
+/// is on Performance, so a usual window shows this whole page without the agenda falling off it.
 pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     if s.positions.is_empty() {
         return first_steps(s, t);
     }
+    let room = ui::room(s, cx);
+    let narrow = room == ui::Room::Narrow;
+    // On a phone the three standing figures follow the agenda, so what to do is on screen
+    // without scrolling. The total stays the hero, above it.
     col()
         .w_full()
-        .gap(28.0)
-        .children(overview::statement(s, t, cx))
-        .child(hero(s, t, cx))
+        .gap(if narrow { 16.0 } else { 24.0 })
+        .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
+        .child(hero(s, t, cx, !narrow))
+        .child(ui::entering(overview::agenda(s, t, narrow), 1))
+        .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
-            ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
-                .child(ui::entering(allocation_card(s, t), 0))
-                .child(ui::entering(movers_card(s, t), 1))
-                .child(ui::entering(overview::agenda(s, t), 2)),
+            ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })
+                .child(ui::entering(allocation_card(s, t), 2))
+                .child(ui::entering(movers_card(s, t), 3)),
         )
 }
 

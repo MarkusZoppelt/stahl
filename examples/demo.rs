@@ -13,6 +13,7 @@ use portfolio_rs::config::ThemeMode;
 use stahl::{
     app, demo,
     state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
+    statement::Since,
     update::Installation,
 };
 use tokio::runtime::Builder;
@@ -86,6 +87,22 @@ fn main() {
         s.compact = true;
         scene(s, page);
     }
+    /// As on the first day: nothing to compare with yet.
+    fn first_look(s: &mut State) {
+        s.since = Some(Since::First);
+        s.change = None;
+        s.history = None;
+    }
+    /// A portfolio on its targets, so the agenda has nothing to ask.
+    fn on_target(s: &mut State) {
+        if let Some(review) = &mut s.review.data {
+            for class in &mut review.allocations {
+                class.actual_percent = class.target_percent + 0.6 * class.drift_percent.signum();
+                class.drift_percent = class.actual_percent - class.target_percent;
+                class.within_tolerance = true;
+            }
+        }
+    }
     fn mac() -> Installation {
         Installation::MacApp {
             bundle: "/Applications/Stahl Capital.app".into(),
@@ -95,6 +112,7 @@ fn main() {
         backend,
         env::args().skip(1).collect(),
         &[
+            // A return after some days: the demo's last look was earlier in the week.
             ("overview", |s| scene(s, Page::Overview)),
             ("holdings", |s| scene(s, Page::Holdings)),
             ("holding-details", |s| {
@@ -200,7 +218,39 @@ fn main() {
                 scene(s, Page::Overview);
                 s.privacy = true;
             }),
+            ("overview-first-look", |s| {
+                scene(s, Page::Overview);
+                first_look(s);
+            }),
+            ("overview-first-light", |s| {
+                scene(s, Page::Overview);
+                first_look(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("overview-clear", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+            }),
+            ("overview-clear-light", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("phone-overview", |s| phone(s, Page::Overview)),
+            ("phone-overview-first", |s| {
+                phone(s, Page::Overview);
+                first_look(s);
+            }),
+            ("phone-overview-clear", |s| {
+                phone(s, Page::Overview);
+                on_target(s);
+            }),
+            ("phone-privacy", |s| {
+                phone(s, Page::Overview);
+                s.privacy = true;
+            }),
             ("phone-holdings", |s| phone(s, Page::Holdings)),
             ("phone-holding-details", |s| {
                 phone(s, Page::Holdings);

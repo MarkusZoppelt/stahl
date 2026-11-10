@@ -706,6 +706,20 @@ fn overview_says_what_changed_since_the_last_look() {
 }
 
 #[test]
+fn overview_reads_as_what_happened_where_you_stand_and_what_to_do() {
+    let app = Harness::boot(true, None);
+    assert!(app.exists("statement-text"), "what happened");
+    assert!(app.exists("total-value"), "where you stand");
+    assert!(app.exists("agenda"), "what to do");
+    assert!(app.exists("overview-allocation"));
+    assert!(app.exists("mover-0"));
+    assert!(
+        !app.exists("overview-chart"),
+        "the month's chart lives on Performance, so the agenda stays on this page"
+    );
+}
+
+#[test]
 fn overview_agrees_with_the_review_and_leads_to_the_fix() {
     let mut app = Harness::boot(true, None);
     // The demo is four classes out of tolerance: Overview must not call that all clear.
@@ -1007,7 +1021,9 @@ fn a_new_position_defaults_to_the_class_the_templates_use() {
 #[test]
 fn a_chart_follows_the_pointer() {
     let mut app = Harness::boot(true, None);
-    let (x, y) = app.rt.find("overview-chart").unwrap();
+    // The month's chart is on Performance. Overview names the change instead of drawing it again.
+    app.click(Page::Performance.key());
+    let (x, y) = app.rt.find("performance-chart").unwrap();
     app.rt.pointer_move(x, y);
     thread::sleep(Duration::from_millis(1));
     app.settle();
