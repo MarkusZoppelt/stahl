@@ -1,5 +1,6 @@
 //! Stahl Capital: a native desktop app for `portfolio_rs`, built on Rune.
 
+pub mod agenda;
 pub mod app;
 pub mod backend;
 pub mod demo;

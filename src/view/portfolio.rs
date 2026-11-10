@@ -2,10 +2,7 @@
 
 use std::cmp::Ordering;
 
-use portfolio_rs::{
-    mcp::dto::Severity,
-    state::{PositionDto, TopMoverDto},
-};
+use portfolio_rs::state::{PositionDto, TopMoverDto};
 use rune::{
     Beat, Color, Cx, El, Icon, Key, KeyEvent, PopupItem, PopupMenu, ScrollPos, Sequence, Tx, col,
     el, icon, popup_menu_supported, row, text, tok::motion::LEAD,
@@ -275,43 +272,6 @@ fn movers_card(s: &State, t: &Theme) -> El {
         )
 }
 
-fn attention_card(s: &State, t: &Theme) -> El {
-    let k = &t.kit;
-    let mut findings: Vec<_> = s
-        .findings
-        .iter()
-        .filter(|finding| !matches!(finding.severity, Severity::Info))
-        .collect();
-    findings.sort_by_key(|finding| !matches!(finding.severity, Severity::Critical));
-    ui::ledger(t)
-        .child(ui::title("Needs attention", t))
-        .children(findings.is_empty().then(|| {
-            row()
-                .center_y()
-                .gap(8.0)
-                .center_y()
-                .child(icon(&icons::CHECK_CIRCLE, 16.0).color(t.up))
-                .child(
-                    text("Nothing right now. Your data looks good.")
-                        .font(k.ty.ui)
-                        .color(k.c.text_muted)
-                        .wrap()
-                        .shrink(),
-                )
-        }))
-        .child(
-            col()
-                .gap(8.0)
-                .children(findings.into_iter().take(4).map(|finding| {
-                    let color = match finding.severity {
-                        Severity::Critical => t.down,
-                        _ => t.warn,
-                    };
-                    ui::finding(color, finding.message.clone(), None, t)
-                })),
-        )
-}
-
 /// One thing to do next, with the button that does it.
 fn step(number: usize, heading: &str, detail: String, action: Option<El>, t: &Theme) -> El {
     let k = &t.kit;
@@ -442,7 +402,7 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
                 .child(ui::entering(allocation_card(s, t), 0))
                 .child(ui::entering(movers_card(s, t), 1))
-                .child(ui::entering(attention_card(s, t), 2)),
+                .child(ui::entering(overview::agenda(s, t), 2)),
         )
 }
 

@@ -1,8 +1,11 @@
-//! The Overview's own parts: what changed since the owner last looked.
+//! The Overview's own parts: what changed since the owner last looked, and what to look at.
 
-use rune::{Cx, El, col, row, text};
+use rune::{Cx, El, col, icon, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize};
 
 use crate::{
+    agenda::{Calm, Item, Weight},
+    icons,
     state::State,
     statement::{Figure, Tone},
     theme::{LEDE, LEDE_COMPACT, Theme},
@@ -47,4 +50,85 @@ pub fn statement(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
             )
             .children(figures),
     )
+}
+
+fn agenda_item(index: usize, item: &Item, t: &Theme) -> El {
+    let k = &t.kit;
+    let color = match item.weight {
+        Weight::Total | Weight::Critical => t.down,
+        Weight::Warning => t.warn,
+        Weight::Notice => t.info,
+    };
+    let action = item.action;
+    row()
+        .key(format!("agenda-{}", item.id))
+        .w_full()
+        .items_start()
+        .gap(12.0)
+        .py(12.0)
+        // The ledger's own rule heads the first.
+        .children((index > 0).then(|| ui::rule(t).absolute(0.0, 0.0)))
+        .child(ui::dot(color).mt(6.0))
+        .child(
+            col()
+                .grow(1.0)
+                .w(0.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(
+                    text(item.title.clone())
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_base)
+                        .wrap(),
+                )
+                .children(
+                    item.detail
+                        .clone()
+                        .map(|detail| ui::caption(detail, t).wrap()),
+                ),
+        )
+        .child(
+            Button::new(action.label())
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut State| action.perform(s))
+                .build(k)
+                .key(format!("agenda-action-{}", item.id)),
+        )
+}
+
+/// What deserves a look, most important first, each with the one button that deals with it.
+pub fn agenda(s: &State, t: &Theme) -> El {
+    let k = &t.kit;
+    let items = s.agenda();
+    let ledger = ui::ledger(t)
+        .key("agenda")
+        .child(ui::title("What to look at", t));
+    if !items.is_empty() {
+        return ledger.child(
+            col().w_full().children(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| agenda_item(index, item, t)),
+            ),
+        );
+    }
+    let calm = match s.agenda_calm() {
+        Calm::Checking => ui::muted("Checking against your policy…", t),
+        Calm::Clear(words) => row()
+            .key("agenda-clear")
+            .w_full()
+            .items_start()
+            .gap(8.0)
+            .child(icon(&icons::CHECK_CIRCLE, 16.0).color(t.up).mt(2.0))
+            .child(
+                text(words)
+                    .font(k.ty.ui)
+                    .color(k.c.text_muted)
+                    .wrap()
+                    .shrink(),
+            ),
+    };
+    ledger.child(calm)
 }

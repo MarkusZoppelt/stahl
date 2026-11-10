@@ -706,6 +706,25 @@ fn overview_says_what_changed_since_the_last_look() {
 }
 
 #[test]
+fn overview_agrees_with_the_review_and_leads_to_the_fix() {
+    let mut app = Harness::boot(true, None);
+    // The demo is four classes out of tolerance: Overview must not call that all clear.
+    assert!(!app.has_text("Nothing right now"));
+    assert!(app.has_text("4 of 5 asset classes are outside their tolerance"));
+    assert_eq!(app.rt.state.agenda_len(), 1);
+
+    app.click("agenda-action-drift");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+}
+
+#[test]
+fn an_overview_without_a_policy_still_checks_the_prices() {
+    let app = Harness::boot(false, Some(demo::POSITIONS));
+    assert_eq!(app.rt.state.agenda_len(), 0);
+    assert!(app.has_text("Every price is current."));
+}
+
+#[test]
 fn the_theme_switches_and_persists() {
     let mut app = Harness::boot(false, Some(demo::POSITIONS));
     assert!(app.rt.state.is_dark());

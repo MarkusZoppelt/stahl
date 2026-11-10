@@ -1748,7 +1748,12 @@ impl State {
     /// Fetch what the current page shows.
     pub fn load_page(&mut self) {
         match self.page {
-            Page::Overview | Page::Performance => self.load_history(),
+            Page::Overview => {
+                self.load_history();
+                // The agenda reads the same review as the Review page, so they never disagree.
+                self.load_review();
+            }
+            Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
             Page::Rebalance => self.load_simulation(),
             Page::Briefing => self.load_briefing(),
