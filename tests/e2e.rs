@@ -2690,7 +2690,10 @@ fn a_rebalance_boundary_moves_by_drag_and_by_key() {
     );
     app.rt.pointer_up(from + 140.0, mid);
     app.settle();
-    assert!(app.rt.state.rebalance.custom, "letting go keeps the split");
+    assert!(
+        app.rt.state.rebalance.origin == stahl::state::RebalanceOrigin::Custom,
+        "letting go keeps the split"
+    );
     assert!(app.has_text("Increase") || app.has_text("Reduce"));
 
     app.rt.update(|_, tx| tx.focus("rebalance-handle-0", true));
@@ -2703,7 +2706,35 @@ fn a_rebalance_boundary_moves_by_drag_and_by_key() {
     );
     app.press(Key::Enter);
     assert!(
-        app.rt.state.rebalance.custom,
+        app.rt.state.rebalance.origin == stahl::state::RebalanceOrigin::Custom,
         "Enter snaps toward a target and stays a plan"
     );
+}
+
+#[test]
+fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    app.tap("rebalance-amount");
+    app.click("rebalance-amount");
+    app.type_text("2000");
+    assert_eq!(
+        app.rt.state.rebalance.origin,
+        stahl::state::RebalanceOrigin::Flow(2000.0)
+    );
+    assert!(app.has_text("Buying only"), "new money is placed by buying");
+    assert!(app.has_text("Where new money goes"));
+
+    app.command('a', false);
+    app.press(Key::Backspace);
+    app.type_text("1.000");
+    assert!(
+        app.has_text("could mean"),
+        "an ambiguous amount is refused, not guessed"
+    );
+
+    app.command('a', false);
+    app.press(Key::Backspace);
+    app.type_text("-500000");
+    assert!(app.has_text("That's more than the portfolio."));
 }

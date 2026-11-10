@@ -1,12 +1,12 @@
 //! The rebalance bar: a split the owner can drag, with the trades that would get there.
 
 use rune::{Color, Cursor, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, el, row, text};
-use rune_kit::RollingText;
+use rune_kit::{RollingText, TextInput};
 
 use crate::{
     format,
     rebalance::{self, Class, Plan},
-    state::State,
+    state::{BadNumber, RebalanceOrigin, State, parse_number},
     theme::{NUMBER, Theme},
     view::ui,
 };
@@ -105,18 +105,24 @@ fn named(classes: &[Class], name: &str) -> bool {
 }
 
 fn shown(s: &State, classes: &[Class]) -> Plan {
-    if s.rebalance.custom
-        && s.rebalance.names.len() == classes.len()
+    match s.rebalance.origin {
+        RebalanceOrigin::Custom if names_match(s, classes) => {
+            rebalance::from_values(classes, s.rebalance.values.clone(), 0.0)
+        }
+        RebalanceOrigin::Flow(amount) => {
+            rebalance::place(classes, amount).unwrap_or_else(|_| rebalance::today(classes))
+        }
+        RebalanceOrigin::Today | RebalanceOrigin::Custom => rebalance::today(classes),
+    }
+}
+
+fn names_match(s: &State, classes: &[Class]) -> bool {
+    s.rebalance.names.len() == classes.len()
         && s.rebalance
             .names
             .iter()
             .zip(classes)
             .all(|(name, class)| name == &class.name)
-    {
-        rebalance::from_values(classes, s.rebalance.values.clone(), 0.0)
-    } else {
-        rebalance::today(classes)
-    }
 }
 
 fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
@@ -130,6 +136,7 @@ fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
         .child(policy_track(classes, t))
         .child(bar(s, t, classes, plan))
         .child(legend(s, t, classes, plan))
+        .child(amount_field(s, t, plan))
 }
 
 fn policy_track(classes: &[Class], t: &Theme) -> El {
@@ -447,16 +454,107 @@ fn shown_value(s: &State, index: usize) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn amount_field(s: &State, t: &Theme, plan: &Plan) -> El {
+    let input = TextInput::new(&s.rebalance.amount)
+        .placeholder("2000")
+        .width(None)
+        .label("New money")
+        .on_edit(|s: &mut State| &mut s.rebalance.amount)
+        .on_change(|s: &mut State, _| apply_amount(s))
+        .build(&t.kit)
+        .key("rebalance-amount");
+    let mut field = col()
+        .w_full()
+        .gap(6.0)
+        .child(ui::caption("New money", t))
+        .child(input)
+        .child(ui::caption(
+            "Buys only, to get closer to your targets. A negative amount is a withdrawal, \
+             selling only.",
+            t,
+        ));
+    if let Some(error) = &s.rebalance.amount_error {
+        field = field.child(ui::danger(error.clone(), t).key("rebalance-amount-error"));
+    } else if let RebalanceOrigin::Flow(amount) = s.rebalance.origin {
+        let note = if amount >= 0.0 {
+            format!("Buying only. Afterwards {}.", s.money(plan.total))
+        } else {
+            format!("Selling only. Afterwards {}.", s.money(plan.total))
+        };
+        field = field.child(ui::caption(note, t).key("rebalance-flow"));
+    }
+    field
+}
+
+/// Read the amount field and, if it is a number, place it. Anything ambiguous stays unparsed.
+fn apply_amount(s: &mut State) {
+    let text = s.rebalance.amount.text.clone();
+    // A sign or a decimal mark on its own is the start of a number, not a mistake.
+    if matches!(text.trim(), "-" | "+" | "." | ",") {
+        s.rebalance.amount_error = None;
+        return;
+    }
+    match parse_number(&text) {
+        Ok(None) => {
+            s.rebalance.amount_error = None;
+            s.rebalance.origin = RebalanceOrigin::Today;
+            glide(s);
+        }
+        Ok(Some(amount)) => {
+            let classes = load_classes(s);
+            match rebalance::place(&classes, amount) {
+                Ok(_) => {
+                    s.rebalance.amount_error = None;
+                    s.rebalance.origin = RebalanceOrigin::Flow(amount);
+                    glide(s);
+                }
+                Err(error) => s.rebalance.amount_error = Some(error.message().to_string()),
+            }
+        }
+        Err(error) => s.rebalance.amount_error = Some(amount_error(&text, error)),
+    }
+}
+
+fn amount_error(text: &str, error: BadNumber) -> String {
+    let text = text.trim();
+    match error {
+        BadNumber::NotANumber => format!(
+            "\"{text}\" isn't a number. Use digits, like 2000 or 2000.50, without a currency symbol."
+        ),
+        BadNumber::Ambiguous { thousands, decimal } => format!(
+            "\"{text}\" could mean {thousands} or {decimal}. Write {thousands}, or {decimal}0 for the smaller number."
+        ),
+    }
+}
+
+fn glide(s: &mut State) {
+    let classes = load_classes(s);
+    let plan = shown(s, &classes);
+    let values = plan.values;
+    for offset in &s.rebalance.offsets {
+        offset.snap([0.0, 0.0]);
+    }
+    paint(s, &values, true);
+}
+
 fn trades_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let heading = if s.rebalance.custom {
-        "This split"
-    } else {
-        "As it is"
-    };
-    let detail = if s.rebalance.custom {
-        "What the bar is showing now. Nothing has been traded."
-    } else {
-        "The portfolio as it is. Drag a boundary to see the trades."
+    let (heading, detail) = match s.rebalance.origin {
+        RebalanceOrigin::Flow(amount) if amount >= 0.0 => (
+            "Where new money goes",
+            "Buying only, selling nothing, as close to the targets as that gets.",
+        ),
+        RebalanceOrigin::Flow(_) => (
+            "Where a withdrawal comes from",
+            "Selling only, buying nothing, as close to the targets as that gets.",
+        ),
+        RebalanceOrigin::Custom => (
+            "This split",
+            "What the bar is showing now. Nothing has been traded.",
+        ),
+        RebalanceOrigin::Today => (
+            "As it is",
+            "The portfolio as it is. Drag a boundary, or say how much you have to invest.",
+        ),
     };
     ui::card(t)
         .child(ui::header(heading, detail, t))
@@ -611,7 +709,7 @@ fn end(s: &mut State, cancel: bool) {
     let values = s.rebalance.drag_values.clone();
     s.rebalance.names = classes.iter().map(|class| class.name.clone()).collect();
     s.rebalance.values = values;
-    s.rebalance.custom = true;
+    s.rebalance.origin = RebalanceOrigin::Custom;
     s.rebalance.dragging = false;
     s.rebalance.boundary = None;
     s.rebalance.held = None;
@@ -697,7 +795,7 @@ fn commit_move(s: &mut State, classes: &[Class], values: &[f64], index: usize, w
     let next = rebalance::move_boundary(values, &floors, index, want);
     s.rebalance.names = classes.iter().map(|class| class.name.clone()).collect();
     s.rebalance.values = next.clone();
-    s.rebalance.custom = true;
+    s.rebalance.origin = RebalanceOrigin::Custom;
     s.rebalance.dragging = false;
     for offset in &s.rebalance.offsets {
         offset.snap([0.0, 0.0]);

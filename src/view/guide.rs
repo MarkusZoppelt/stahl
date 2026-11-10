@@ -41,7 +41,9 @@ pub fn about(page: Page) -> &'static str {
         }
         Page::Performance => "Your value over time, separating market moves from money you added.",
         Page::Review => "How your portfolio compares with your policy, and what to do about it.",
-        Page::Rebalance => "Drag the boundaries to try a split. Stahl never trades.",
+        Page::Rebalance => {
+            "Drag the boundaries, or say how much you have to invest. Stahl never trades."
+        }
         Page::Policy => {
             "How you want your money split, and your limits. Review and Rebalance measure against it."
         }

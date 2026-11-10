@@ -632,6 +632,14 @@ mod tests {
     }
 
     #[test]
+    fn a_small_amount_goes_where_it_most_reduces_the_gap() {
+        // Gold is only a little under its target, and already closer than Stocks and Bonds
+        // can be brought, so the money goes to those two and Gold is left alone.
+        let plan = place(&book(), 2.0).unwrap();
+        values_approx(&plan.values, &[41.35, 5.65, 5.0, 25.0, 25.0]);
+    }
+
+    #[test]
     fn an_amount_too_small_to_fix_the_drift_buys_the_gap_and_sells_nothing() {
         let plan = place(&drifted(), 10.0).unwrap();
         values_approx(&plan.values, &[80.0, 30.0]);

@@ -12,7 +12,7 @@ use std::{env, fs, process, time::SystemTime};
 use portfolio_rs::config::ThemeMode;
 use stahl::{
     app, demo,
-    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, RebalanceOrigin, State, UpdatePhase},
     update::Installation,
 };
 use tokio::runtime::Builder;
@@ -113,6 +113,11 @@ fn main() {
                 scene(s, Page::Rebalance);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            ("rebalance-invest", |s| {
+                scene(s, Page::Rebalance);
+                s.rebalance.amount.replace_text("2000");
+                s.rebalance.origin = RebalanceOrigin::Flow(2000.0);
             }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {

@@ -431,13 +431,27 @@ pub struct SettingsForm {
 /// How many classes the rebalance bar prepares live values for.
 const REBALANCE_SLOTS: usize = 12;
 
+/// What produced the split the bar is showing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RebalanceOrigin {
+    /// The portfolio as it is.
+    Today,
+    /// New money, or a withdrawal, placed by buying or selling only.
+    Flow(f64),
+    /// A boundary the owner dragged or stepped.
+    Custom,
+}
+
 /// The allocation being dragged on the Rebalance page. Live values move the bar without
 /// rebuilding the view; the view must not read `press`, `held` or `drag_values`.
 pub struct RebalancePage {
     /// Class names `values` belong to. A mismatch means the portfolio changed under a drag.
     pub names: Vec<String>,
     pub values: Vec<f64>,
-    pub custom: bool,
+    pub origin: RebalanceOrigin,
+    /// New money, or a withdrawal. Parsed with [`parse_number`].
+    pub amount: TextEdit,
+    pub amount_error: Option<String>,
     /// A boundary is held. The view reads this to show live amounts instead of rolling ones.
     pub dragging: bool,
     /// The bar has been measured, so its segments can follow live rects.
@@ -461,7 +475,9 @@ impl RebalancePage {
         Self {
             names: Vec::new(),
             values: Vec::new(),
-            custom: false,
+            origin: RebalanceOrigin::Today,
+            amount: TextEdit::new(""),
+            amount_error: None,
             dragging: false,
             placed: false,
             bar_width: 0.0,
@@ -1116,6 +1132,7 @@ impl State {
         self.form
             .as_ref()
             .is_some_and(|form| form.amount.focused || form.quantity.focused || form.price.focused)
+            || self.rebalance.amount.focused
     }
 
     /// 0 to 1 through a chart's draw-in.
