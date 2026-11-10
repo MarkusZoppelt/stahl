@@ -480,7 +480,7 @@ fn tile_line(
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;
-    let line_h = (height * 0.28).clamp(22.0, 56.0);
+    let line_h = (height * 0.34).clamp(22.0, 96.0);
     let line_w = (width - 28.0).max(8.0);
     Some(
         super::charts::sparkline(

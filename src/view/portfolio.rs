@@ -485,7 +485,12 @@ struct Columns {
     /// How much of the portfolio's move today came from the holding. Narrower tables fold it
     /// under Today's own percentage instead of dropping it.
     impact: bool,
+    /// Each holding's past month, when there's room and any holding has one.
+    lines: bool,
 }
+
+/// How wide a row's line is, and its column.
+const LINE_W: f32 = 72.0;
 
 impl Columns {
     fn for_width(width: f32) -> Columns {
@@ -495,6 +500,7 @@ impl Columns {
             today: width >= 340.0,
             // Beside the details pane the table already drops Class and PnL; this goes with them.
             impact: width >= 880.0,
+            lines: false,
         }
     }
 
@@ -765,14 +771,11 @@ fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) 
             false,
             columns.name_grow(),
         ))
-        .children(sparkline(
-            s,
-            position,
-            if s.compact { 44.0 } else { 72.0 },
-            18.0,
-            progress,
-            t,
-        ))
+        // A holding without a line keeps the column's width, so the others stay aligned.
+        .children(columns.lines.then(|| {
+            sparkline(s, position, LINE_W, 18.0, progress, t)
+                .unwrap_or_else(|| el().w(LINE_W).h(18.0).a11y_hidden())
+        }))
         .children(columns.class.then(|| {
             cell(
                 ui::muted(position.asset_class.clone(), t)
@@ -1049,7 +1052,15 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let rows = holding_rows(s);
     let end = rows.len().saturating_sub(1);
     let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
-    let columns = Columns::for_width(width);
+    let has_lines = s
+        .history
+        .as_ref()
+        .is_some_and(|history| !history.series.is_empty());
+    let columns = Columns {
+        // On a phone the line would push the value into an ellipsis: the map has the lines there.
+        lines: has_lines && Columns::for_width(width).pnl,
+        ..Columns::for_width(width)
+    };
     let previous = s.summary.as_ref().map_or(0.0, |summary| {
         previous_total(summary.total_value, summary.day_change)
     });
@@ -1120,7 +1131,17 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         col()
             .w_full()
             .gap(8.0)
-            .child(ui::caption("Area is value. The tint is today's move.", t).key("map-about"))
+            .child(
+                ui::caption(
+                    if has_lines {
+                        "Area is value, the tint is today's change, and lines are the past month."
+                    } else {
+                        "Area is value, and the tint is today's change."
+                    },
+                    t,
+                )
+                .key("map-about"),
+            )
             .child(super::treemap::view(
                 s,
                 t,
@@ -1150,6 +1171,14 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         columns.name_grow(),
                         t,
                     ))
+                    .children(columns.lines.then(|| {
+                        row().w(LINE_W).child(
+                            text("Past month")
+                                .font(k.ty.text_xsmall_medium)
+                                .color(k.c.text_muted)
+                                .truncate(),
+                        )
+                    }))
                     .children(columns.class.then(|| {
                         header_cell(s, "sort-class", "Class", SortBy::Class, false, 1.0, t)
                     }))
@@ -1218,7 +1247,6 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(16.0)
         .child(top)
-        .child(ui::caption("Lines are the past month.", t).key("spark-period"))
         .children(map)
         .children(table)
 }
