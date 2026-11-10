@@ -122,6 +122,16 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            ("performance-span", |s| {
+                scene(s, Page::Performance);
+                s.measure.span = Some((2, 14));
+            }),
+            ("performance-span-light", |s| {
+                scene(s, Page::Performance);
+                s.measure.span = Some((2, 14));
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("review", |s| scene(s, Page::Review)),
             ("rebalance", |s| scene(s, Page::Rebalance)),
             ("policy", |s| scene(s, Page::Policy)),

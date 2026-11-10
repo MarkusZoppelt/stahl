@@ -952,6 +952,68 @@ fn a_new_position_defaults_to_the_class_the_templates_use() {
 }
 
 #[test]
+fn dragging_the_chart_measures_that_span_until_escape() {
+    let mut app = Harness::boot(true, None);
+    app.command('4', false);
+    app.settle();
+    let (x, y) = app.rt.find("performance-chart").unwrap();
+    app.rt.pointer_down(x - 120.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(x + 80.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(x + 80.0, y);
+    app.settle();
+    let span = app.rt.state.measure.span.expect("the drag is kept");
+    assert!(span.0 < span.1, "{span:?}");
+    assert!(app.has_text("days"), "the readout says how long");
+    app.press(Key::Escape);
+    assert!(app.rt.state.measure.span.is_none(), "escape dismisses it");
+
+    // Shift and the arrows measure too, once the chart has focus.
+    app.click("performance-chart");
+    app.rt.key(KeyEvent {
+        key: Key::Left,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    app.settle();
+    assert!(
+        app.rt.state.measure.span.is_some(),
+        "shift and an arrow measures"
+    );
+}
+
+#[test]
+fn a_phone_measures_on_the_rail_and_a_vertical_drag_still_scrolls() {
+    let mut app = Harness::phone();
+    app.click(Page::Performance.key());
+    app.tap("performance-chart");
+    let (x, y) = app.rt.find("performance-chart").unwrap();
+    // The chart itself is not a drag target, so a finger down the page still scrolls.
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x, y + 90.0, 0.08);
+    app.rt.touch(1, TouchPhase::Ended, x, y + 90.0, 0.12);
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.rt.state.measure.span.is_none(),
+        "a vertical drag on the chart is a scroll"
+    );
+
+    app.tap("chart-rail");
+    let (rx, ry) = app.rt.find("chart-rail").unwrap();
+    app.rt.touch(1, TouchPhase::Started, rx - 60.0, ry, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, rx + 60.0, ry, 0.08);
+    app.rt.touch(1, TouchPhase::Ended, rx + 60.0, ry, 0.12);
+    app.settle();
+    assert!(
+        app.rt.state.measure.span.is_some(),
+        "the rail measures without taking the page"
+    );
+}
+
+#[test]
 fn a_chart_follows_the_pointer() {
     let mut app = Harness::boot(true, None);
     let (x, y) = app.rt.find("overview-chart").unwrap();
@@ -1323,7 +1385,10 @@ fn a_phone_can_open_the_holdings_map() {
     app.tap("tile-0");
     app.click("tile-0");
     assert_eq!(app.rt.state.selected, Some(0));
-    assert!(app.exists("edit-position"), "the details take the map's place");
+    assert!(
+        app.exists("edit-position"),
+        "the details take the map's place"
+    );
 }
 
 #[test]

@@ -29,7 +29,7 @@ use portfolio_rs::{
     },
     validate::ValidationReport,
 };
-use rune::{ClipboardContent, FileDialogOptions, Live, TextEdit, Tx, Waker};
+use rune::{ClipboardContent, Color, FileDialogOptions, Live, LiveText, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
@@ -199,6 +199,49 @@ pub enum SortBy {
     Day,
     /// How much of the portfolio's move today came from the holding.
     Impact,
+}
+
+/// A span measured on the value chart. The band and the readout are live, so a drag does not
+/// rebuild the view on every move. `span` is what stays after the pointer lifts.
+pub struct ChartMeasure {
+    pub span: Option<(usize, usize)>,
+    /// Set for the gesture, so hover doesn't rebuild the view underneath it. The view doesn't read it.
+    pub dragging: bool,
+    pub band: Live<[f32; 4]>,
+    pub shown: Live<f32>,
+    pub pin: Live<[f32; 2]>,
+    pub ink: Live<Color>,
+    pub dates: LiveText,
+    pub change: LiveText,
+    pub detail: LiveText,
+}
+
+impl Default for ChartMeasure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChartMeasure {
+    pub fn new() -> Self {
+        Self {
+            span: None,
+            dragging: false,
+            band: Live::new([0.0, 0.0, 0.0, 0.0]),
+            shown: Live::new(0.0),
+            pin: Live::new([0.0, 0.0]),
+            ink: Live::new(Color::TRANSPARENT),
+            dates: LiveText::new(""),
+            change: LiveText::new(""),
+            detail: LiveText::new(""),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.span = None;
+        self.dragging = false;
+        self.shown.set(0.0);
+    }
 }
 
 /// Data a page fetches when it opens. A failed reload keeps the last result.
@@ -584,6 +627,8 @@ pub struct State {
     pub chart_hover: Option<f32>,
     /// The chart's point nearest the pointer or finger, for a tick as it passes each one.
     pub chart_point: Option<usize>,
+    /// A span dragged out on the value chart, kept until dismissed.
+    pub measure: ChartMeasure,
     pub donut_hover: Option<usize>,
 
     // Pages.
@@ -789,6 +834,7 @@ impl State {
             history_request: 0,
             chart_hover: None,
             chart_point: None,
+            measure: ChartMeasure::new(),
             donut_hover: None,
             search: TextEdit::new(""),
             holdings_map: false,
@@ -1727,6 +1773,7 @@ impl State {
         self.more = false;
         self.chart_hover = None;
         self.chart_point = None;
+        self.measure.clear();
         self.donut_hover = None;
         self.palette = None;
         if page != Page::Holdings {
@@ -1782,6 +1829,7 @@ impl State {
     pub fn set_period(&mut self, period: Period) {
         self.period = period;
         self.chart_hover = None;
+        self.measure.clear();
         self.load_history();
     }
 

@@ -51,6 +51,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        if s.measure.span.take().is_some() {
+            s.measure.clear();
+            return true;
+        }
         return s.palette.take().is_some()
             || s.form.take().is_some()
             || s.new_workspace.take().is_some()
@@ -646,6 +650,12 @@ fn page_column(
         .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
+        })
+        // Empty page, not a control: a click here dismisses a measured span on the chart.
+        .on_press(|s: &mut State| {
+            if s.measure.span.is_some() {
+                s.measure.clear();
+            }
         });
     // On a phone, a pull past the page's top shows the door, and letting go refreshes.
     let scroller = match s.compact.then(|| s.pull.clone()) {
