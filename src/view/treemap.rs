@@ -1,7 +1,7 @@
 //! A squarified treemap of the holdings. Area is value. The layout is a pure function.
 
 use portfolio_rs::state::PositionDto;
-use rune::{Color, El, Key, KeyEvent, Tx, col, el, text, tok::motion::LEAD};
+use rune::{Beat, Color, El, Key, KeyEvent, Sequence, Tx, col, el, text, tok::motion::LEAD};
 
 use crate::{
     format,
@@ -310,6 +310,14 @@ fn direction(key: &Key) -> Option<[f32; 2]> {
     }
 }
 
+/// A tile's words and line while it flies in from its row: hidden, so they don't fly at the row's
+/// scale, then in as it lands. Reduced motion shows them at once.
+const LAND: &[Beat] = &[
+    Beat::new(0.0).opacity(0.0),
+    Beat::new(0.2).opacity(0.0),
+    Beat::new(0.42).opacity(1.0),
+];
+
 /// The wash's opacity for the smallest visible move, and for the largest on the map.
 const WASH_FLOOR: f32 = 0.07;
 const WASH_CAP: f32 = 0.26;
@@ -524,6 +532,10 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                         .pt(10.0)
                         .pl(14.0)
                         .gap(2.0)
+                        // The box flies from its row; its words fade in as it lands, rather than
+                        // flying at the row's scale.
+                        .key(format!("tile-words-{id}"))
+                        .sequence(Sequence::new(LAND))
                         .child(text(shown).font(name_font).color(k.c.text_base).truncate());
                     match detail {
                         Detail::Full => body
@@ -623,7 +635,9 @@ fn tile_line(
             t.kit.c.text_muted.alpha(0.7),
             progress,
         )
-        .absolute(14.0, height - line_h - 10.0),
+        .absolute(14.0, height - line_h - 10.0)
+        .key(format!("tile-line-{}", position.id))
+        .sequence(Sequence::new(LAND)),
     )
 }
 
