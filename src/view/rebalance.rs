@@ -82,7 +82,7 @@ pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .child(money_row(s, t))
         .child(ui::rule(t))
         .child(plot(s, t, &classes, stacked))
-        .child(key(t))
+        .child(key(t, &classes))
         .child(rows(s, t, &classes, &plan, stacked))
         .child(closing(s, t, &plan))
 }
@@ -541,7 +541,7 @@ fn bar_label(line: &str, t: &Theme) -> El {
 }
 
 /// What the marks on a track mean, once, and who pays for a change.
-fn key(t: &Theme) -> El {
+fn key(t: &Theme, classes: &[Class]) -> El {
     let item = |mark: El, line: &str| {
         row()
             .center_y()
@@ -569,7 +569,14 @@ fn key(t: &Theme) -> El {
         .child(item(tick, "target"))
         .child(item(band, "tolerance"))
         .child(el().grow(1.0))
-        .child(ui::caption("Cash takes up the difference.", t))
+        .child(ui::caption(
+            if classes.iter().any(|class| class.cash) {
+                "Cash takes up the difference."
+            } else {
+                "The other classes take up the difference."
+            },
+            t,
+        ))
 }
 
 // --- The rows ---
