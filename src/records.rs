@@ -98,8 +98,10 @@ impl Money {
 /// The figure a plate carries, under its title.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Figure {
-    /// A figure of the portfolio's own: a total, a change.
+    /// A figure of the portfolio's own: a total, a change. Cents only where they matter.
     Money(Money),
+    /// A price in a holding's own currency, where the cents are part of the price.
+    Price(Money),
     /// Something that isn't money: a run of days, a multiple, a number of units.
     Text(String),
 }
@@ -249,6 +251,14 @@ impl Record {
                     whole(money.amount, code)
                 }
             }
+            Figure::Price(money) => {
+                let code = money.currency.as_deref().unwrap_or(portfolio);
+                if hidden {
+                    format::HIDDEN.to_string()
+                } else {
+                    format::currency(money.amount, code)
+                }
+            }
             Figure::Text(text) => text.clone(),
         })
     }
@@ -259,7 +269,8 @@ impl Record {
         let words = Words { hidden, portfolio };
         match &self.kind {
             Kind::Begins { .. } => {
-                "The first valuation Stahl kept. The wall grows from here.".to_string()
+                "Stahl began keeping a valuation on this day. Everything here grows from it."
+                    .to_string()
             }
             Kind::High {
                 previous,
@@ -416,23 +427,11 @@ fn month_name(since: NaiveDate, seen_from: NaiveDate) -> String {
 
 /// An amount without cents once it is large enough that they don't matter.
 fn whole(value: f64, currency: &str) -> String {
-    let value = value.abs();
-    if value < 100.0 {
+    if value.abs() < 100.0 {
         return format::currency(value, currency);
     }
     let rounded = format::currency(value.round(), currency);
     rounded.strip_suffix(".00").unwrap_or(&rounded).to_string()
-}
-
-/// A count of units, without the zeros a float carries.
-fn units(value: f64) -> String {
-    let text = format!("{value:.6}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    if text.is_empty() {
-        "0".to_string()
-    } else {
-        text.to_string()
-    }
 }
 
 /// "One", "Two", … "Ten", then the digits.
@@ -780,7 +779,12 @@ fn first_bought(holdings: &[Holding], records: &mut Vec<Record>) {
                 currency: holding.currency.clone(),
             },
             date: first.date,
-            figure: Some(Figure::Text(units(first.quantity))),
+            figure: first.price.map(|price| {
+                Figure::Price(Money {
+                    amount: price,
+                    currency: holding.currency.clone(),
+                })
+            }),
             percent: None,
         });
     }
@@ -921,7 +925,7 @@ mod tests {
         assert_eq!(records[0].title(), "The first valuation");
         assert_eq!(
             records[0].sentence(false, "EUR"),
-            "The first valuation Stahl kept. The wall grows from here."
+            "Stahl began keeping a valuation on this day. Everything here grows from it."
         );
         assert_eq!(
             records[0].figure_text(false, "EUR").as_deref(),
@@ -1219,7 +1223,11 @@ mod tests {
             "First bought on 10 January 2024.",
             "the price is hidden with the other amounts"
         );
-        assert_eq!(bought[0].figure_text(false, "EUR").as_deref(), Some("80"));
+        assert_eq!(
+            bought[0].figure_text(false, "EUR").as_deref(),
+            Some("$410.00"),
+            "the price paid, in the holding's own currency"
+        );
     }
 
     #[test]
@@ -1438,10 +1446,9 @@ mod tests {
     #[test]
     fn amounts_drop_cents_only_when_they_do_not_matter() {
         assert_eq!(whole(8_412.0, "EUR"), "€8,412");
+        assert_eq!(whole(-8_412.0, "EUR"), "-€8,412", "a fall keeps its sign");
+        assert_eq!(whole(-76.68, "EUR"), "-€76.68");
         assert_eq!(whole(12.5, "EUR"), "€12.50");
-        assert_eq!(units(80.0), "80");
-        assert_eq!(units(0.45), "0.45");
-        assert_eq!(units(0.0), "0");
         assert_eq!(years_in_words(1), "One year");
         assert_eq!(years_in_words(3), "Three years");
         assert_eq!(years_in_words(12), "12 years");
