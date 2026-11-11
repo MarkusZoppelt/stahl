@@ -3384,3 +3384,173 @@ fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
     );
     assert!(app.has_text("Nothing changes yet"));
 }
+
+// --- Counsel ---
+
+#[test]
+fn counsel_answers_a_typed_question_with_blocks() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert!(app.has_text("What would you like to know?"));
+
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    let turn = &app.rt.state.ask.turns[0];
+    assert_eq!(turn.question, "What changed this month?");
+    assert_eq!(turn.phase, stahl::ask::Phase::Done);
+    assert!(
+        turn.blocks.len() >= 4,
+        "the answer is made of several blocks: {:?}",
+        turn.blocks
+    );
+    assert!(
+        app.has_text("Bitcoin did most of the work"),
+        "the first sentence is on the page"
+    );
+    assert!(app.exists("ask-0-2-chart"), "the chart block is drawn");
+    assert!(
+        app.has_text("€107,400.00"),
+        "the figure block shows the app's own total"
+    );
+    assert!(!app.rt.state.thinking(), "nothing is still in flight");
+}
+
+#[test]
+fn thinking_is_true_from_sending_until_the_answer_finishes() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How is Bitcoin doing?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.rt.state.thinking(), "the app says it is working");
+    assert!(app.exists("ask-stop"), "there is a way to stop it");
+    app.settle();
+    app.settle();
+    assert!(!app.rt.state.thinking());
+    assert!(
+        app.exists("ask-send"),
+        "the input asks again when it is done"
+    );
+}
+
+#[test]
+fn escape_stops_an_answer_in_flight() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(app.rt.state.ask.streaming, "the first block has landed");
+    let shown = app.rt.state.ask.turns[0].blocks.len();
+    assert!((1..5).contains(&shown), "the answer was still arriving");
+
+    app.press(Key::Escape);
+    assert_eq!(app.rt.state.ask.turns[0].phase, stahl::ask::Phase::Stopped);
+    assert!(!app.rt.state.thinking());
+    assert!(app.has_text("Stopped. Ask again whenever you like."));
+    // Nothing else arrives after the stop.
+    let stopped = app.rt.state.ask.turns[0].blocks.len();
+    for _ in 0..90 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(app.rt.state.ask.turns[0].blocks.len(), stopped);
+}
+
+/// A model that writes a figure itself, to check what the page does with it.
+struct MadeUp;
+
+impl stahl::ask::Model for MadeUp {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is 31.4% of the portfolio."}"#.to_string(),
+        )
+    }
+}
+
+/// A model that only quotes the fact table.
+struct Computed;
+
+impl stahl::ask::Model for Computed {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is {class.crypto.share} of the portfolio."}"#
+                .to_string(),
+        )
+    }
+}
+
+#[test]
+fn a_figure_the_model_made_up_is_marked_unverified() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    let help = |app: &Harness, key: &str| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .and_then(|element| element.help.clone())
+            .unwrap_or_default()
+    };
+
+    app.rt.state.model = Arc::new(MadeUp);
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 31.4% of the portfolio."));
+    assert!(
+        help(&app, "ask-0-0-say").contains("Stahl didn't compute"),
+        "the invented figure is marked unverified"
+    );
+
+    app.rt.state.model = Arc::new(Computed);
+    app.click("ask-input");
+    app.type_text("And again?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 25.1% of the portfolio."));
+    assert!(
+        help(&app, "ask-1-0-say").is_empty(),
+        "a figure from the fact table is not marked"
+    );
+}
+
+#[test]
+fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend
+    );
+    assert!(
+        (app.rt.state.rebalance.fraction - 0.5).abs() < 1e-9,
+        "half the way, as the answer said"
+    );
+    assert!(app.has_text("Go 50% of the way"));
+}

@@ -226,6 +226,15 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
                 .selectable(true),
         )
         .children(blocks);
+    let current = index + 1 == s.ask.turns.len();
+    if current
+        && turn.phase == ask::Phase::Streaming
+        && let Some(text) = s.ask.partial.as_deref()
+        && !text.is_empty()
+    {
+        answer =
+            answer.child(say(text, first_say, &table, s, t).key(format!("ask-{index}-partial")));
+    }
     if let Some(status) = status(s, t, turn, index) {
         answer = answer.child(status);
     }
@@ -293,7 +302,11 @@ fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
                         .key(format!("ask-again-{index}")),
                 ),
         ),
-        ask::Phase::Streaming | ask::Phase::Done => None,
+        ask::Phase::Streaming => None,
+        ask::Phase::Done if turn.blocks.is_empty() => {
+            Some(ui::caption("There was nothing to show for that.", t))
+        }
+        ask::Phase::Done => None,
     }
 }
 
@@ -522,16 +535,20 @@ fn holdings(s: &State, t: &Theme, class: Option<&str>, sort: Option<Sort>, key: 
             ]
         })
         .collect();
-    let heading = class.map_or_else(|| "Your holdings".to_string(), str::to_string);
+    let heading = class.map_or_else(
+        || "Your holdings".to_string(),
+        |class| format!("Only {class}"),
+    );
+    let detail = if class.is_some() {
+        "The holdings in this class, by value."
+    } else {
+        "By value, unless the question asked for today's moves."
+    };
     col()
         .key(format!("{key}-holdings"))
         .w_full()
         .gap(8.0)
-        .child(ui::header(
-            heading,
-            "By value, unless the question asked for today's moves.",
-            t,
-        ))
+        .child(ui::header(heading, detail, t))
         .child(ui::table(&["Holding", "Value", "Share", "Today"], rows, t))
         .child(
             row()
@@ -766,11 +783,6 @@ fn scenario_block(s: &State, t: &Theme, shocks: &[crate::scenario::Shock], key: 
                 t,
             )
         }))
-        .child(
-            row()
-                .items_start()
-                .child(open_button("Open Rebalance", Page::Rebalance, t, key)),
-        )
 }
 
 fn go(steps: &[Step], t: &Theme, key: &str) -> El {
@@ -824,12 +836,13 @@ fn composer(s: &State, t: &Theme) -> El {
         .label("What's on your mind?")
         .width(None)
         .on_edit(|s: &mut State| &mut s.ask.input)
-        .on_key(|s: &mut State, event, _| {
-            if event.key == Key::Enter {
+        .on_key(|s: &mut State, event, _| match event.key {
+            Key::Enter => {
                 s.ask_send();
-                return true;
+                true
             }
-            false
+            Key::Escape if s.ask_stop() => true,
+            _ => false,
         })
         .build(k)
         .key("ask-input");

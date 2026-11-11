@@ -815,8 +815,13 @@ pub struct State {
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
-    /// The session's Ask conversation, and the model answering it.
+    /// The session's Counsel conversation, and the model answering it.
     pub ask: crate::ask::Conversation,
+    /// What the model has sent so far, read on the UI thread.
+    ask_events: Receiver<crate::ask::Event>,
+    ask_events_tx: Sender<crate::ask::Event>,
+    /// The model that answers questions.
+    pub model: Arc<dyn crate::ask::Model>,
 
     // Since the last look.
     /// The portfolio this session's look was noted for, so reopening it doesn't count again.
@@ -948,6 +953,7 @@ fn text_or_none(text: &str) -> Option<String> {
 impl State {
     pub fn new(backend: Backend, initial_file: Option<String>) -> State {
         let (jobs_tx, jobs_rx) = channel();
+        let (ask_events_tx, ask_events) = channel();
         State {
             backend,
             jobs_tx,
@@ -1058,6 +1064,9 @@ impl State {
             },
             has_api_key: false,
             ask: crate::ask::Conversation::new(),
+            ask_events,
+            ask_events_tx,
+            model: Arc::new(crate::ask::Builtin),
             updates: Updates {
                 updater: Updater::disabled(),
                 available: None,
@@ -1140,6 +1149,11 @@ impl State {
         let from_welcome = self.welcome_showing;
         crate::view::rebalance::sync(self);
         let mut changed = self.drain() || mem::take(&mut self.settled);
+        changed |= self.drain_ask();
+        changed |= self.ask_advance(now);
+        if let Some((at, _)) = self.ask.queued.front() {
+            tx.wake_at(*at);
+        }
         // The compositor found the shader door on its first frame: build the view that uses it.
         if self.shaders && !self.shader_view {
             self.shader_view = true;
@@ -2522,11 +2536,18 @@ impl State {
         self.navigate(Page::Briefing);
     }
 
-    // --- Ask ---
+    // --- Counsel ---
 
     /// An answer is on its way: true from sending until it finishes, fails or is stopped.
     pub fn thinking(&self) -> bool {
         self.ask.thinking
+    }
+
+    /// The model that answers questions. The real app wires the provider here; the demo and the
+    /// tests wire the scripted one.
+    pub fn with_model(mut self, model: Arc<dyn crate::ask::Model>) -> State {
+        self.model = model;
+        self
     }
 
     /// Ask `question` as if it had been typed.
@@ -2547,16 +2568,173 @@ impl State {
             return;
         }
         self.ask.input.replace_text("");
-        self.ask.turns.push(crate::ask::Turn::new(question));
+        self.ask.turns.push(crate::ask::Turn::new(question.clone()));
+        self.ask.generation += 1;
         self.ask.thinking = true;
         self.ask.streaming = true;
-        // Nothing answers yet; the model comes next. The turn is closed so the page stays honest
-        // about what it can do.
+        self.ask.partial = None;
+        self.ask.lines = crate::ask::Lines::new();
+        let table = crate::facts::of(self);
+        let conversation = self.ask_conversation();
+        let request = crate::ask::Request {
+            question,
+            conversation,
+            system: crate::ask::prompt(self, &table),
+            facts: table,
+        };
+        let model = self.model.clone();
+        match model.ask(request) {
+            crate::ask::Reply::Ready(text) => self.ask_ready(&text),
+            crate::ask::Reply::Pieces(mut pieces) => {
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.ask.cancel = Some(cancel.clone());
+                let events = self.ask_events_tx.clone();
+                let waker = self.waker.clone();
+                self.backend.spawn(async move {
+                    while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
+                        let event = match pieces.recv().await {
+                            Some(event) => event,
+                            None => crate::ask::Event::Done,
+                        };
+                        let finished = !matches!(event, crate::ask::Event::Text(_));
+                        if events.send(event).is_err() {
+                            break;
+                        }
+                        if let Some(waker) = &waker {
+                            waker();
+                        }
+                        if finished {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// The earlier questions and the plain text of their answers, for the model's context.
+    fn ask_conversation(&self) -> Vec<(String, String)> {
+        let table = crate::facts::of(self);
+        let currency = self.currency();
+        self.ask
+            .turns
+            .iter()
+            .filter(|turn| turn.finished())
+            .map(|turn| {
+                let answer = turn
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        crate::ask::Block::Say { text } => {
+                            Some(crate::ask::spoken(text, &table, self.privacy, &currency))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (turn.question.clone(), answer)
+            })
+            .collect()
+    }
+
+    /// A ready answer: its blocks are shown one at a time, on the app's clock.
+    fn ask_ready(&mut self, text: &str) {
+        let mut lines = crate::ask::Lines::new();
+        let mut blocks = lines.push(text);
+        blocks.extend(lines.finish());
+        if blocks.is_empty() {
+            self.ask_fail("There was nothing in that answer. Try asking another way.");
+            return;
+        }
+        let start = self.now + crate::ask::FIRST_BLOCK;
+        for (index, block) in blocks.into_iter().enumerate() {
+            self.ask
+                .queued
+                .push_back((start + index as f64 * crate::ask::NEXT_BLOCK, block));
+        }
+    }
+
+    /// Show every block that is due, and finish the turn when none are left. True when one landed.
+    pub fn ask_advance(&mut self, now: f64) -> bool {
+        if self.ask.queued.is_empty() {
+            return false;
+        }
+        let table = crate::facts::of(self);
+        let mut landed = false;
+        while self.ask.queued.front().is_some_and(|(at, _)| *at <= now) {
+            let (_, block) = self.ask.queued.pop_front().expect("just checked");
+            let keep = !block.is_empty(&table);
+            // A chart measures the room it has, so it draws in once it is on the page.
+            if keep && matches!(block, crate::ask::Block::Chart { .. }) {
+                self.restart_draw = true;
+            }
+            if let Some(turn) = self.ask.current_mut() {
+                if keep {
+                    turn.blocks.push(block);
+                }
+                turn.phase = crate::ask::Phase::Streaming;
+            }
+            landed = true;
+        }
+        if landed && self.ask.queued.is_empty() {
+            self.ask_done();
+        }
+        landed
+    }
+
+    /// Read what the model has sent. True when anything arrived.
+    fn drain_ask(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.ask_events.try_recv() {
+            match event {
+                crate::ask::Event::Text(text) => self.ask_text(&text),
+                crate::ask::Event::Done => self.ask_done(),
+                crate::ask::Event::Failed(why) => self.ask_fail(why),
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// A piece of a provider's answer: whole lines become blocks as they complete.
+    fn ask_text(&mut self, text: &str) {
+        let blocks = self.ask.lines.push(text);
+        if !blocks.is_empty()
+            && let Some(turn) = self.ask.current_mut()
+        {
+            turn.blocks.extend(blocks);
+            turn.phase = crate::ask::Phase::Streaming;
+        }
+        self.ask.partial = crate::ask::partial_say(self.ask.lines.partial());
+    }
+
+    /// The answer has finished.
+    fn ask_done(&mut self) {
+        let leftovers = self.ask.lines.finish();
         if let Some(turn) = self.ask.current_mut() {
+            turn.blocks.extend(leftovers);
             turn.phase = crate::ask::Phase::Done;
         }
         self.ask.thinking = false;
         self.ask.streaming = false;
+        self.ask.partial = None;
+        self.ask.cancel = None;
+        // The page is its final height now, so anything that measures its room gets it right.
+        self.restart_draw = true;
+    }
+
+    /// The answer failed. Say what happened in plain words.
+    pub fn ask_fail(&mut self, why: impl Into<String>) {
+        let why = why.into();
+        self.ask.queued.clear();
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+        self.ask.partial = None;
+        self.ask.cancel = None;
+        if let Some(turn) = self.ask.current_mut() {
+            turn.phase = crate::ask::Phase::Failed;
+            turn.error = Some(why);
+        }
     }
 
     /// Stop the answer in flight. True when there was one to stop.

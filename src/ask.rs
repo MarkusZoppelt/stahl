@@ -11,7 +11,6 @@ use rune::TextEdit;
 use serde::{Deserialize, Serialize};
 
 use crate::{facts::Table, scenario};
-
 /// Which order a holdings block lists them in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -292,6 +291,159 @@ pub const VOCABULARY: &str = r#"Write one JSON object per line, and nothing else
 Never write a number about the portfolio yourself. Write {class.stocks.share}, not 37.2%.
 Only the fact ids listed below exist. An id you invent is shown as a gap."#;
 
+// --- The model ---
+
+/// What a model is given before it answers.
+#[derive(Clone, Debug)]
+pub struct Request {
+    pub question: String,
+    /// Earlier questions and the plain text of their answers, newest last.
+    pub conversation: Vec<(String, String)>,
+    /// The system prompt: the voice, the block vocabulary, the fact ids and the portfolio.
+    pub system: String,
+    /// Every figure the answer may quote, by id.
+    pub facts: Table,
+}
+
+/// One piece of an answer as a provider sends it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    /// Text of the answer, as it arrives. Whole lines become blocks.
+    Text(String),
+    Done,
+    Failed(String),
+}
+
+/// What a model has to say for itself.
+pub enum Reply {
+    /// The whole answer as JSON Lines, ready now. The page stages the blocks on its own clock,
+    /// so a demo and a screenshot are deterministic.
+    Ready(String),
+    /// Pieces of the answer from somewhere else, read as they arrive.
+    Pieces(tokio::sync::mpsc::UnboundedReceiver<Event>),
+}
+
+/// Answers questions. Three implementations: a provider over HTTP, the demo's canned answers,
+/// and the app's own answers with no model at all.
+pub trait Model: Send + Sync {
+    fn ask(&self, request: Request) -> Reply;
+}
+
+/// The app's own answers, for when no provider is set.
+pub struct Builtin;
+
+impl Model for Builtin {
+    fn ask(&self, request: Request) -> Reply {
+        Reply::Ready(builtin(&request))
+    }
+}
+
+/// What the built-in model can answer: the questions the palette already recognises, and the
+/// agenda's items. Everything else gets one calm line and the way to Settings.
+pub fn builtin(_request: &Request) -> String {
+    let say = Block::Say {
+        text: "That one needs a model. This portfolio can answer what changed, where new money \
+               goes, and what a shock would leave. Add a model in Settings to ask anything; a \
+               local one keeps everything on this computer."
+            .to_string(),
+    };
+    let go = Block::Go {
+        steps: vec![Step {
+            label: "Open Settings".to_string(),
+            page: Some("settings".to_string()),
+            ask: None,
+        }],
+    };
+    [line(&say), line(&go)].join("\n")
+}
+
+/// A block as one JSON line.
+pub fn line(block: &Block) -> String {
+    serde_json::to_string(block).unwrap_or_default()
+}
+
+/// How long after a question the first block of a ready answer lands, and how far apart the
+/// rest are, on the app's clock.
+pub const FIRST_BLOCK: f64 = 0.3;
+pub const NEXT_BLOCK: f64 = 0.42;
+
+/// The `say` a half-arrived line is writing, for text that appears as it streams. `None` when
+/// the line isn't a `say`, or hasn't reached its words yet.
+pub fn partial_say(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    if !line.starts_with('{') || !line.contains("\"say\"") {
+        return None;
+    }
+    let at = line.find("\"text\"")?;
+    let after = &line[at + "\"text\"".len()..];
+    let after = after.trim_start().strip_prefix(':')?.trim_start();
+    let body = after.strip_prefix('"')?;
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => out.push(other),
+                None => break,
+            },
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    Some(out)
+}
+
+/// The system prompt for a real model: the voice, the vocabulary, the figures, and the context
+/// the app already has. Nothing here is written by the model.
+pub fn prompt(s: &crate::state::State, table: &Table) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "You are Counsel, the private banker of Stahl Capital. One client, whose portfolio is \
+         below. You write the way a seasoned private banker writes to a client they like and \
+         respect: precise, calm, warm, brief. Dry wit is welcome about one line in five, never \
+         forced, and never about a loss, a mistake, or anything the client might be worried \
+         about. No exclamation marks, no emoji, no slang. Say \"you\" for the client and \"we\" \
+         for the bank only when it earns its place. Never mention being a model or an assistant.\n\n",
+    );
+    out.push_str(
+        "You answer with Stahl's own screens, not with prose. Every number about the portfolio \
+         must come from the figures listed below: write the figure's id in braces, exactly as \
+         shown, and Stahl will draw it. Never write a portfolio figure yourself. A number you \
+         write is shown to the client as unverified, which is a small failure.\n\n",
+    );
+    out.push_str(VOCABULARY);
+    out.push_str("\n\nThe figures you may quote:\n");
+    out.push_str(&table.describe(s.privacy, &s.currency()));
+    if let Some(review) = s.review.data.as_ref() {
+        out.push_str("\n\nThe policy review: ");
+        out.push_str(&review.policy_name);
+        out.push_str(", ");
+        for class in &review.allocations {
+            out.push_str(&format!(
+                "{} {:.1}% against {:.1}% (drift {:+.1}); ",
+                class.asset_class, class.actual_percent, class.target_percent, class.drift_percent
+            ));
+        }
+        for finding in &review.findings {
+            out.push_str(&format!("finding: {}. ", finding.message));
+        }
+    }
+    if let Some(briefing) = s.briefing.data.as_ref() {
+        out.push_str("\n\nThe briefing Stahl wrote on this portfolio:\n");
+        out.push_str(&briefing.markdown);
+    }
+    if s.privacy {
+        out.push_str(
+            "\n\nThe client has hidden amounts. Do not mention any, and do not ask for them.",
+        );
+    }
+    out
+}
+
 // --- The conversation ---
 
 /// Where an answer is coming from, said quietly under the input.
@@ -383,6 +535,8 @@ pub struct Conversation {
     pub generation: u64,
     /// A chart for a period the page isn't showing, loaded for a `chart` block.
     pub chart: Option<(crate::backend::Period, crate::backend::History)>,
+    /// The answer being read, line by line, from a provider.
+    pub lines: Lines,
 }
 
 impl Default for Conversation {
@@ -406,6 +560,7 @@ impl Conversation {
             cancel: None,
             generation: 0,
             chart: None,
+            lines: Lines::new(),
         }
     }
 

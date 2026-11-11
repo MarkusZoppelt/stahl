@@ -274,6 +274,20 @@ pub fn build(input: &Input) -> Table {
             "Since",
             Value::Date(change.from),
         );
+        if let Some(leader) = change.leader.as_ref() {
+            push(
+                "since.leader",
+                "The holding that moved the portfolio most since the last look".to_string(),
+                "Moved it most",
+                Value::Name(leader.name.clone()),
+            );
+            push(
+                "since.leader.amount",
+                "How much that holding moved it".to_string(),
+                "From it",
+                Value::SignedMoney(leader.amount),
+            );
+        }
     }
 
     push(

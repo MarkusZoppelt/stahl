@@ -137,6 +137,13 @@ fn main() {
         turn.phase = stahl::ask::Phase::Done;
         s.ask.turns.push(turn);
     }
+    /// A question answered by the demo's scripted model.
+    fn ask_scripted(s: &mut State, question: &str) {
+        scene(s, Page::Ask);
+        // The vault door has opened; a question's answer shouldn't arrive behind it.
+        s.skip_opening();
+        s.ask_question(question);
+    }
     const ASK_CHANGE: &str = concat!(
         r#"{"block":"say","text":"Since {since.date}, your total moved {since.change}. Most of it was Bitcoin, which is {class.crypto.share} of the portfolio against a target of {class.crypto.target}."}"#,
         "\n",
@@ -554,6 +561,44 @@ fn main() {
             ("phone-ask-plan", |s| {
                 s.compact = true;
                 ask_answer(s, "What if crypto halves?", ASK_PLAN);
+            }),
+            // The demo's model, answering for real. Render these at --at 2 to see the whole
+            // answer, and at --at 0.5 to catch one arriving.
+            ("counsel-change", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-change-light", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("counsel-halves", |s| {
+                ask_scripted(s, "What if crypto halves?")
+            }),
+            ("counsel-money", |s| {
+                ask_scripted(s, "Where should €2,000 go?")
+            }),
+            ("counsel-allocation", |s| {
+                ask_scripted(s, "Why is my allocation off?")
+            }),
+            ("counsel-bitcoin", |s| {
+                ask_scripted(s, "How is Bitcoin doing?")
+            }),
+            ("counsel-else", |s| ask_scripted(s, "Should I buy a house?")),
+            ("counsel-stream", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-failed", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_fail("The provider didn't answer. Check the address in Settings.");
+            }),
+            ("counsel-stopped", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_stop();
+            }),
+            ("phone-counsel", |s| {
+                s.compact = true;
+                ask_scripted(s, "What changed this month?");
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),
