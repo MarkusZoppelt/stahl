@@ -70,19 +70,20 @@ pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         return ui::caption("Add an asset class to plan a rebalance.", t);
     }
     let plan = shown(s, &classes);
-    let narrow = ui::room(s, cx) == ui::Room::Narrow;
+    // A row is a table only where there is room for four columns beside the track.
+    let stacked = ui::room(s, cx) != ui::Room::Wide;
     ui::card(t)
         .key("rebalance-card")
         .w_full()
         .gap(12.0)
         .child(sentence(s, t, &classes, &plan))
-        .child(rail(s, t, narrow))
+        .child(rail(s, t, stacked))
         .child(rail_labels(t))
         .child(money_row(s, t))
         .child(ui::rule(t))
-        .child(plot(s, t, &classes, narrow))
+        .child(plot(s, t, &classes, stacked))
         .child(key(t))
-        .child(rows(s, t, &classes, &plan, narrow))
+        .child(rows(s, t, &classes, &plan, stacked))
         .child(closing(s, t, &plan))
 }
 
@@ -297,8 +298,8 @@ fn sentence_text(s: &State, plan: &Plan, adjusted: bool) -> (String, bool) {
     }
 }
 
-fn rail(s: &State, t: &Theme, narrow: bool) -> El {
-    let height = if narrow { RAIL_H_COMPACT } else { RAIL_H };
+fn rail(s: &State, t: &Theme, stacked: bool) -> El {
+    let height = if stacked { RAIL_H_COMPACT } else { RAIL_H };
     let bar_y = (height - RAIL_BAR) / 2.0;
     let enabled = matches!(
         s.rebalance.plan,
@@ -467,11 +468,11 @@ fn money_row(s: &State, t: &Theme) -> El {
 
 /// Today's allocation, thin, over the plan's. The same classes in the same order, on the
 /// same columns as the rows, so the two bars line up with every track.
-fn plot(s: &State, t: &Theme, classes: &[Class], narrow: bool) -> El {
+fn plot(s: &State, t: &Theme, classes: &[Class], stacked: bool) -> El {
     // In a row the bar takes the space between the columns; on a phone it has the width of
     // the card, so it lines up with the tracks under it.
     let sized = |bar: El| {
-        if narrow {
+        if stacked {
             bar.w_full()
         } else {
             bar.grow(1.0).w(0.0)
@@ -507,7 +508,7 @@ fn plot(s: &State, t: &Theme, classes: &[Class], narrow: bool) -> El {
             })),
     );
     let bar_row = |label: &str, bar: El| {
-        if narrow {
+        if stacked {
             col()
                 .w_full()
                 .gap(2.0)
@@ -528,7 +529,7 @@ fn plot(s: &State, t: &Theme, classes: &[Class], narrow: bool) -> El {
     };
     col()
         .w_full()
-        .gap(if narrow { 6.0 } else { 4.0 })
+        .gap(if stacked { 6.0 } else { 4.0 })
         .child(bar_row("Today", ghost))
         .child(bar_row("After", after))
 }
@@ -573,12 +574,12 @@ fn key(t: &Theme) -> El {
 
 // --- The rows ---
 
-fn rows(s: &State, t: &Theme, classes: &[Class], plan: &Plan, narrow: bool) -> El {
+fn rows(s: &State, t: &Theme, classes: &[Class], plan: &Plan, stacked: bool) -> El {
     col().w_full().children(
         classes
             .iter()
             .enumerate()
-            .flat_map(|(index, _)| [ui::rule(t), asset_row(s, t, classes, plan, index, narrow)]),
+            .flat_map(|(index, _)| [ui::rule(t), asset_row(s, t, classes, plan, index, stacked)]),
     )
 }
 
@@ -589,7 +590,7 @@ fn asset_row(
     classes: &[Class],
     plan: &Plan,
     index: usize,
-    narrow: bool,
+    stacked: bool,
 ) -> El {
     let class = &classes[index];
     let value = plan.values.get(index).copied().unwrap_or(0.0);
@@ -604,7 +605,7 @@ fn asset_row(
                 .color(t.kit.c.text_base),
         );
     let after = row()
-        .w(if narrow { 52.0 } else { SHARE_W })
+        .w(if stacked { 52.0 } else { SHARE_W })
         .justify_end()
         .child(
             RollingText::new(format!("rebalance-share-{index}"), format!("{share:.1}%"))
@@ -614,9 +615,9 @@ fn asset_row(
                 .trailing()
                 .build(&t.kit),
         );
-    let track = track(s, t, classes, plan, index, narrow);
-    let trade = trade(s, t, class, value, index, narrow);
-    if narrow {
+    let track = track(s, t, classes, plan, index, stacked);
+    let trade = trade(s, t, class, value, index, stacked);
+    if stacked {
         col()
             .key(format!("rebalance-row-{index}"))
             .w_full()
@@ -647,7 +648,7 @@ fn asset_row(
     }
 }
 
-fn trade(s: &State, t: &Theme, class: &Class, value: f64, index: usize, narrow: bool) -> El {
+fn trade(s: &State, t: &Theme, class: &Class, value: f64, index: usize, stacked: bool) -> El {
     let delta = value - class.value.max(0.0);
     let (line, ink) = if delta.abs() < 0.005 {
         ("No change".to_string(), t.kit.c.text_muted)
@@ -656,7 +657,7 @@ fn trade(s: &State, t: &Theme, class: &Class, value: f64, index: usize, narrow: 
     } else {
         (format!("Sell {}", s.money(-delta)), t.down)
     };
-    let font = if narrow {
+    let font = if stacked {
         t.kit.ty.text_small
     } else {
         t.kit.ty.ui
@@ -676,9 +677,9 @@ fn tick_color(t: &Theme) -> Color {
     t.kit.c.text_base.alpha(0.55)
 }
 
-fn track(s: &State, t: &Theme, classes: &[Class], plan: &Plan, index: usize, narrow: bool) -> El {
+fn track(s: &State, t: &Theme, classes: &[Class], plan: &Plan, index: usize, stacked: bool) -> El {
     let class = &classes[index];
-    let height = if narrow { TRACK_H_COMPACT } else { TRACK_H };
+    let height = if stacked { TRACK_H_COMPACT } else { TRACK_H };
     let bar_y = (height - TRACK_BAR) / 2.0;
     let top = top_share(classes).max(1e-6);
     let share = share_of(plan, index);
@@ -813,9 +814,7 @@ fn thumb(
         );
     if enabled {
         thumb = thumb
-            .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
-                pointer(s, drag, tx, index, true)
-            })
+            .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| pointer(s, drag, tx, index))
             .on_step(move |s: &mut State, by, _| step(s, index, by))
             .on_step_limit(move |s: &mut State, max, _| limit(s, index, max))
             .on_key(move |s: &mut State, event: &KeyEvent, _| {
@@ -1073,9 +1072,14 @@ fn rail_snap(s: &mut State) {
     fraction_to(s, nearest, true);
 }
 
-/// A row's thumb (`by_pointer`: the press was on the thumb, so follow the travel) or its track
-/// (the press was on the track, so go to where it landed).
-fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer: bool) {
+/// Drag a row's thumb. The press is somewhere on the thumb, so the class follows the travel
+/// from where it was, not the pointer's own position.
+fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize) {
+    let want = |s: &State, drag: &Drag| {
+        let top = top_share(&load_classes(s));
+        let width = f64::from(s.rebalance.track_width.max(1.0));
+        s.rebalance.press_at + f64::from(drag.dx) / width * top
+    };
     match drag.phase {
         Phase::Down => {
             begin(s);
@@ -1084,42 +1088,18 @@ fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer
             let plan = shown(s, &classes);
             s.rebalance.press_at = share_of(&plan, index);
             s.rebalance.press_values = plan.values;
-            if !by_pointer {
-                let top = top_share(&classes);
-                let width = f64::from(s.rebalance.track_width.max(1.0));
-                let want = f64::from(drag.x) / width * top;
-                to_share(s, index, want, true);
-            }
         }
         Phase::Move => {
             if s.rebalance.row != Some(index) {
                 return;
             }
-            let classes = load_classes(s);
-            let top = top_share(&classes);
-            let want = if by_pointer {
-                let width = f64::from(s.rebalance.track_width.max(1.0));
-                s.rebalance.press_at + f64::from(drag.dx) / width * top
-            } else {
-                let width = f64::from(s.rebalance.track_width.max(1.0));
-                f64::from(drag.x) / width * top
-            };
-            if !to_share(s, index, want, false) {
+            if !to_share(s, index, want(s, drag), false) {
                 tx.live_only();
             }
         }
         Phase::Up => {
             if s.rebalance.row == Some(index) {
-                let classes = load_classes(s);
-                let top = top_share(&classes);
-                let want = if by_pointer {
-                    let width = f64::from(s.rebalance.track_width.max(1.0));
-                    s.rebalance.press_at + f64::from(drag.dx) / width * top
-                } else {
-                    let width = f64::from(s.rebalance.track_width.max(1.0));
-                    f64::from(drag.x) / width * top
-                };
-                to_share(s, index, want, true);
+                to_share(s, index, want(s, drag), true);
             }
             s.rebalance.dragging = false;
             s.rebalance.row = None;
