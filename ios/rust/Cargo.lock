@@ -5211,6 +5211,7 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "tokio",
+ "wgpu",
  "zip",
 ]
 
@@ -5222,6 +5223,7 @@ dependencies = [
  "rune",
  "stahl",
  "tokio",
+ "wgpu",
 ]
 
 [[package]]

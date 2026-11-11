@@ -28,6 +28,14 @@ sha2 = "0.11"
 tempfile = "3"
 reqwest = { version = "0.13", default-features = false, features = ["default-tls"] }
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# The compositor draws the vault door; this is Rune's own wgpu, at one version with it.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["metal"] }
+
+[target.'cfg(not(target_vendor = "apple"))'.dependencies]
+wgpu = { version = "30", default-features = false, features = ["vulkan", "dx12"] }
 
 [profile.release]
 lto = true

@@ -225,6 +225,11 @@ fn main() {
                 s.open_form(Some(0));
             }),
             ("welcome", first_run),
+            ("welcome-light", |s| {
+                first_run(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("new-workspace", |s| {
                 first_run(s);
                 s.open_new_workspace();

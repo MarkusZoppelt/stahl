@@ -657,6 +657,12 @@ pub struct State {
     /// or on its own when the app opened straight into a portfolio. Not a price refresh, and not
     /// replayed by one.
     pub door_arrivals: u64,
+    /// The compositor draws this window, so views paint the door with the shader rather than the
+    /// picture. The compositor sets it on the first frame it renders: false in tests, which never
+    /// draw, and on iOS, which keeps the picture.
+    pub shaders: bool,
+    /// The view has been built since `shaders` turned true.
+    shader_view: bool,
     /// The door has been painted at rest for this portfolio, so the next frame can start the turn.
     door_seen: bool,
     /// The arrival turn has started for the portfolio now open.
@@ -916,6 +922,8 @@ impl State {
             updated_at: None,
             price_updates: 0,
             door_arrivals: 0,
+            shaders: false,
+            shader_view: false,
             door_seen: false,
             door_landed: false,
             hold_welcome_until: None,
@@ -1081,6 +1089,11 @@ impl State {
         let from_welcome = self.welcome_showing;
         crate::view::rebalance::sync(self);
         let mut changed = self.drain() || mem::take(&mut self.settled);
+        // The compositor found the shader door on its first frame: build the view that uses it.
+        if self.shaders && !self.shader_view {
+            self.shader_view = true;
+            changed = true;
+        }
         changed |= self.door_arrives(now, from_welcome, tx);
         self.welcome_showing = self.on_welcome();
         if self.quit_requested {
