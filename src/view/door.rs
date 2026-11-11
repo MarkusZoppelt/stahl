@@ -10,10 +10,9 @@
 
 use std::f32::consts::TAU;
 
-use portfolio_rs::mcp::dto::Severity;
 use rune::{El, Spring, Transition, el};
 
-use crate::{state::State, theme::Theme};
+use crate::{agenda::Weight, state::State, theme::Theme};
 
 use super::ui;
 
@@ -28,20 +27,20 @@ pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
 /// settling without a bounce, as something heavy would.
 pub const DOOR_LAND: Spring = Spring::new(0.9, 0.0);
 
-/// How many things need the owner's attention, as the Overview's "Needs attention" list counts
-/// them: warnings and critical findings, not information.
+/// How many things need the owner's attention: what the Overview's agenda lists, apart from its
+/// notices. The door and the agenda read the same list, so they never disagree.
 pub fn attention(s: &State) -> usize {
-    s.findings
+    s.agenda()
         .iter()
-        .filter(|finding| !matches!(finding.severity, Severity::Info))
+        .filter(|item| item.weight != Weight::Notice)
         .count()
 }
 
 /// Whether one of the things needing attention is a failure rather than a warning.
 fn attention_is_critical(s: &State) -> bool {
-    s.findings
+    s.agenda()
         .iter()
-        .any(|finding| matches!(finding.severity, Severity::Critical))
+        .any(|item| matches!(item.weight, Weight::Total | Weight::Critical))
 }
 
 /// The angle the dial rests at: one full turn per price refresh and per portfolio opened, so

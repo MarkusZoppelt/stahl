@@ -3025,9 +3025,11 @@ fn launched_into_a_portfolio_the_dial_turns_once_and_marks_what_needs_attention(
     let door = element(&app, "door-sidebar");
     assert_eq!(
         door.label.as_deref(),
-        Some("Stahl Capital. Nothing needs attention")
+        Some("Stahl Capital. 1 thing needs attention"),
+        "the demo's drift past its policy, which the agenda lists too"
     );
-    assert!(!app.exists("door-attention-sidebar"));
+    assert_eq!(app.rt.state.agenda_len(), 1);
+    assert!(app.exists("door-attention-sidebar"));
 
     // A refresh turns the dial once, and it comes to rest where it started.
     let rest = element(&app, "door-dial-sidebar").rect;
@@ -3067,6 +3069,8 @@ fn launched_into_a_portfolio_the_dial_turns_once_and_marks_what_needs_attention(
     });
     app.settle();
     assert!(app.exists("door-attention-sidebar"));
+    // The agenda lists it as a notice, and a notice doesn't count on the door.
+    assert_eq!(app.rt.state.agenda_len(), 2);
     assert_eq!(
         element(&app, "door-sidebar").label.as_deref(),
         Some("Stahl Capital. 1 thing needs attention")
