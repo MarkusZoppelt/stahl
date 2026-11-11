@@ -99,10 +99,20 @@ pub fn swipe_key(id: usize) -> String {
 }
 /// Refresh prices on returning to the app, if the last refresh is older than this.
 const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
-/// Into the welcome door's flight, when its dial starts turning: as it nears the mark.
-pub const DOOR_TURN_AT: f64 = 0.45;
-/// When the flight hands over to the mark: once the dial has turned and settled.
-pub const DOOR_FLIGHT_ENDS: f64 = DOOR_TURN_AT + 1.35;
+/// How long the door's opening takes, as on the landing page.
+pub const OPENING_FOR: f64 = 1.8;
+
+/// The door's opening when a portfolio first shows: the landing page's sequence, played over the
+/// page. The compositor draws it from these few numbers, so no view is rebuilt while it runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Opening {
+    /// When it started, on the runtime's clock.
+    pub started: f64,
+    /// The door's centre and radius at rest, in points. A centre x below zero means the window's
+    /// middle, which is where a launch straight into a portfolio begins.
+    pub center: [f32; 2],
+    pub radius: f32,
+}
 
 const TOAST_FOR: Duration = Duration::from_millis(2600);
 
@@ -653,9 +663,8 @@ pub struct State {
     pub updated_at: Option<String>,
     /// How many times prices have landed, to mark the moment on screen.
     pub price_updates: u64,
-    /// One full turn when a portfolio's door first appears: as it lands from the welcome screen,
-    /// or on its own when the app opened straight into a portfolio. Not a price refresh, and not
-    /// replayed by one.
+    /// One full turn when a portfolio's door first appears: as it opens, or on its own when the
+    /// app opened straight into a portfolio. Not a price refresh, and not replayed by one.
     pub door_arrivals: u64,
     /// The compositor draws this window, so views paint the door with the shader rather than the
     /// picture. The compositor sets it on the first frame it renders: false in tests, which never
@@ -663,21 +672,18 @@ pub struct State {
     pub shaders: bool,
     /// The view has been built since `shaders` turned true.
     shader_view: bool,
-    /// The door has been painted at rest for this portfolio, so the next frame can start the turn.
-    door_seen: bool,
-    /// The arrival turn has started for the portfolio now open.
-    door_landed: bool,
+    /// The opening has played for the portfolio now open: it never replays on a refresh or a page
+    /// change.
+    opening_seen: bool,
+    /// The door's opening, while it is playing.
+    pub opening: Option<Opening>,
     /// Show the welcome screen until this time even with a portfolio open, so a scene can paint
-    /// the large door and then let it fly. `None` in the running app.
+    /// the large door before the shell mounts and the door opens over it. `None` in the running
+    /// app.
     pub hold_welcome_until: Option<f64>,
-    /// When the welcome door started its flight to the mark, while it is still travelling.
-    pub door_flight: Option<f64>,
-    /// The flying door has been drawn where the welcome door was, and now heads for the mark.
-    pub door_released: bool,
-    /// Where the welcome door and the mark were last laid out, in window points: the flight's
-    /// two ends.
+    /// Where the welcome screen's door was last laid out, in window points: where the opening
+    /// starts when a portfolio opens from the welcome screen.
     pub welcome_door: Option<[f32; 4]>,
-    pub mark_door: Option<[f32; 4]>,
     /// The welcome screen was showing at the last poll.
     welcome_showing: bool,
     /// What the last refresh moved: each position (by id) whose price changed, and by how much,
@@ -924,13 +930,10 @@ impl State {
             door_arrivals: 0,
             shaders: false,
             shader_view: false,
-            door_seen: false,
-            door_landed: false,
+            opening_seen: false,
+            opening: None,
             hold_welcome_until: None,
-            door_flight: None,
-            door_released: false,
             welcome_door: None,
-            mark_door: None,
             welcome_showing: false,
             price_moves: Vec::new(),
             refreshed: None,
@@ -1094,7 +1097,7 @@ impl State {
             self.shader_view = true;
             changed = true;
         }
-        changed |= self.door_arrives(now, from_welcome, tx);
+        changed |= self.opening_arrives(now, from_welcome, tx);
         self.welcome_showing = self.on_welcome();
         if self.quit_requested {
             tx.quit();
@@ -1338,59 +1341,48 @@ impl State {
             && !self.shell_showing()
     }
 
-    /// The door's arrival when a portfolio's shell first shows. From the welcome screen, the
-    /// welcome door flies to the mark and its dial turns as it lands; launched straight into a
-    /// portfolio, the mark's dial just turns. Once per opened portfolio: a refresh, a page
-    /// change or a redraw never comes through here again. Returns whether anything changed.
-    fn door_arrives(&mut self, now: f64, from_welcome: bool, tx: &mut Tx) -> bool {
+    /// The door's opening when a portfolio's shell first shows. From the welcome screen it starts
+    /// where the large door was; launched straight into a portfolio it starts in the window's
+    /// middle. Once per opened portfolio: a refresh, a page change or a redraw never comes
+    /// through here again. Returns whether anything changed.
+    fn opening_arrives(&mut self, now: f64, from_welcome: bool, tx: &mut Tx) -> bool {
         if !self.shell_showing() {
             if !self.has_portfolio() {
-                self.door_seen = false;
-                self.door_landed = false;
-                self.door_flight = None;
+                self.opening_seen = false;
+                self.opening = None;
             }
             return false;
         }
         let mut changed = false;
-        if !self.door_seen {
-            // The first poll with the shell up. The turn waits a frame at least, so the dial is
-            // painted at rest before it turns.
-            self.door_seen = true;
-            if from_welcome && self.welcome_door.is_some() {
-                self.door_flight = Some(now);
-                self.door_released = false;
-                tx.wake_after(Duration::from_millis(20));
-                tx.wake_at(now + DOOR_TURN_AT);
-                tx.wake_at(now + DOOR_FLIGHT_ENDS);
-                changed = true;
-            } else {
-                tx.wake_after(Duration::from_millis(30));
-            }
-        } else if self.door_flight.is_some() && !self.door_released {
-            // It has been drawn at the welcome door's place: now it can set off.
-            if self.mark_door.is_some() {
-                self.door_released = true;
-                changed = true;
-            } else {
-                tx.wake_after(Duration::from_millis(20));
-            }
-        } else if !self.door_landed
-            && self
-                .door_flight
-                .is_none_or(|start| now >= start + DOOR_TURN_AT)
-        {
-            self.door_landed = true;
+        if !self.opening_seen {
+            self.opening_seen = true;
             self.door_arrivals += 1;
+            let size = if self.compact { 112.0 } else { 168.0 };
+            let (center, radius) = match self.welcome_door.filter(|_| from_welcome) {
+                Some([x, y, w, h]) => ([x + w / 2.0, y + h / 2.0], w * (0.5 - 1.0 / 512.0)),
+                None => ([-1.0, -1.0], size * (0.5 - 1.0 / 512.0)),
+            };
+            self.opening = Some(Opening {
+                started: now,
+                center,
+                radius,
+            });
+            tx.wake_at(now + OPENING_FOR);
             changed = true;
-        }
-        if self
-            .door_flight
-            .is_some_and(|start| now >= start + DOOR_FLIGHT_ENDS)
+        } else if self
+            .opening
+            .is_some_and(|opening| now >= opening.started + OPENING_FOR)
         {
-            self.door_flight = None;
+            self.opening = None;
             changed = true;
         }
         changed
+    }
+
+    /// Scenes only: the app has already opened this portfolio, so a scene can show it at rest.
+    pub fn skip_opening(&mut self) {
+        self.opening_seen = true;
+        self.opening = None;
     }
 
     pub fn theme_mode(&self) -> ThemeMode {

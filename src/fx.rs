@@ -1,8 +1,9 @@
 //! The vault door, drawn live by a shader.
 //!
 //! A port of the landing page's fragment shader (`site/door.js`) to WGSL, run through Rune's
-//! compositor hook. Views place an effect slot with [`door`]; the compositor paints the steel
-//! there, at whatever size and place the slot has, in the window and in a headless render alike.
+//! compositor hook. Views place an effect slot with [`door`], [`mark`], [`pull`] or [`opening`];
+//! the compositor paints the steel there, at whatever size and place the slot has, in the window
+//! and in a headless render alike.
 //!
 //! The web shader works in canvas pixels with the origin at the bottom left. Here the pixel
 //! comes from `@builtin(position)` and the pass's own origin, so it is in window device pixels
@@ -16,7 +17,7 @@ use std::{
 
 use crate::state::State;
 use rune::{
-    El,
+    El, Transition,
     compose::{Compositor, Frame},
     el,
     render::EffectSite,
@@ -28,9 +29,16 @@ pub const DOOR: u32 = 1;
 pub const MARK: u32 = 2;
 /// The door behind a page pulled past its top on a phone.
 pub const PULL: u32 = 3;
+/// The full-window slot that plays the opening when a portfolio first shows.
+pub const OPEN: u32 = 4;
 
 const UNIFORM_SIZE: usize = 64;
 const MAX_SLOTS: usize = 8;
+
+/// How long the opening takes, as on the landing page.
+const OPENING: f32 = 1.8;
+/// How far the tumblers turn while the door pushes in.
+const OPENING_SPIN: f32 = 2.4;
 
 /// The door's resting light: the page's default, up and to the left.
 const LIGHT: [f32; 2] = [-0.55, -0.65];
@@ -69,6 +77,19 @@ pub fn pull(size: f32) -> El {
     slot(size, PULL, 0.0)
 }
 
+/// The full-window slot that plays the opening, over the page. Its payload is when it started
+/// (on the runtime's clock) and the door's resting centre and radius in points; a centre x below
+/// zero means the window's middle.
+pub fn opening(started: f64, center: [f32; 2], radius: f32) -> El {
+    el().absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .effect(OPEN)
+        .effect_data([started as f32, center[0], center[1], radius])
+        .a11y_hidden()
+        .transition(Transition::none())
+}
+
 /// What every door needs from the frame it is drawn in.
 #[derive(Clone, Copy)]
 struct FrameFacts {
@@ -95,7 +116,7 @@ struct Door {
 
 impl Door {
     /// A door seen for the first time starts its tumblers at rest and turns them to `turns`, as
-    /// a freshly built dial did, so the arrival and a long session both show one turn.
+    /// a freshly built dial did, so a refresh shown by a new mark still turns.
     fn new(turns: f32, t: f64) -> Door {
         Door {
             light: LIGHT,
@@ -169,6 +190,11 @@ pub struct Gfx {
     /// The frame that first found the compositor, whose view still shows the picture: draw one
     /// more so the door appears without waiting for the owner to touch something.
     wake: bool,
+    /// The opening was drawn this frame and has not finished: keep the display link running.
+    opening: bool,
+    /// When the opening started on the animation clock, so its progress and the state's timer
+    /// share one clock even after the host slept.
+    opening_start: Option<f32>,
 }
 
 struct Gpu {
@@ -320,10 +346,61 @@ fn geometry(site: &EffectSite<'_>) -> ([f32; 2], f32) {
     ([x + w / 2.0, y + h / 2.0], side * (0.5 - 1.0 / 512.0))
 }
 
+fn span(x: f32, from: f32, to: f32) -> f32 {
+    ((x - from) / (to - from)).clamp(0.0, 1.0)
+}
+
+/// The landing page's `ease`: a smoothstep.
+fn ease(x: f32) -> f32 {
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// Where the door is in the opening: the site's sequence, in the same spans and with the same
+/// easing. `rest` is the door's centre in points (x below zero: the window's middle), `radius` its
+/// resting radius, `window` the frame size in device pixels, and `progress` runs from 0 to 1.
+struct Sequence {
+    center: [f32; 2],
+    radius: f32,
+    split: f32,
+    spin: f32,
+    gain: f32,
+}
+
+fn sequence(
+    rest: [f32; 2],
+    radius: f32,
+    window: [u32; 2],
+    scale: f32,
+    progress: f32,
+    reduced: bool,
+) -> Option<Sequence> {
+    // Reduced motion: the page simply appears; there is no sequence to draw.
+    if reduced || progress >= 1.0 {
+        return None;
+    }
+    let win = [window[0] as f32 / scale, window[1] as f32 / scale];
+    let middle = [win[0] / 2.0, win[1] / 2.0];
+    let rest = if rest[0] < 0.0 { middle } else { rest };
+    let push = ease(span(progress, 0.03, 0.44));
+    let part = ease(span(progress, 0.44, 0.82));
+    let open = (win[0] * win[0] + win[1] * win[1]).sqrt() * 0.56;
+    Some(Sequence {
+        center: [
+            (rest[0] + (middle[0] - rest[0]) * push) * scale,
+            (rest[1] + (middle[1] - rest[1]) * push) * scale,
+        ],
+        radius: (radius + (open - radius) * push) * scale,
+        split: part * 1.08,
+        spin: ease(span(progress, 0.0, 0.44)) * OPENING_SPIN,
+        gain: 1.0 - 0.62 * push,
+    })
+}
+
 impl Compositor<State> for Gfx {
     fn animating(&self) -> bool {
-        // Only while a light or a tumbler is still moving, so a window at rest draws none.
-        self.wake || self.doors.values().any(Door::moving)
+        // Only while a light, a tumbler or the opening is still moving, so a window at rest draws
+        // none.
+        self.wake || self.opening || self.doors.values().any(Door::moving)
     }
 
     fn render(&mut self, f: &mut Frame<'_, State>) {
@@ -345,14 +422,48 @@ impl Compositor<State> for Gfx {
             pointer,
         };
         let mut seen: HashSet<u32> = HashSet::new();
+        let mut opening = false;
         let mut slot = 0usize;
+        let clock = f.rt.clock;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
-            if !matches!(site.mark, DOOR | MARK | PULL) {
-                return;
-            }
-            let (center, radius) = geometry(site);
-            let at = {
+            let at = if site.mark == OPEN {
+                // The state starts the opening on the logical clock; the animation runs on the
+                // animation clock. Convert once, so a host that slept before this frame cannot
+                // leave the door stuck at rest.
+                let start = *self
+                    .opening_start
+                    .get_or_insert_with(|| (t - (clock - site.data[0] as f64)) as f32);
+                let progress = (t as f32 - start) / OPENING;
+                let Some(at) = sequence(
+                    [site.data[1], site.data[2]],
+                    site.data[3],
+                    [f.size.0, f.size.1],
+                    site.scale,
+                    progress,
+                    reduced,
+                ) else {
+                    return;
+                };
+                opening = true;
+                seen.insert(OPEN);
+                let door = self.doors.entry(OPEN).or_insert_with(|| Door::new(0.0, t));
+                door.step(frame, site.scale, at.center, at.radius, 0.0);
+                Slot {
+                    center: at.center,
+                    radius: at.radius,
+                    split: at.split,
+                    light: door.light,
+                    spin: at.spin,
+                    gain: at.gain,
+                    origin: site.origin,
+                    encode: if site.srgb_blend { 1.0 } else { 0.0 },
+                }
+            } else {
+                if !matches!(site.mark, DOOR | MARK | PULL) {
+                    return;
+                }
+                let (center, radius) = geometry(site);
                 let door = self
                     .doors
                     .entry(site.mark)
@@ -380,6 +491,10 @@ impl Compositor<State> for Gfx {
             pass.set_bind_group(0, &gpu.bind, &[(slot as u32 - 1) * gpu.stride]);
             pass.draw(0..3, 0..1);
         });
+        self.opening = opening;
+        if !opening {
+            self.opening_start = None;
+        }
         self.doors.retain(|mark, _| seen.contains(mark));
     }
 }
@@ -686,5 +801,32 @@ mod tests {
         assert_eq!(door.spin, 3.0);
         assert_eq!(door.light, [2.0, 2.0]);
         assert!(!door.moving());
+    }
+
+    #[test]
+    fn the_opening_keeps_the_pages_spans() {
+        // At the window's middle (x below zero), a 168-point door.
+        let (rest, radius) = ([-1.0, -1.0], 84.0);
+        let window = [1320, 860];
+        let at = sequence(rest, radius, window, 1.0, 0.0, false).expect("the opening starts");
+        assert!((at.center[0] - 660.0).abs() < 0.01);
+        assert!((at.center[1] - 430.0).abs() < 0.01);
+        assert!((at.radius - 84.0).abs() < 0.01);
+        assert_eq!((at.split, at.spin, at.gain), (0.0, 0.0, 1.0));
+
+        // Push runs 3% to 44%: at 44% the door fills the window and the halves have not moved.
+        let open = (1320f32 * 1320.0 + 860.0 * 860.0).sqrt() * 0.56;
+        let pushed = sequence(rest, radius, window, 1.0, 0.44, false).expect("still opening");
+        assert!((pushed.radius - open).abs() < 0.5, "{}", pushed.radius);
+        assert!((pushed.gain - 0.38).abs() < 0.01);
+        assert!(pushed.split < 0.01);
+        assert!((pushed.spin - 2.4).abs() < 0.001);
+
+        // Part runs 44% to 82%, and by the end there is no door left to draw.
+        let parted = sequence(rest, radius, window, 1.0, 0.82, false).expect("still opening");
+        assert!((parted.split - 1.08).abs() < 0.001);
+        assert!(sequence(rest, radius, window, 1.0, 1.0, false).is_none());
+        // Reduced motion skips it: the page is simply there.
+        assert!(sequence(rest, radius, window, 1.0, 0.5, true).is_none());
     }
 }

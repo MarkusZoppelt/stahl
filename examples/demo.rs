@@ -373,11 +373,16 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
-            // Launched into a portfolio, the door's dial turns once, a frame after it is painted
-            // at rest, so the frames from 0.05 s to 1.2 s show it turning.
-            ("door-turn", |s| scene(s, Page::Overview)),
-            // The welcome door flies to the mark. Held on the welcome screen until 0.08s, after
-            // the large door has been painted, then the shell mounts and the door travels.
+            // Launched into a portfolio: the opening has already played, and a refresh turns the
+            // mark's tumblers once, so the frames from 0.05 s to 1.2 s show them turning.
+            ("door-turn", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                s.price_updates += 1;
+            }),
+            // The welcome door opens onto the portfolio. Held on the welcome screen until 0.08 s,
+            // after the large door has been painted, then the shell mounts and the door opens
+            // from where the welcome door was.
             ("door-open", |s| {
                 scene(s, Page::Overview);
                 s.hold_welcome_until = Some(0.08);

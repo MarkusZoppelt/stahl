@@ -66,7 +66,7 @@ From `src/view/ui.rs`. Reach for these before writing layout.
 | `ui::title`, `ui::caption`, `ui::muted` | Section title, small label, secondary text |
 | `ui::stat`, `ui::badge`, `ui::finding` | A labelled figure, a coloured value, a finding with its dot |
 | `ui::share_bar`, `ui::stacked_bar`, `ui::gauge` | Shares of a whole, and progress against a target |
-| `door::vault(s, t, size, place)` | The living mark: still at rest, its dial turns once per refresh and once as a portfolio opens, one mark when something needs attention. `door::welcome` and `door::mark` are the flight's two ends. Drawn by the door shader when the window has a compositor, otherwise by the picture |
+| `door::vault(s, t, size, place)` | The living mark: still at rest, its tumblers turn once per refresh, one mark when something needs attention. `door::welcome` is the welcome screen's large door and `door::mark` the small one. Drawn by the door shader when the window has a compositor, otherwise by the picture |
 | `ui::arrive`, `ui::entering`, `ui::appear`, `ui::float_in`, `ui::notice_in`, `ui::page_arrive` | How things arrive: see "Motion" |
 | `ui::flash`, `ui::price_flash`, `ui::class_flash` | What a refresh moved, shown once in its colour |
 
@@ -88,18 +88,18 @@ timings.
 | A value follows data (a bar, a highlight) | Springs on `LEAD` | `.motion(LEAD)` |
 | Prices land | What moved washes once in its gain or loss colour, in 0.12 s and out over 0.8 s; digits roll; the door's tumblers turn once, on a heavy spring that settles with a small give in about a second | `ui::flash`, `RollingText`, `door::vault` |
 | The pointer over the door | The light on its steel follows, within two radii, easing by 6% a frame; it rests up and to the left when nobody steers. The shader does this, so no view is rebuilt | `src/fx.rs` |
-| A portfolio opens | The welcome door travels to the mark and shrinks to it, the dial turning once as it lands. Nothing covers the page. With no welcome door, only the dial turns | `door::flight` |
+| A portfolio opens | The landing page's opening, over about 1.8 s: the door starts where the welcome screen's was (or in the window's middle when the app launches straight into a portfolio), its tumblers turn, it pushes in until it fills the window, and its halves part to reveal the page, already laid out, between them | `door::opening`, `src/fx.rs` |
 | A press | A card gives to 0.98, a row to 0.995. Buttons don't move | `ui::PRESS_CARD`, `ui::PRESS_ROW` |
 
 Rules:
 
 - Motion plays once, on a change, and then everything is still. A window at rest draws nothing.
   Only the live-prices dot and loading placeholders breathe.
-- Keyed by what changed: a flash is keyed by the refresh, the door's flight by the portfolio's
-  shell first showing after the welcome screen, so neither replays on a page change, a redraw or a refresh.
+- Keyed by what changed: a flash is keyed by the refresh, the door's opening by the portfolio's
+  shell first showing, so neither replays on a page change, a redraw or a refresh.
 - Reduced motion lands every one of these at its final pose at once: nothing travels, turns or
-  flashes, and the door appears in its place instead of flying. The door's light doesn't chase the
-  pointer either.
+  flashes, and the page simply appears instead of the door opening. The door's light doesn't
+  chase the pointer either.
 - A new kind of motion is added here and in `ui.rs` first, then used.
 
 ## The icon
