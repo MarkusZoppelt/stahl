@@ -928,7 +928,7 @@ fn amount_error(text: &str, error: BadNumber) -> String {
 pub fn markdown(s: &State) -> String {
     let classes = load_classes(s);
     let plan = shown(s, &classes);
-    let (heading, detail) = plan_copy(s, &plan, adjusted(s, &classes));
+    let (heading, detail) = plan_copy(s, &classes, adjusted(s, &classes));
     let policy = s
         .simulation
         .data
@@ -946,7 +946,7 @@ pub fn markdown(s: &State) -> String {
     )
 }
 
-fn plan_copy(s: &State, plan: &Plan, adjusted: bool) -> (&'static str, String) {
+fn plan_copy(s: &State, classes: &[Class], adjusted: bool) -> (&'static str, String) {
     match &s.rebalance.plan {
         RebalancePlan::Flow(amount) if *amount >= 0.0 => (
             "Where new money goes",
@@ -958,7 +958,12 @@ fn plan_copy(s: &State, plan: &Plan, adjusted: bool) -> (&'static str, String) {
         ),
         _ if adjusted => (
             "Adjusted by hand",
-            "The split as it was moved, with cash taking up the difference.".to_string(),
+            if classes.iter().any(|class| class.cash) {
+                "The split as it was moved, with cash taking up the difference.".to_string()
+            } else {
+                "The split as it was moved, with the other classes taking up the difference."
+                    .to_string()
+            },
         ),
         _ => {
             let fraction = s.rebalance.fraction.clamp(0.0, 1.0);
@@ -976,9 +981,8 @@ fn plan_copy(s: &State, plan: &Plan, adjusted: bool) -> (&'static str, String) {
                 (
                     "Part of the way to target",
                     format!(
-                        "Every asset class {}% of the way toward its policy target, {} to move.",
-                        (fraction * 100.0).round(),
-                        plan.total - plan.external
+                        "Every asset class {}% of the way toward its policy target.",
+                        (fraction * 100.0).round()
                     ),
                 )
             }
