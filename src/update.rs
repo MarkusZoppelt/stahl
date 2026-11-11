@@ -782,7 +782,8 @@ fn plist_value(plist: &Path, key: &str) -> Result<String, String> {
 }
 
 /// Before anything moves: is this really intact, and really the version the release promised?
-/// The app is only ad-hoc signed, so `codesign` proves it's undamaged, not who built it.
+/// `codesign` proves it's undamaged. It accepts any valid signature, ad-hoc too, so it doesn't prove
+/// who built it.
 fn check_mac_app(app: &Path, version: &Version) -> Result<(), String> {
     run_tool(
         CODESIGN,
