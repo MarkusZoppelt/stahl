@@ -203,6 +203,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         app.click(page.key());
@@ -921,6 +922,7 @@ fn every_empty_page_says_what_belongs_there() {
         ),
         (Page::Review, "No policy yet", "review-set-policy"),
         (Page::Rebalance, "No policy yet", "rebalance-set-policy"),
+        (Page::Records, "The room is empty", "records-empty-add"),
     ] {
         app.click(page.key());
         assert_eq!(app.rt.state.page, page);
@@ -2673,6 +2675,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         let tabbed = [Page::Overview, Page::Holdings, Page::Performance].contains(&page);
@@ -3383,4 +3386,59 @@ fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
         stahl::state::RebalancePlan::Blend
     );
     assert!(app.has_text("Nothing changes yet"));
+}
+
+#[test]
+fn a_new_record_marks_the_sidebar_until_the_wall_is_seen() {
+    let mut app = Harness::boot(true, None);
+    assert!(
+        app.rt.state.records_unseen > 0,
+        "a portfolio with history has plates the owner has not been shown"
+    );
+    let seen = app
+        .dir
+        .path()
+        .join("portfolio/portfolio/history/main/records-seen.json");
+    assert!(
+        !seen.exists(),
+        "nothing is written before the wall is opened"
+    );
+
+    app.click("nav-records");
+    assert_eq!(app.rt.state.page, Page::Records);
+    assert_eq!(app.rt.state.records_unseen, 0, "the mark goes once seen");
+    assert!(
+        app.rt.state.record_arrival.is_some(),
+        "the newest plate is set onto the wall once"
+    );
+    assert!(app.has_text("newest first"));
+
+    // What was shown is remembered beside the history, by id, with no amounts in it.
+    let written = fs::read_to_string(&seen).unwrap();
+    assert!(written.contains(":begins"), "{written}");
+    assert!(!written.contains('\u{20ac}'), "{written}");
+
+    // Coming back, the wall is simply there: no second ceremony, no mark.
+    app.click(Page::Overview.key());
+    app.click("nav-records");
+    assert_eq!(app.rt.state.records_unseen, 0);
+    assert!(app.rt.state.record_arrival.is_none());
+}
+
+#[test]
+fn a_plate_opens_to_its_moment_and_closes() {
+    let mut app = Harness::boot(true, None);
+    app.click("nav-records");
+    let plates = app.rt.state.records.data.clone().expect("the wall");
+    assert!(plates.len() >= 2, "the demo has a wall: {}", plates.len());
+    let id = plates[0].id.clone();
+
+    app.click(&format!("plate-{id}"));
+    assert_eq!(app.rt.state.record_plate.as_deref(), Some(id.as_str()));
+    assert!(app.exists("record-back"), "a way back to the wall");
+    assert!(app.exists("record-chart"), "the moment, on the chart");
+
+    app.press(Key::Escape);
+    assert!(app.rt.state.record_plate.is_none());
+    assert!(app.exists(&format!("plate-{id}")), "the plate is back");
 }

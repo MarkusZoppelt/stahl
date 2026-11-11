@@ -230,8 +230,14 @@ fn back_to_more(t: &Theme) -> El {
         .child(text("More").font(k.ty.ui).color(k.c.text_muted))
 }
 
-/// One row in More: a page, or something to do.
-fn more_row(key: &'static str, glyph: &'static Icon, label: &str, t: &Theme) -> El {
+/// One row in More: a page, or something to do. `mark` sits between the label and the chevron.
+fn more_row(
+    key: &'static str,
+    glyph: &'static Icon,
+    label: &str,
+    mark: Option<El>,
+    t: &Theme,
+) -> El {
     let k = &t.kit;
     row()
         .center_y()
@@ -253,11 +259,17 @@ fn more_row(key: &'static str, glyph: &'static Icon, label: &str, t: &Theme) -> 
                 .grow(1.0)
                 .truncate(),
         )
+        .children(mark)
         .child(icon(&icons::CHEVRON_RIGHT, 16.0).color(k.c.text_faint))
 }
 
 fn page_row(page: Page, t: &Theme) -> El {
-    more_row(page.key(), page_icon(page), page.label(), t)
+    page_row_marked(page, None, t)
+}
+
+/// A page's row, with the quiet mark a page may carry.
+fn page_row_marked(page: Page, mark: Option<El>, t: &Theme) -> El {
+    more_row(page.key(), page_icon(page), page.label(), mark, t)
         .on_press(move |s: &mut State| s.navigate(page))
 }
 
@@ -293,6 +305,7 @@ fn more_list(s: &State, t: &Theme) -> El {
                 "more-create-workspace",
                 &icons::FOLDER_PLUS,
                 "Create a workspace",
+                None,
                 t,
             )
             .on_press(|s: &mut State| s.open_new_workspace()),
@@ -310,17 +323,28 @@ fn more_list(s: &State, t: &Theme) -> El {
         .child(section("Plan", plan, t))
         .child(section(
             "Insights",
-            Page::INSIGHTS.map(|page| page_row(page, t)).to_vec(),
+            Page::INSIGHTS
+                .map(|page| {
+                    let mark = (page == Page::Records && s.records_unseen > 0).then(|| {
+                        ui::dot(t.accent)
+                            .mr(6.0)
+                            .role("img")
+                            .label("A new record")
+                            .transition(ui::appear())
+                    });
+                    page_row_marked(page, mark, t)
+                })
+                .to_vec(),
             t,
         ))
         .child(section(
             "Stahl",
             vec![
-                more_row("more-search", &icons::SEARCH, "Search", t)
+                more_row("more-search", &icons::SEARCH, "Search", None, t)
                     .on_press(|s: &mut State| s.open_palette()),
-                more_row("more-guide", &icons::CIRCLE_HELP, "Guide", t)
+                more_row("more-guide", &icons::CIRCLE_HELP, "Guide", None, t)
                     .on_press(|s: &mut State| s.toggle_guide()),
-                more_row("more-theme", theme.1, theme.0, t)
+                more_row("more-theme", theme.1, theme.0, None, t)
                     .on_press(|s: &mut State| s.toggle_theme()),
                 page_row(Page::Settings, t),
             ],
@@ -341,6 +365,6 @@ mod tests {
         let mut reachable: Vec<Page> = Page::TABS.into_iter().chain(in_more).collect();
         reachable.sort_by_key(|page| page.key());
         reachable.dedup();
-        assert_eq!(reachable.len(), 11, "{reachable:?}");
+        assert_eq!(reachable.len(), 12, "{reachable:?}");
     }
 }

@@ -68,6 +68,7 @@ From `src/view/ui.rs`. Reach for these before writing layout.
 | `ui::share_bar`, `ui::stacked_bar`, `ui::gauge` | Shares of a whole, and progress against a target |
 | `door::vault(s, t, size, place)` | The living mark: still at rest, its tumblers turn once per refresh, one mark when something needs attention. `door::welcome` is the welcome screen's large door and `door::mark` the small one. Drawn by the door shader when the window has a compositor, otherwise by the picture |
 | `ui::arrive`, `ui::entering`, `ui::appear`, `ui::float_in`, `ui::notice_in`, `ui::page_arrive` | How things arrive: see "Motion" |
+| `ui::settle`, `ui::catch_light` | A new record being set onto the wall: the plate settles and the light passes over it once |
 | `ui::flash`, `ui::price_flash`, `ui::class_flash` | What a refresh moved, shown once in its colour |
 
 A new kind of thing on more than one page becomes a primitive here, with its look decided once.
@@ -90,6 +91,7 @@ timings.
 | The pointer over the door | The light on its steel follows, within two radii, easing by 6% a frame; it rests up and to the left when nobody steers. The shader does this, so no view is rebuilt | `src/fx.rs` |
 | A portfolio opens | The landing page's opening, over about 1.8 s: the door starts where the welcome screen's was (or in the window's middle when the app launches straight into a portfolio), its tumblers turn, it pushes in until it fills the window, and its halves part to reveal the page, already laid out, between them | `door::opening`, `src/fx.rs` |
 | A press | A card gives to 0.98, a row to 0.995. Buttons don't move | `ui::PRESS_CARD`, `ui::PRESS_ROW` |
+| A new record arrives | The plate is set onto the wall: it comes the last six points out of a slight blur and settles, and a pale light falls over it once and fades | `ui::settle`, `ui::catch_light` |
 
 Rules:
 

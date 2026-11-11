@@ -28,6 +28,7 @@ mod overview;
 mod plan;
 mod portfolio;
 pub mod rebalance;
+mod records;
 mod treemap;
 pub mod ui;
 mod updates;
@@ -43,6 +44,7 @@ pub fn page_icon(page: Page) -> &'static Icon {
         Page::Policy => &icons::SHIELD,
         Page::Documents => &icons::FILE_TEXT,
         Page::Briefing => &icons::CLIPBOARD_LIST,
+        Page::Records => &icons::LANDMARK,
         Page::Health => &icons::HEART_PULSE,
         Page::Settings => &icons::SETTINGS,
     }
@@ -55,6 +57,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        // A plate lifted off the wall goes back on it first.
+        if s.record_plate.take().is_some() {
+            return true;
+        }
         if s.measure.span.take().is_some() {
             s.measure.clear();
             return true;
@@ -377,12 +383,20 @@ fn folder_prompt(s: &State, t: &Theme) -> El {
 }
 
 fn nav_row(s: &State, page: Page, t: &Theme) -> El {
-    SidebarRow::new(page.label())
+    let mut row = SidebarRow::new(page.label())
         .icon(page_icon(page))
         .selected(s.page == page)
-        .on_select(move |s: &mut State, _| s.navigate(page))
-        .build(&t.kit)
-        .key(page.key())
+        .on_select(move |s: &mut State, _| s.navigate(page));
+    // A record the owner hasn't been shown: one quiet mark, until they look.
+    if page == Page::Records && s.records_unseen > 0 {
+        row = row.trailing(
+            ui::dot(t.accent)
+                .role("img")
+                .label("A new record")
+                .transition(ui::appear()),
+        );
+    }
+    row.build(&t.kit).key(page.key())
 }
 
 fn sidebar(s: &State, t: &Theme) -> El {
@@ -642,13 +656,14 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
         Page::Policy => plan::policy(s, t, cx),
         Page::Documents => plan::documents(s, t, cx),
         Page::Briefing => insights::briefing(s, t, cx),
+        Page::Records => records::page(s, t, cx),
         Page::Health => insights::health(s, t),
         Page::Settings => insights::settings(s, t),
     }
 }
 
 /// Every page in the order the sidebar lists them.
-const PAGE_ORDER: [Page; 11] = [
+const PAGE_ORDER: [Page; 12] = [
     Page::Overview,
     Page::Holdings,
     Page::Allocation,
@@ -658,6 +673,7 @@ const PAGE_ORDER: [Page; 11] = [
     Page::Policy,
     Page::Documents,
     Page::Briefing,
+    Page::Records,
     Page::Health,
     Page::Settings,
 ];

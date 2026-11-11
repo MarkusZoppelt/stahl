@@ -55,6 +55,9 @@ pub fn about(page: Page) -> &'static str {
         Page::Briefing => {
             "One page on your whole portfolio, to read or paste into an AI assistant."
         }
+        Page::Records => {
+            "The plates this portfolio has earned: highs, round numbers, years on record, and the falls that came back."
+        }
         Page::Health => "Checks on your files and data, so you know which figures to trust.",
         Page::Settings => "Your currency and theme, and where this app keeps its settings.",
     }

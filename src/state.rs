@@ -38,12 +38,15 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
 };
 
 /// How long a chart takes to draw itself in.
 pub const DRAW_IN: f64 = 0.9;
+/// How long a new plate takes to be set onto the wall and catch the light once.
+pub const RECORD_ARRIVAL_FOR: f64 = 2.4;
 /// How far (points) a page is pulled past its top before letting go refreshes the prices.
 pub const PULL_TO_REFRESH: f32 = 72.0;
 /// How far a holding's row slides on a phone to show its actions.
@@ -127,6 +130,7 @@ pub enum Page {
     Policy,
     Documents,
     Briefing,
+    Records,
     Health,
     Settings,
 }
@@ -139,7 +143,7 @@ impl Page {
         Page::Performance,
     ];
     pub const PLAN: [Page; 4] = [Page::Review, Page::Rebalance, Page::Policy, Page::Documents];
-    pub const INSIGHTS: [Page; 2] = [Page::Briefing, Page::Health];
+    pub const INSIGHTS: [Page; 3] = [Page::Briefing, Page::Records, Page::Health];
     /// The pages with a tab of their own on a phone. Everything else is under More.
     pub const TABS: [Page; 3] = [Page::Overview, Page::Holdings, Page::Performance];
 
@@ -154,6 +158,7 @@ impl Page {
             Page::Policy => "Policy",
             Page::Documents => "Documents",
             Page::Briefing => "Briefing",
+            Page::Records => "Records",
             Page::Health => "Data Health",
             Page::Settings => "Settings",
         }
@@ -170,6 +175,7 @@ impl Page {
             Page::Policy => "nav-policy",
             Page::Documents => "nav-documents",
             Page::Briefing => "nav-briefing",
+            Page::Records => "nav-records",
             Page::Health => "nav-health",
             Page::Settings => "nav-settings",
         }
@@ -179,7 +185,8 @@ impl Page {
         Self::PLAN.contains(&self)
     }
 
-    /// Its digit with the main modifier, for the pages that have one.
+    /// Its digit with the main modifier, for the pages that have one. Records is reached through
+    /// the sidebar and the command palette.
     pub fn shortcut(self) -> Option<char> {
         Some(match self {
             Page::Overview => '1',
@@ -192,6 +199,7 @@ impl Page {
             Page::Documents => '8',
             Page::Briefing => '9',
             Page::Health => '0',
+            Page::Records => return None,
             Page::Settings => ',',
         })
     }
@@ -774,6 +782,14 @@ pub struct State {
     /// The allocation the Rebalance page is being played with.
     pub rebalance: RebalancePage,
     pub briefing: Loadable<Briefing>,
+    /// The records room's wall, newest plate first.
+    pub records: Loadable<Vec<Record>>,
+    /// Plates the owner hasn't been shown yet: the sidebar's small mark.
+    pub records_unseen: usize,
+    /// The plate whose arrival is being shown, and when it started.
+    pub record_arrival: Option<(String, f64)>,
+    /// The plate opened on the Records page.
+    pub record_plate: Option<String>,
     pub validation: Loadable<ValidationReport>,
     pub doctor: Loadable<WorkspaceHealth>,
     pub policy: PolicyPage,
@@ -996,6 +1012,10 @@ impl State {
             simulation: Loadable::default(),
             rebalance: RebalancePage::new(),
             briefing: Loadable::default(),
+            records: Loadable::default(),
+            records_unseen: 0,
+            record_arrival: None,
+            record_plate: None,
             validation: Loadable::default(),
             doctor: Loadable::default(),
             policy: PolicyPage {
@@ -1126,6 +1146,15 @@ impl State {
             self.toast_armed = false;
             tx.wake_after(TOAST_FOR + Duration::from_millis(50));
         }
+        // A new plate's arrival plays once: after it, the plate is simply on the wall.
+        if let Some((_, started)) = &self.record_arrival {
+            if now >= started + RECORD_ARRIVAL_FOR {
+                self.record_arrival = None;
+                changed = true;
+            } else {
+                tx.wake_at(started + RECORD_ARRIVAL_FOR);
+            }
+        }
         if self
             .toast
             .as_ref()
@@ -1224,6 +1253,9 @@ impl State {
         }
         if self.guide {
             self.guide = false;
+            return true;
+        }
+        if self.record_plate.take().is_some() {
             return true;
         }
         if !self.compact {
@@ -1465,6 +1497,7 @@ impl State {
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
         self.load_since();
+        self.load_record_mark();
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -2002,6 +2035,7 @@ impl State {
         self.measure.clear();
         self.donut_hover = None;
         self.palette = None;
+        self.record_plate = None;
         if page != Page::Holdings {
             self.inspector.set_open(false);
         } else if self.selected.is_some() {
@@ -2026,6 +2060,10 @@ impl State {
                 self.load_review();
             }
             Page::Briefing => self.load_briefing(),
+            Page::Records => {
+                self.load_records(true);
+                self.load_history();
+            }
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
@@ -2035,10 +2073,11 @@ impl State {
 
     fn load_history(&mut self) {
         // Holdings sparklines use the same month Overview charts, so the two pages agree.
-        let period = if self.page == Page::Performance {
-            self.period
-        } else {
-            Period::Month
+        let period = match self.page {
+            Page::Performance => self.period,
+            // A plate's moment is read against everything Stahl has, not the last month.
+            Page::Records => Period::All,
+            _ => Period::Month,
         };
         self.history_request += 1;
         let request = self.history_request;
@@ -2110,6 +2149,80 @@ impl State {
             |backend| async move { backend.briefing().await },
             |state, result| state.briefing.finish(result),
         );
+    }
+
+    /// Read the wall. `mark_seen` says this is the owner opening the page: the plates they
+    /// haven't seen are shown once, in a short ceremony, and then simply there.
+    pub fn load_records(&mut self, mark_seen: bool) {
+        if !self.has_portfolio() {
+            self.records = Loadable::default();
+            return;
+        }
+        self.records.loading = true;
+        self.run(
+            |backend| async move { backend.records().await },
+            move |state, result| state.finish_records(mark_seen, result),
+        );
+    }
+
+    fn finish_records(&mut self, mark_seen: bool, result: BackendResult<backend::RecordsView>) {
+        self.records.loading = false;
+        let view = match result {
+            Ok(view) => view,
+            Err(error) => {
+                self.records.error = Some(error);
+                return;
+            }
+        };
+        let unseen: Vec<String> = view
+            .plates
+            .iter()
+            .filter(|plate| !view.seen.contains(&plate.id))
+            .map(|plate| plate.id.clone())
+            .collect();
+        self.records_unseen = unseen.len();
+        self.records.data = Some(view.plates);
+        self.records.error = None;
+        if !mark_seen || unseen.is_empty() {
+            return;
+        }
+        // The newest unseen plate is the one at the top of the wall: it is set into place there.
+        self.record_arrival = unseen.first().cloned().map(|id| (id, self.now));
+        self.records_unseen = 0;
+        self.run(
+            |backend| async move { backend.mark_records_seen(unseen).await },
+            |_, _| {},
+        );
+    }
+
+    /// The mark beside Records, for a portfolio that has just opened or refreshed.
+    fn load_record_mark(&mut self) {
+        if !self.has_portfolio() || self.positions.is_empty() {
+            self.records_unseen = 0;
+            return;
+        }
+        self.run(
+            |backend| async move { backend.records().await },
+            |state, result| {
+                if let Ok(view) = result {
+                    state.records_unseen = view
+                        .plates
+                        .iter()
+                        .filter(|plate| !view.seen.contains(&plate.id))
+                        .count();
+                }
+            },
+        );
+    }
+
+    /// Open one plate on the Records page, or close the one that is open.
+    pub fn open_record(&mut self, id: String) {
+        self.record_plate = Some(id);
+        self.load_history();
+    }
+
+    pub fn close_record(&mut self) {
+        self.record_plate = None;
     }
 
     pub fn load_health(&mut self) {
@@ -3148,13 +3261,18 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_reach_every_page() {
+    fn shortcuts_reach_every_page_that_has_one() {
         for page in Page::PORTFOLIO
             .into_iter()
             .chain(Page::PLAN)
             .chain(Page::INSIGHTS)
         {
-            assert_eq!(Page::from_shortcut(page.shortcut().unwrap()), Some(page));
+            match page.shortcut() {
+                Some(key) => assert_eq!(Page::from_shortcut(key), Some(page)),
+                // Every digit is spoken for. Records is reached from the sidebar and the
+                // command palette, which lists every page.
+                None => assert_eq!(page, Page::Records),
+            }
         }
     }
 }

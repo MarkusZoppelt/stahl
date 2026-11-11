@@ -155,6 +155,43 @@ pub fn float_in() -> Transition {
         .combined(Transition::opacity())
 }
 
+/// A plate set onto the wall: it comes the last few points, out of a slight blur, and settles.
+pub fn settle() -> Transition {
+    Transition::offset(0.0, 6.0)
+        .combined(Transition::scale(0.985))
+        .combined(Transition::blur(3.0))
+        .combined(Transition::opacity())
+}
+
+/// The light passing once over something new: a pale sheen falling from above that fades in and
+/// out. Keyed by `key`, so it plays once per arrival and never on a redraw.
+pub fn catch_light(key: impl Into<String>, t: &Theme, radius: f32) -> El {
+    let sheen = Color::WHITE.alpha(if t.dark { 0.14 } else { 0.55 });
+    el().key(format!("{}-light", key.into()))
+        .absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(radius)
+        .a11y_hidden()
+        .linear_gradient(
+            180.0,
+            [
+                (0.0, sheen),
+                (0.5, sheen.alpha(0.0)),
+                (1.0, sheen.alpha(0.0)),
+            ],
+        )
+        .sequence(Sequence::new(CATCH))
+}
+
+/// The light: in quickly, then out over a second and a half.
+pub const CATCH: &[Beat] = &[
+    Beat::new(0.0).opacity(0.0),
+    Beat::new(0.12).opacity(1.0),
+    Beat::new(0.5).opacity(0.85),
+    Beat::new(1.3).opacity(0.0),
+];
+
 /// A banner or an error, dropping in from above where it sits.
 pub fn notice_in() -> Transition {
     Transition::offset(0.0, -6.0).combined(Transition::opacity())

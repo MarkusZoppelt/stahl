@@ -7,7 +7,7 @@
 //! cargo run --example demo -- --list-scenes
 //! ```
 
-use std::{env, fs, process, time::SystemTime};
+use std::{env, fs, path::Path, process, time::SystemTime};
 
 use portfolio_rs::{
     config::ThemeMode,
@@ -49,8 +49,27 @@ fn main() {
     fn scene(s: &mut State, page: Page) {
         s.startup();
         s.settle();
+        // The owner has been to the records room before, so its mark is not on every screen.
+        s.navigate(Page::Records);
+        s.settle();
         s.navigate(page);
         s.settle();
+    }
+    /// The plate the wall has at its top, if any.
+    fn newest_plate(s: &State) -> Option<String> {
+        s.records
+            .data
+            .as_ref()
+            .and_then(|plates| plates.first())
+            .map(|plate| plate.id.clone())
+    }
+    /// One of the wall's plates by what kind of record it is, for opening it.
+    fn plate_of(s: &State, caption: &str) -> Option<String> {
+        s.records
+            .data
+            .as_ref()
+            .and_then(|plates| plates.iter().find(|plate| plate.kind.caption() == caption))
+            .map(|plate| plate.id.clone())
     }
     /// What someone sees on first opening the app, with nothing to reopen.
     fn first_run(s: &mut State) {
@@ -102,6 +121,27 @@ fn main() {
         .flatten()
         .collect();
         s.price_updates += 1;
+    }
+    /// Cut the demo's history down to its last `keep` valuations and open it again: a portfolio
+    /// whose wall has only just begun.
+    fn trim_history(s: &mut State, keep: usize) {
+        let Some(dir) = s.open.workspace_dir.clone() else {
+            return;
+        };
+        let path = Path::new(&dir).join("portfolio/history/main/snapshots.jsonl");
+        let Ok(text) = fs::read_to_string(&path) else {
+            return;
+        };
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let kept = &lines[lines.len().saturating_sub(keep)..];
+        if fs::write(&path, kept.join("\n") + "\n").is_err() {
+            return;
+        }
+        s.load_workspace(dir);
+        s.settle();
     }
     /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
     fn phone(s: &mut State, page: Page) {
@@ -319,6 +359,82 @@ fn main() {
             ("overview-clear-light", |s| {
                 scene(s, Page::Overview);
                 on_target(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("records", |s| scene(s, Page::Records)),
+            ("records-light", |s| {
+                scene(s, Page::Records);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("records-plate", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A fall").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("records-plate-light", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A milestone").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("records-plate-old", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A holding") {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("records-privacy", |s| {
+                scene(s, Page::Records);
+                s.privacy = true;
+            }),
+            ("records-mark", |s| {
+                scene(s, Page::Overview);
+                s.records_unseen = 2;
+            }),
+            ("records-first-day", |s| {
+                scene(s, Page::Records);
+                trim_history(s, 1);
+            }),
+            ("records-empty", |s| empty(s, Page::Records)),
+            // A new plate is set onto the wall and catches the light once: render at several
+            // `--at` times to see the strip.
+            ("records-arrival", |s| {
+                scene(s, Page::Records);
+                s.skip_opening();
+                if let Some(id) = newest_plate(s) {
+                    s.record_arrival = Some((id, 0.0));
+                }
+            }),
+            ("phone-records", |s| phone(s, Page::Records)),
+            ("phone-records-mark", |s| {
+                phone(s, Page::Overview);
+                s.records_unseen = 2;
+                s.more = true;
+            }),
+            ("phone-records-plate", |s| {
+                phone(s, Page::Records);
+                if let Some(id) = plate_of(s, "A fall").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("phone-records-arrival", |s| {
+                phone(s, Page::Records);
+                s.skip_opening();
+                if let Some(id) = newest_plate(s) {
+                    s.record_arrival = Some((id, 0.0));
+                }
+            }),
+            ("phone-records-light", |s| {
+                phone(s, Page::Records);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
