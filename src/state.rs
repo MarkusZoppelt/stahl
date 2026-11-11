@@ -499,7 +499,7 @@ pub enum RebalancePlan {
 }
 
 /// The plan being played with on the Rebalance page. Live values move the rows and the bars
-/// without rebuilding the view; the view must not read `press`, `step` or `painted`.
+/// without rebuilding the view; the view must not read `step`, `painted` or `press_values`.
 pub struct RebalancePage {
     pub plan: RebalancePlan,
     /// Where the blend slider sits, 0 to 1. Kept while a row is adjusted by hand, so Reset
