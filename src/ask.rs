@@ -1253,6 +1253,24 @@ mod tests {
     }
 
     #[test]
+    fn a_half_written_say_shows_the_words_it_has() {
+        assert_eq!(
+            partial_say(r#"{"block":"say","text":"Since Novem"#),
+            Some("Since Novem".to_string())
+        );
+        assert_eq!(
+            partial_say(r#"{"block":"say","text":"Done.\nNext"}"#),
+            Some("Done.\nNext".to_string())
+        );
+        assert_eq!(
+            partial_say(r#"{"block":"figures","ids":["#),
+            None,
+            "only a say has words to show"
+        );
+        assert_eq!(partial_say("{\"block\":\"say\""), None);
+    }
+
+    #[test]
     fn the_prompt_lists_the_block_names_the_parser_reads() {
         for name in [
             "say",
