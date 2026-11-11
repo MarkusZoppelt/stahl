@@ -5,9 +5,9 @@
 //! A window with a compositor draws the door with the shader (`crate::fx`); the picture
 //! (`ui::door`) and its turned dial stand in for tests, which never draw, and for iOS.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
-use rune::{El, Spring, Transition, el};
+use rune::{Drag, El, Key, KeyEvent, Phase, Spring, Transition, Tx, el};
 
 use crate::{agenda::Weight, state::State, theme::Theme};
 
@@ -16,6 +16,9 @@ use super::ui;
 /// The dial's outer edge, as a fraction of the door's radius: the fourth ring of the icon, with the
 /// graduations (`EDGE[4]` in `site/door.js`).
 const DIAL: f32 = 0.7969;
+
+/// One notch of the dial: the step an arrow key turns it by.
+pub const NOTCH: f32 = TAU / 24.0;
 
 /// A heavy dial: it takes its time and settles with a small give, as steel would.
 pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
@@ -57,6 +60,39 @@ pub fn describe(count: usize) -> String {
     }
 }
 
+/// A hand on the dial: it follows the pointer's angle around the door's centre, the short way
+/// round, and stays where it is left. The compositor gives it the weight.
+fn turn_dial(s: &mut State, drag: &mut Drag, _tx: &mut Tx) {
+    let centre = [drag.w / 2.0, drag.h / 2.0];
+    let angle = (drag.y - centre[1]).atan2(drag.x - centre[0]);
+    match drag.phase {
+        Phase::Down => s.dial_drag = Some(angle),
+        Phase::Move => {
+            if let Some(last) = s.dial_drag {
+                let mut delta = angle - last;
+                if delta > PI {
+                    delta -= TAU;
+                } else if delta < -PI {
+                    delta += TAU;
+                }
+                s.dial_hand += delta;
+            }
+            s.dial_drag = Some(angle);
+        }
+        Phase::Up => s.dial_drag = None,
+    }
+}
+
+/// The keyboard's way to turn the dial: one notch per arrow.
+fn turn_key(s: &mut State, event: &KeyEvent, _tx: &mut Tx) -> bool {
+    match event.key {
+        Key::Left => s.dial_hand -= NOTCH,
+        Key::Right => s.dial_hand += NOTCH,
+        _ => return false,
+    }
+    true
+}
+
 /// The magic of the living door at `size`: either the shader's slot, or the picture with its
 /// turned dial for a window without a compositor (tests, which never draw, and iOS).
 /// `place` keeps the dial's key apart where two doors are on screen.
@@ -65,6 +101,8 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
     let mut door = el()
         .key(format!("door-{place}"))
         .size(size, size)
+        // Round, so the focus ring follows the door and not a box around it.
+        .radius(size / 2.0)
         .child(body(s, size, place));
     if count > 0 {
         // One mark on the dial at twelve o'clock, where a combination is read.
@@ -86,19 +124,30 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
                 .transition(ui::appear()),
         );
     }
+    // The door can be turned by hand, for no reason but that it is a door. It is a control of
+    // its own, so the press never becomes a window drag or a page press. On a phone the top
+    // bar's door already turns at a tap, and that stays its one gesture.
+    if place != "phone" {
+        door = door
+            .focusable(true)
+            .on_drag(turn_dial)
+            .on_key(turn_key)
+            .help("Drag to turn the dial, or press the left and right arrow keys");
+    }
     door.role("img")
         .label(format!("Stahl Capital. {}", describe(count)))
 }
 
 /// What the door is drawn with: the shader, or the picture and its turned dial.
 fn body(s: &State, size: f32, place: &str) -> El {
+    let dragging = s.dial_drag.is_some();
     if s.shaders {
         // The welcome screen's door is the large door; the mark has its own light and its own
         // tumblers.
         if place == "welcome" {
-            crate::fx::door(size, dial_turns(s), s.door_busy)
+            crate::fx::door(size, dial_turns(s), s.door_busy, s.dial_hand, dragging)
         } else {
-            crate::fx::mark(size, dial_turns(s), s.door_busy)
+            crate::fx::mark(size, dial_turns(s), s.door_busy, s.dial_hand, dragging)
         }
     } else {
         let dial = size * DIAL;
@@ -112,7 +161,7 @@ fn body(s: &State, size: f32, place: &str) -> El {
                 .radius(dial / 2.0)
                 .clip_rounded(dial / 2.0)
                 .a11y_hidden()
-                .rotate(dial_angle(dial_turns(s)))
+                .rotate(dial_angle(dial_turns(s)) + s.dial_hand)
                 .rotate_motion(DIAL_TURN)
                 .child(ui::door(size).absolute(-inset, -inset)),
         )

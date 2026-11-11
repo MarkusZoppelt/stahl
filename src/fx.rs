@@ -77,26 +77,31 @@ const RED: [f32; 3] = [0.94, 0.74, 0.71];
 /// the effect keeps the slot's place, rect, clip and opacity. `turns` is how far the tumblers
 /// have been turned, and `busy` keeps them turning slowly; the compositor eases the real spin
 /// towards it.
-fn slot(size: f32, mark: u32, turns: f32, busy: bool) -> El {
+fn slot(size: f32, mark: u32, turns: f32, busy: bool, hand: f32, dragging: bool) -> El {
     el().size(size, size)
         .effect(mark)
-        .effect_data([turns, if busy { 1.0 } else { 0.0 }, 0.0, 0.0])
+        .effect_data([
+            turns,
+            if busy { 1.0 } else { 0.0 },
+            hand,
+            if dragging { 1.0 } else { 0.0 },
+        ])
         .a11y_hidden()
 }
 
 /// The large door, at `size`.
-pub fn door(size: f32, turns: u64, busy: bool) -> El {
-    slot(size, DOOR, turns as f32, busy)
+pub fn door(size: f32, turns: u64, busy: bool, hand: f32, dragging: bool) -> El {
+    slot(size, DOOR, turns as f32, busy, hand, dragging)
 }
 
 /// The small mark, at `size`.
-pub fn mark(size: f32, turns: u64, busy: bool) -> El {
-    slot(size, MARK, turns as f32, busy)
+pub fn mark(size: f32, turns: u64, busy: bool, hand: f32, dragging: bool) -> El {
+    slot(size, MARK, turns as f32, busy, hand, dragging)
 }
 
 /// The door behind a pull, at `size`. It never turns.
 pub fn pull(size: f32) -> El {
-    slot(size, PULL, 0.0, false)
+    slot(size, PULL, 0.0, false, 0.0, false)
 }
 
 /// The room's light on the wall, filling its parent. `radius` is the parent's corner radius, so
@@ -294,6 +299,11 @@ struct Door {
     turns: f32,
     /// Something is being thought about: the tumblers turn slowly until it isn't.
     busy: bool,
+    /// How far the owner has turned the dial by hand, in radians.
+    hand: f32,
+    /// How fast the hand was turning when the drag ended, to coast on.
+    hand_speed: f32,
+    dragging: bool,
     /// The clock when this door last stepped, so a frame that draws it twice advances it once.
     t: f64,
 }
@@ -308,11 +318,14 @@ impl Door {
             speed: 0.0,
             turns,
             busy: false,
+            hand: 0.0,
+            hand_speed: 0.0,
+            dragging: false,
             t,
         }
     }
 
-    fn step(&mut self, t: f64, reduced: bool, turns: f32, busy: bool) {
+    fn step(&mut self, t: f64, reduced: bool, turns: f32, busy: bool, hand: f32, dragging: bool) {
         if t <= self.t {
             return;
         }
@@ -320,8 +333,20 @@ impl Door {
         self.t = t;
         if turns != self.turns {
             self.turns = turns;
-            self.spin_target = turns;
+            if !dragging {
+                self.spin_target = turns + hand;
+            }
         }
+        // A hand on the dial adds its angle to the turn count; letting go carries its speed, so
+        // the steel coasts past and settles back with the same heavy spring.
+        if dragging && dt > 0.0 {
+            self.hand_speed = (hand - self.hand) / dt;
+        }
+        if self.dragging && !dragging {
+            self.speed += self.hand_speed.clamp(-12.0, 12.0) * 0.8;
+        }
+        self.hand = hand;
+        self.dragging = dragging;
         if busy != self.busy {
             self.busy = busy;
             if busy {
@@ -335,6 +360,8 @@ impl Door {
         if self.busy {
             // A slow, even turn, with no spring to fight it.
             self.spin_target += dt / THINKING_TURN * TAU;
+        } else if !dragging {
+            self.spin_target = turns + hand;
         }
         if reduced {
             self.spin = self.spin_target;
@@ -350,14 +377,21 @@ impl Door {
             self.spin += self.speed * h;
             left -= h;
         }
-        if !self.busy && (self.spin - self.spin_target).abs() < 1e-4 && self.speed.abs() < 1e-2 {
+        if !self.busy
+            && !self.dragging
+            && (self.spin - self.spin_target).abs() < 1e-4
+            && self.speed.abs() < 1e-2
+        {
             self.spin = self.spin_target;
             self.speed = 0.0;
         }
     }
 
     fn moving(&self) -> bool {
-        self.busy || (self.spin - self.spin_target).abs() > 5e-4 || self.speed.abs() > 1e-2
+        self.busy
+            || self.dragging
+            || (self.spin - self.spin_target).abs() > 5e-4
+            || self.speed.abs() > 1e-2
     }
 }
 
@@ -868,7 +902,7 @@ impl Compositor<State> for Gfx {
                 opening = true;
                 seen.insert(OPEN);
                 let door = self.doors.entry(OPEN).or_insert_with(|| Door::new(0.0, t));
-                door.step(t, reduced, 0.0, false);
+                door.step(t, reduced, 0.0, false, 0.0, false);
                 let light_at = [light.at[0] * site.scale, light.at[1] * site.scale];
                 let direction = light_direction(light_at, at.center, at.radius);
                 Slot {
@@ -893,7 +927,14 @@ impl Compositor<State> for Gfx {
                     .doors
                     .entry(site.mark)
                     .or_insert_with(|| Door::new(site.data[0], t));
-                door.step(t, reduced, site.data[0], site.data[1] > 0.5);
+                door.step(
+                    t,
+                    reduced,
+                    site.data[0],
+                    site.data[1] > 0.5,
+                    site.data[2],
+                    site.data[3] > 0.5,
+                );
                 seen.insert(site.mark);
                 let light_at = [light.at[0] * site.scale, light.at[1] * site.scale];
                 Slot {
@@ -939,15 +980,20 @@ impl Compositor<State> for Gfx {
 }
 
 /// The light's direction from `center`, in units of `radius`, saturating at two radii as the
-/// landing page's canvas did. A pointer on the door lights it straight on.
+/// landing page's canvas did. A light right on the door keeps the page's own up-and-left tilt,
+/// so the steel never floods white.
 fn light_direction(light: [f32; 2], center: [f32; 2], radius: f32) -> [f32; 2] {
     let d = [light[0] - center[0], light[1] - center[1]];
     let distance = (d[0] * d[0] + d[1] * d[1]).sqrt();
-    if distance < 1e-3 {
-        return [0.0, 0.0];
-    }
-    let magnitude = (distance / radius.max(1.0)).min(LIGHT_REACH) * (LIGHT_TILT / LIGHT_REACH);
-    [d[0] / distance * magnitude, d[1] / distance * magnitude]
+    let direction = if distance < 1.0 {
+        // The landing page's own resting light, as a unit vector.
+        [-0.646, -0.764]
+    } else {
+        [d[0] / distance, d[1] / distance]
+    };
+    let magnitude = ((distance / radius.max(1.0)).min(LIGHT_REACH) * (LIGHT_TILT / LIGHT_REACH))
+        .max(LIGHT_TILT * 0.5);
+    [direction[0] * magnitude, direction[1] * magnitude]
 }
 
 const DOOR_WGSL: &str = r#"
@@ -1409,7 +1455,7 @@ mod tests {
     fn a_door_at_rest_does_not_move() {
         let mut door = Door::new(0.0, 0.0);
         for k in 0..60 {
-            door.step(k as f64 / 60.0, false, 0.0, false);
+            door.step(k as f64 / 60.0, false, 0.0, false, 0.0, false);
         }
         assert!(!door.moving());
     }
@@ -1460,15 +1506,15 @@ mod tests {
         let direction = light_direction([660.0, 100.0], [100.0, 100.0], 25.0);
         assert!((direction[0] - LIGHT_TILT).abs() < 1e-4, "{direction:?}");
         assert!(direction[1].abs() < 1e-4, "{direction:?}");
-        // A pointer on the door lights it straight on.
-        assert_eq!(
-            light_direction([100.0, 100.0], [100.0, 100.0], 25.0),
-            [0.0, 0.0]
-        );
+        // A light right on the door keeps the page's tilt, so the steel never floods white.
+        let on = light_direction([100.0, 100.0], [100.0, 100.0], 25.0);
+        assert!(on[0] < 0.0 && on[1] < 0.0, "{on:?}");
+        let magnitude = (on[0] * on[0] + on[1] * on[1]).sqrt();
+        assert!(magnitude >= LIGHT_TILT * 0.5 - 1e-4, "{on:?}");
         // Within two radii the direction is not saturated.
-        let near = light_direction([110.0, 100.0], [100.0, 100.0], 25.0);
+        let near = light_direction([140.0, 100.0], [100.0, 100.0], 25.0);
         assert!(
-            (near[0] - LIGHT_TILT * 0.4 / LIGHT_REACH).abs() < 1e-4,
+            (near[0] - LIGHT_TILT * 1.6 / LIGHT_REACH).abs() < 1e-4,
             "{near:?}"
         );
     }
@@ -1478,7 +1524,7 @@ mod tests {
         let mut door = Door::new(2.0, 0.0);
         assert!(door.moving(), "it starts from rest with two turns to go");
         for k in 1..=180 {
-            door.step(k as f64 / 60.0, false, 2.0, false);
+            door.step(k as f64 / 60.0, false, 2.0, false, 0.0, false);
         }
         assert!((door.spin - 2.0).abs() < 0.01, "it turned: {}", door.spin);
         assert!(!door.moving(), "and came to rest");
@@ -1487,16 +1533,16 @@ mod tests {
     #[test]
     fn a_thinking_door_turns_slowly_and_settles_on_a_whole_turn() {
         let mut door = Door::new(0.0, 0.0);
-        door.step(1.0 / 60.0, false, 0.0, true);
+        door.step(1.0 / 60.0, false, 0.0, true, 0.0, false);
         for k in 2..=600 {
-            door.step(k as f64 / 60.0, false, 0.0, true);
+            door.step(k as f64 / 60.0, false, 0.0, true, 0.0, false);
         }
         // Ten seconds of thinking is a little more than one slow turn, and it never rests.
         assert!(door.spin > TAU * 0.9, "it turned: {}", door.spin);
         assert!(door.moving(), "a thinking door keeps the window drawing");
         // The answer lands: the tumblers settle, on a whole turn, with the heavy spring.
         for k in 601..=900 {
-            door.step(k as f64 / 60.0, false, 0.0, false);
+            door.step(k as f64 / 60.0, false, 0.0, false, 0.0, false);
         }
         assert!(!door.moving(), "and came to rest");
         assert!((door.spin / TAU - (door.spin / TAU).round()).abs() < 1e-3);
@@ -1505,7 +1551,7 @@ mod tests {
     #[test]
     fn reduced_motion_lands_the_door_at_once() {
         let mut door = Door::new(1.0, 0.0);
-        door.step(1.0, true, 3.0, false);
+        door.step(1.0, true, 3.0, false, 0.0, false);
         assert_eq!(door.spin, 3.0);
         assert!(!door.moving());
         // A light under reduced motion is where it belongs at once.

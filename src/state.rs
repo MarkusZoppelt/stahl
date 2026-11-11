@@ -685,6 +685,12 @@ pub struct State {
     /// and breathes until this goes false, and then settles as it does after a refresh. Another
     /// part of the app sets it; it is false by default.
     pub door_busy: bool,
+    /// How far the owner has turned a door's dial by hand, in radians, on top of the turns that
+    /// refreshes and arrivals have made. It stays where it was left.
+    pub dial_hand: f32,
+    /// While a door is being dragged, the pointer's last angle around its centre, so each move
+    /// adds the short way round.
+    pub dial_drag: Option<f32>,
     /// The view has been built since `shaders` turned true.
     shader_view: bool,
     /// The opening has played for the portfolio now open: it never replays on a refresh or a page
@@ -945,6 +951,8 @@ impl State {
             door_arrivals: 0,
             shaders: false,
             door_busy: false,
+            dial_hand: 0.0,
+            dial_drag: None,
             shader_view: false,
             opening_seen: false,
             opening: None,

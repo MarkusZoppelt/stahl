@@ -244,6 +244,18 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
+            // The door turned by hand: the welcome screen's dial a quarter turn round, where a
+            // drag and its coast leave it.
+            ("door-play", |s| {
+                first_run(s);
+                s.dial_hand = -1.35;
+            }),
+            ("door-play-light", |s| {
+                first_run(s);
+                s.dial_hand = -1.35;
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("new-workspace", |s| {
                 first_run(s);
                 s.open_new_workspace();
