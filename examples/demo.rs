@@ -136,6 +136,7 @@ fn main() {
         turn.blocks = stahl::ask::Lines::new().push(lines).into_iter().collect();
         turn.phase = stahl::ask::Phase::Done;
         s.ask.turns.push(turn);
+        s.apply_ask_span();
     }
     /// A provider in Settings, so the consent prompt has somewhere to send to.
     fn provider(s: &mut State) {
@@ -177,6 +178,14 @@ fn main() {
         r#"{"block":"holdings","sort":"today"}"#,
         "\n",
         r#"{"block":"go","steps":[{"label":"Where should new money go?","ask":"Where should new money go?"}]}"#,
+        "\n",
+    );
+    const ASK_SPAN: &str = concat!(
+        r#"{"block":"say","text":"The middle of the month did the work. Here is that stretch on its own."}"#,
+        "\n",
+        r#"{"block":"chart","period":"month","span":[5,20]}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"What changed this month?","ask":"What changed this month?"}]}"#,
         "\n",
     );
     const ASK_PLAN: &str = concat!(
@@ -600,6 +609,18 @@ fn main() {
             ("counsel-else", |s| ask_scripted(s, "Should I buy a house?")),
             ("counsel-stream", |s| {
                 ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-waiting", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-revisit", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_advance(10.0);
+                s.navigate(Page::Holdings);
+                s.navigate(Page::Ask);
+            }),
+            ("counsel-span", |s| {
+                ask_answer(s, "When did it move?", ASK_SPAN)
             }),
             ("counsel-failed", |s| {
                 ask_scripted(s, "What changed this month?");

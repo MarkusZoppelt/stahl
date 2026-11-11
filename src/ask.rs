@@ -1,4 +1,4 @@
-//! Ask: a question answered with the app's own interface.
+//! Counsel: a question answered with the app's own interface.
 //!
 //! An answer is a list of [`Block`]s, one JSON object per line. The model writes the words and
 //! names the figures; the app draws the figures from its [`crate::facts`] table, so a number about

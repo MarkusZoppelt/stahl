@@ -841,6 +841,8 @@ pub struct State {
     pub model: Arc<dyn crate::ask::Model>,
     /// A question waiting for the owner's yes before it leaves the machine.
     pub consent: Option<Consent>,
+    /// Frames still to rebuild after an answer finished, so measured blocks settle.
+    ask_settle: u8,
 
     // Since the last look.
     /// The portfolio this session's look was noted for, so reopening it doesn't count again.
@@ -1119,6 +1121,7 @@ impl State {
             ask_events_tx,
             model: Arc::new(crate::ask::Builtin),
             consent: None,
+            ask_settle: 0,
             updates: Updates {
                 updater: Updater::disabled(),
                 available: None,
@@ -1205,6 +1208,10 @@ impl State {
         changed |= self.ask_advance(now);
         if let Some((at, _)) = self.ask.queued.front() {
             tx.wake_at(*at);
+        }
+        if self.ask_settle > 0 {
+            self.ask_settle -= 1;
+            changed = true;
         }
         // The compositor found the shader door on its first frame: build the view that uses it.
         if self.shaders && !self.shader_view {
@@ -2107,6 +2114,7 @@ impl State {
         if page == Page::Ask {
             // The question is what the page is for: the input takes the keyboard.
             self.ask.input.focused = true;
+            self.apply_ask_span();
         }
         self.chart_hover = None;
         self.chart_point = None;
@@ -2873,9 +2881,13 @@ impl State {
         while self.ask.queued.front().is_some_and(|(at, _)| *at <= now) {
             let (_, block) = self.ask.queued.pop_front().expect("just checked");
             let keep = !block.is_empty(&table);
-            // A chart measures the room it has, so it draws in once it is on the page.
-            if keep && matches!(block, crate::ask::Block::Chart { .. }) {
+            // A chart measures the room it has, so it draws in once it is on the page, and a
+            // span it marks is measured the same way the Performance chart's is.
+            if keep && let crate::ask::Block::Chart { span, .. } = &block {
                 self.restart_draw = true;
+                if let Some(span) = span {
+                    self.measure.span = Some((span[0], span[1]));
+                }
             }
             if let Some(turn) = self.ask.current_mut() {
                 if keep {
@@ -2928,8 +2940,9 @@ impl State {
         self.ask.streaming = false;
         self.ask.partial = None;
         self.ask.cancel = None;
-        // The page is its final height now, so anything that measures its room gets it right.
-        self.restart_draw = true;
+        // The page is its final height now: two more frames let anything that measures its room
+        // take the right size, without drawing the chart in a second time.
+        self.ask_settle = 2;
     }
 
     /// The answer failed. Say what happened in plain words.
@@ -2976,6 +2989,24 @@ impl State {
         self.ask.turns.pop();
         self.ask.input.replace_text(&question);
         self.ask_send();
+    }
+
+    /// A `chart` block may mark a span. The chart's readout is the page's own, so the span is
+    /// kept on the shared measure and put back when the page is reopened.
+    pub fn apply_ask_span(&mut self) {
+        let span = self
+            .ask
+            .turns
+            .iter()
+            .rev()
+            .flat_map(|turn| turn.blocks.iter().rev())
+            .find_map(|block| match block {
+                crate::ask::Block::Chart {
+                    span: Some([a, b]), ..
+                } => Some((*a, *b)),
+                _ => None,
+            });
+        self.measure.span = span;
     }
 
     /// The history a `chart` block asks for: the page's own when the period matches, else the one

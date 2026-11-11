@@ -56,7 +56,6 @@ fn thread(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             col()
                 .key("ask-turns")
                 .w_full()
-                .max_w(900.0)
                 .gap(if s.compact { 28.0 } else { 36.0 })
                 .pb(8.0)
                 .children(if s.ask.is_empty() {
@@ -527,6 +526,7 @@ fn chart(
         col()
             .key(format!("{key}-chart"))
             .w_full()
+            .max_w(900.0)
             .gap(4.0)
             .child(charts::value_chart(
                 s,
@@ -962,16 +962,4 @@ fn source_label(s: &State) -> String {
         Source::Http { model, host } => Source::Http { model, host }.label(),
         _ => "Answered on this computer. Add a model in Settings to ask anything.".to_string(),
     }
-}
-
-/// A question's blocks as plain text, for a test to read.
-pub fn plain(turn: &Turn, table: &Table, hidden: bool, currency: &str) -> String {
-    turn.blocks
-        .iter()
-        .filter_map(|block| match block {
-            Block::Say { text } => Some(ask::spoken(text, table, hidden, currency)),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
