@@ -729,6 +729,33 @@ fn series_from(points: &[HistoryPoint]) -> Vec<HoldingSeries> {
         .collect()
 }
 
+/// Where questions may go, as configured in Settings.
+#[derive(Clone)]
+pub struct Llm {
+    /// The provider's base URL, as the owner wrote it.
+    pub url: String,
+    /// The key, for the request's Authorization header only.
+    pub key: Option<String>,
+    pub model: String,
+}
+
+impl Llm {
+    fn from_config(config: &AppConfig) -> Option<Llm> {
+        let url = config
+            .llm_provider_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())?;
+        Some(Llm {
+            url,
+            key: config
+                .llm_api_key
+                .clone()
+                .filter(|key| !key.trim().is_empty()),
+            model: config.llm_model.clone().unwrap_or_default(),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     state: Arc<AppState>,
@@ -1260,6 +1287,58 @@ impl Backend {
     }
 
     /// `None` leaves a value unchanged.
+    /// The provider Counsel may ask, when one is set. The key is for the request only: it is
+    /// never shown in the interface, written to a log, or put in an error.
+    pub async fn llm(&self) -> Option<Llm> {
+        let config = self.config.read().await;
+        Llm::from_config(&config)
+    }
+
+    /// [`Backend::llm`] without waiting: the views and the send path read the config this way.
+    pub fn llm_now(&self) -> Option<Llm> {
+        let config = self.config.try_read().ok()?;
+        Llm::from_config(&config)
+    }
+
+    /// The runtime questions are read on.
+    pub fn handle(&self) -> Handle {
+        self.runtime.clone()
+    }
+
+    /// The file that remembers which hosts the owner has allowed questions to go to. Beside the
+    /// config, so a test's backend keeps its own.
+    pub fn consent_path(&self) -> Option<PathBuf> {
+        let config = self
+            .config_path
+            .clone()
+            .or_else(|| config_path().ok().map(PathBuf::from))?;
+        Some(config.with_file_name("ask-consent.json"))
+    }
+
+    /// The hosts the owner has already said yes to.
+    pub fn consented_hosts(&self) -> Vec<String> {
+        self.consent_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Remember that questions may go to `host`, from now on.
+    pub fn allow_host(&self, host: &str) -> BackendResult<()> {
+        let Some(path) = self.consent_path() else {
+            return Ok(());
+        };
+        let mut hosts = self.consented_hosts();
+        if hosts.iter().any(|each| each == host) {
+            return Ok(());
+        }
+        hosts.push(host.to_string());
+        let text = serde_json::to_string_pretty(&hosts)
+            .map_err(|error| format!("couldn't remember that choice: {error}"))?;
+        std::fs::write(&path, text)
+            .map_err(|error| format!("couldn't remember that choice: {error}"))
+    }
+
     pub async fn set_llm_config(
         &self,
         provider_url: Option<String>,
@@ -1322,6 +1401,44 @@ mod tests {
         let path = dir.path().join("positions.json");
         fs::write(&path, CASH_ONLY).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_host_is_remembered_beside_the_config_and_nowhere_else() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(backend.consented_hosts().is_empty());
+        backend.allow_host("api.example.com").unwrap();
+        backend.allow_host("api.example.com").unwrap();
+        backend.allow_host("127.0.0.1").unwrap();
+        assert_eq!(
+            backend.consented_hosts(),
+            vec!["api.example.com".to_string(), "127.0.0.1".to_string()]
+        );
+        assert!(dir.path().join("ask-consent.json").is_file());
+    }
+
+    #[test]
+    fn the_provider_is_read_without_its_key_ever_leaving_the_config() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(backend.llm_now().is_none(), "no provider is set");
+        runtime
+            .block_on(backend.set_llm_config(
+                Some("https://api.example.com/v1".to_string()),
+                Some("sk-secret".to_string()),
+                Some("a-model".to_string()),
+            ))
+            .unwrap();
+        let llm = backend.llm_now().expect("a provider");
+        assert_eq!(llm.url, "https://api.example.com/v1");
+        assert_eq!(llm.model, "a-model");
+        assert_eq!(llm.key.as_deref(), Some("sk-secret"));
+        // The DTO the interface sees still hides it.
+        let dto = runtime.block_on(backend.config());
+        assert!(dto.has_llm_api_key);
     }
 
     #[test]

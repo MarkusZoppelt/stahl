@@ -945,21 +945,22 @@ fn composer(s: &State, t: &Theme) -> El {
                 .w_full()
                 .gap(6.0)
                 .child(icon(&icons::SHIELD, 12.0).color(k.c.text_faint).mt(2.0))
-                .child(ui::caption(source_label(s), t).wrap().shrink()),
+                .child(ui::caption(source_label(s), t).wrap().shrink())
+                .children((s.ask_source() == Source::Builtin).then(|| {
+                    Button::new("Settings")
+                        .variant(ButtonVariant::Ghost)
+                        .control_size(ControlSize::Small)
+                        .on_press(|s: &mut State| s.navigate(Page::Settings))
+                        .build(k)
+                        .key("ask-settings")
+                })),
         )
 }
 
 fn source_label(s: &State) -> String {
-    match &s.ask.source {
-        Source::Http { .. } => s.ask.source.label(),
-        _ => {
-            if s.has_api_key {
-                // A provider is configured but this answer came from the app itself.
-                "Answered on this computer".to_string()
-            } else {
-                "Answered on this computer. Add a model in Settings to ask anything.".to_string()
-            }
-        }
+    match s.ask_source() {
+        Source::Http { model, host } => Source::Http { model, host }.label(),
+        _ => "Answered on this computer. Add a model in Settings to ask anything.".to_string(),
     }
 }
 

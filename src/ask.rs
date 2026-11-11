@@ -5,7 +5,7 @@
 //! the portfolio can only ever be one Stahl computed. Anything else the model writes with digits
 //! is shown as unverified.
 
-use std::{collections::VecDeque, mem, sync::Arc, sync::atomic::AtomicBool};
+use std::{collections::VecDeque, mem};
 
 use rune::TextEdit;
 use serde::{Deserialize, Serialize};
@@ -294,7 +294,6 @@ Only the fact ids listed below exist. An id you invent is shown as a gap."#;
 // --- The model ---
 
 /// What a model is given before it answers.
-#[derive(Clone, Debug)]
 pub struct Request {
     pub question: String,
     /// Earlier questions and the plain text of their answers, newest last.
@@ -303,6 +302,19 @@ pub struct Request {
     pub system: String,
     /// Every figure the answer may quote, by id.
     pub facts: Table,
+    /// Resolves when the owner stops the answer, so a request in flight is dropped.
+    pub cancel: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Request")
+            .field("question", &self.question)
+            .field("conversation", &self.conversation.len())
+            .field("system", &self.system.len())
+            .field("facts", &self.facts.facts.len())
+            .finish()
+    }
 }
 
 /// One piece of an answer as a provider sends it.
@@ -327,6 +339,11 @@ pub enum Reply {
 /// and the app's own answers with no model at all.
 pub trait Model: Send + Sync {
     fn ask(&self, request: Request) -> Reply;
+
+    /// Where the answers come from, said quietly under the input.
+    fn source(&self) -> Source {
+        Source::Builtin
+    }
 }
 
 /// The app's own answers, for when no provider is set.
@@ -444,6 +461,269 @@ pub fn prompt(s: &crate::state::State, table: &Table) -> String {
     out
 }
 
+// --- A provider ---
+
+/// A provider that speaks the OpenAI chat completions protocol, read as it streams.
+pub struct Http {
+    /// The base URL as the owner wrote it.
+    pub url: String,
+    /// For the Authorization header, and nothing else.
+    key: Option<String>,
+    pub model: String,
+    /// Just the host, for the line under the input and the consent question.
+    pub host: String,
+    runtime: tokio::runtime::Handle,
+}
+
+impl Http {
+    pub fn new(
+        url: impl Into<String>,
+        key: Option<String>,
+        model: impl Into<String>,
+        runtime: tokio::runtime::Handle,
+    ) -> Http {
+        let url = url.into();
+        let host = host_of(&url);
+        Http {
+            url,
+            key,
+            model: model.into(),
+            host,
+            runtime,
+        }
+    }
+
+    /// The model as the interface names it.
+    pub fn display_model(&self) -> String {
+        if self.model.trim().is_empty() {
+            "the model".to_string()
+        } else {
+            self.model.clone()
+        }
+    }
+
+    /// Where the request goes: the base URL, or the full chat completions path if it already
+    /// names one.
+    pub fn endpoint(&self) -> String {
+        let base = self.url.trim().trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/chat/completions")
+        }
+    }
+
+    /// The request body, exactly as it goes over the wire. "Show exactly what is sent" shows
+    /// this, so what the owner reads is what leaves the machine.
+    pub fn body(request: &Request, model: &str) -> serde_json::Value {
+        let mut messages = vec![serde_json::json!({
+            "role": "system",
+            "content": request.system,
+        })];
+        for (question, answer) in &request.conversation {
+            messages.push(serde_json::json!({ "role": "user", "content": question }));
+            messages.push(serde_json::json!({ "role": "assistant", "content": answer }));
+        }
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": request.question,
+        }));
+        serde_json::json!({
+            "model": model,
+            "stream": true,
+            "temperature": 0.2,
+            "messages": messages,
+        })
+    }
+
+    async fn stream(self, request: Request, out: tokio::sync::mpsc::UnboundedSender<Event>) {
+        let body = Http::body(&request, &self.model);
+        let mut cancel = request.cancel.map(Box::pin);
+        let client = match reqwest::Client::builder().build() {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = out.send(Event::Failed(format!(
+                    "Stahl couldn't set up the request: {error}"
+                )));
+                return;
+            }
+        };
+        let mut call = client
+            .post(self.endpoint())
+            .json(&body)
+            .header("Accept", "text/event-stream");
+        if let Some(key) = &self.key {
+            call = call.bearer_auth(key);
+        }
+        let sent = match cancel.as_mut() {
+            Some(rx) => tokio::select! {
+                _ = rx => return,
+                sent = call.send() => sent,
+            },
+            None => call.send().await,
+        };
+        let mut response = match sent {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = out.send(Event::Failed(if error.is_connect() {
+                    format!(
+                        "Stahl couldn't reach {}. Check the address in Settings.",
+                        self.host
+                    )
+                } else {
+                    format!("The request to {} failed: {error}", self.host)
+                }));
+                return;
+            }
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let _ = out.send(Event::Failed(match status.as_u16() {
+                401 | 403 => "The provider refused the key. Check it in Settings.".to_string(),
+                404 => "The provider has no such address or model. Check Settings.".to_string(),
+                429 => "The provider is busy. Try again in a moment.".to_string(),
+                _ => format!("The provider answered {status}. Try again in a moment."),
+            }));
+            return;
+        }
+        let streaming = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("event-stream"));
+        if !streaming {
+            // A provider that ignored `stream` still answers with the whole reply at once.
+            let text = response.text().await.unwrap_or_default();
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(json) => match json["choices"][0]["message"]["content"].as_str() {
+                    Some(content) => {
+                        let _ = out.send(Event::Text(content.to_string()));
+                        let _ = out.send(Event::Done);
+                    }
+                    None => {
+                        let _ = out.send(Event::Failed(
+                            "The provider sent something Stahl couldn't read. Check the model in \
+                             Settings."
+                                .to_string(),
+                        ));
+                    }
+                },
+                Err(_) => {
+                    let _ = out.send(Event::Failed(
+                        "The provider sent something Stahl couldn't read. Check the model in \
+                         Settings."
+                            .to_string(),
+                    ));
+                }
+            }
+            return;
+        }
+        let mut buffer = String::new();
+        loop {
+            let chunk = match cancel.as_mut() {
+                Some(rx) => tokio::select! {
+                    _ = rx => return,
+                    chunk = response.chunk() => chunk,
+                },
+                None => response.chunk().await,
+            };
+            match chunk {
+                Ok(Some(bytes)) => {
+                    buffer.push_str(&String::from_utf8_lossy(&bytes));
+                    if buffer.contains('\r') {
+                        buffer = buffer.replace("\r\n", "\n");
+                    }
+                    let (text, done) = take_sse(&mut buffer);
+                    if !text.is_empty() {
+                        let _ = out.send(Event::Text(text));
+                    }
+                    if done {
+                        let _ = out.send(Event::Done);
+                        return;
+                    }
+                }
+                Ok(None) => {
+                    // The last event may have arrived without its blank line.
+                    let (text, _) = take_sse(&mut buffer);
+                    if !text.is_empty() {
+                        let _ = out.send(Event::Text(text));
+                    }
+                    let _ = out.send(Event::Done);
+                    return;
+                }
+                Err(_) => {
+                    let _ = out.send(Event::Failed(
+                        "The connection closed before the answer was finished.".to_string(),
+                    ));
+                    return;
+                }
+            }
+        }
+    }
+}
+
+impl Model for Http {
+    fn ask(&self, request: Request) -> Reply {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let this = Http {
+            url: self.url.clone(),
+            key: self.key.clone(),
+            model: self.model.clone(),
+            host: self.host.clone(),
+            runtime: self.runtime.clone(),
+        };
+        self.runtime
+            .spawn(async move { this.stream(request, tx).await });
+        Reply::Pieces(rx)
+    }
+
+    fn source(&self) -> Source {
+        Source::Http {
+            model: self.display_model(),
+            host: self.host.clone(),
+        }
+    }
+}
+
+/// The host a URL names, without a scheme, a user, a port or a path. An IPv6 address keeps its
+/// own shape, so `[::1]` reads as `::1`.
+pub fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if let Some(after) = authority.strip_prefix('[') {
+        return after.split(']').next().unwrap_or(after).to_string();
+    }
+    authority.split(':').next().unwrap_or(authority).to_string()
+}
+
+/// What arrived in a server-sent-events buffer: the text of its `data:` events, and whether the
+/// provider said it was done. Whole events only; a half-arrived one waits in the buffer.
+fn take_sse(buffer: &mut String) -> (String, bool) {
+    let mut text = String::new();
+    let mut done = false;
+    while let Some(at) = buffer.find("\n\n") {
+        let event: String = buffer.drain(..at + 2).collect();
+        for line in event.lines() {
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if data == "[DONE]" {
+                done = true;
+                continue;
+            }
+            let Ok(json) = serde_json::from_str::<serde_json::Value>(data) else {
+                continue;
+            };
+            if let Some(piece) = json["choices"][0]["delta"]["content"].as_str() {
+                text.push_str(piece);
+            }
+        }
+    }
+    (text, done)
+}
+
 // --- The conversation ---
 
 /// Where an answer is coming from, said quietly under the input.
@@ -529,8 +809,8 @@ pub struct Conversation {
     pub source: Source,
     /// The answer being written, for a model that streams text before its line ends.
     pub partial: Option<String>,
-    /// Set to stop the request in flight.
-    pub cancel: Option<Arc<AtomicBool>>,
+    /// Set to stop the request in flight: dropping this drops the provider's connection.
+    pub cancel: Option<tokio::sync::oneshot::Sender<()>>,
     /// Which answer is current: a stopped or replaced one must not land in a newer turn.
     pub generation: u64,
     /// A chart for a period the page isn't showing, loaded for a `chart` block.
@@ -795,5 +1075,191 @@ mod tests {
                 assert!(parse_line(&line).is_ok());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use std::time::Duration;
+
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+        task::JoinHandle,
+    };
+
+    use super::*;
+
+    /// A provider on this machine: it answers one request with the given body and content type,
+    /// and hands back what it read.
+    async fn fake_provider(
+        body: &'static str,
+        content_type: &'static str,
+    ) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            // Headers, then as much of the body as the length says.
+            loop {
+                let read = socket.read(&mut buffer).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end]
+                        .lines()
+                        .find_map(|line| {
+                            line.to_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request).into_owned()
+        });
+        (format!("http://{address}/v1"), seen)
+    }
+
+    fn request() -> Request {
+        Request {
+            question: "What changed?".to_string(),
+            conversation: Vec::new(),
+            system: "You are Counsel.".to_string(),
+            facts: Table::default(),
+            cancel: None,
+        }
+    }
+
+    fn collect(runtime: &tokio::runtime::Runtime, reply: Reply) -> Vec<Event> {
+        let Reply::Pieces(mut pieces) = reply else {
+            panic!("a provider streams its answer");
+        };
+        runtime.block_on(async {
+            let mut events = Vec::new();
+            while let Some(event) = tokio::time::timeout(Duration::from_secs(5), pieces.recv())
+                .await
+                .expect("the provider answers")
+            {
+                events.push(event);
+            }
+            events
+        })
+    }
+
+    #[test]
+    fn a_provider_streams_its_lines_and_gets_the_key_it_was_given() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"{\\\"block\\\":\\\"say\\\",\\\"text\\\":\\\"One.\\\"}\\n\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"{\\\"block\\\":\\\"go\\\",\\\"steps\\\":[]}\\n\"}}]}\n\ndata: [DONE]\n\n";
+        let (url, seen) = runtime.block_on(fake_provider(sse, "text/event-stream"));
+        let http = Http::new(
+            url,
+            Some("sk-test".to_string()),
+            "a-model",
+            runtime.handle().clone(),
+        );
+        assert_eq!(http.endpoint().split('/').next_back(), Some("completions"));
+        let events = collect(&runtime, http.ask(request()));
+        assert_eq!(
+            events,
+            vec![
+                Event::Text(
+                    "{\"block\":\"say\",\"text\":\"One.\"}\n{\"block\":\"go\",\"steps\":[]}\n"
+                        .to_string()
+                ),
+                Event::Done,
+            ]
+        );
+        let seen = runtime.block_on(seen).unwrap();
+        assert!(seen.contains("authorization: Bearer sk-test"), "{seen}");
+        assert!(seen.contains("\"stream\":true"));
+        assert!(seen.contains("What changed?"));
+        assert!(seen.contains("You are Counsel."));
+    }
+
+    #[test]
+    fn a_provider_that_ignores_stream_still_answers() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let json = r#"{"choices":[{"message":{"content":"{\"block\":\"say\",\"text\":\"All at once.\"}"}}]}"#;
+        let (url, _) = runtime.block_on(fake_provider(json, "application/json"));
+        let http = Http::new(url, None, "a-model", runtime.handle().clone());
+        let events = collect(&runtime, http.ask(request()));
+        assert_eq!(
+            events,
+            vec![
+                Event::Text("{\"block\":\"say\",\"text\":\"All at once.\"}".to_string()),
+                Event::Done,
+            ]
+        );
+    }
+
+    #[test]
+    fn stopping_drops_the_request() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        // A provider that accepts and then never answers.
+        let held = runtime.spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let http = Http::new(
+            format!("http://{address}/v1"),
+            None,
+            "a-model",
+            runtime.handle().clone(),
+        );
+        let (cancel, receiver) = tokio::sync::oneshot::channel();
+        let mut request = request();
+        request.cancel = Some(receiver);
+        let Reply::Pieces(mut pieces) = http.ask(request) else {
+            panic!("a provider streams");
+        };
+        runtime.block_on(async {
+            // Give the request time to reach the provider, then stop it.
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            cancel.send(()).unwrap();
+            let next = tokio::time::timeout(Duration::from_secs(2), pieces.recv())
+                .await
+                .expect("the stopped request ends");
+            assert!(next.is_none(), "a stopped request says nothing more");
+        });
+        held.abort();
+    }
+
+    #[test]
+    fn the_host_is_read_without_a_scheme_port_or_path() {
+        assert_eq!(host_of("https://api.openai.com/v1"), "api.openai.com");
+        assert_eq!(host_of("http://127.0.0.1:8080/v1"), "127.0.0.1");
+        assert_eq!(host_of("http://[::1]:8080"), "::1");
+        assert_eq!(host_of("localhost:11434/v1"), "localhost");
+        assert_eq!(host_of("https://user:pass@host.example/v1"), "host.example");
+        assert!(is_local_host(&host_of("http://[::1]:11434/v1")));
+    }
+
+    #[test]
+    fn the_body_carries_the_conversation_and_never_a_figure() {
+        let mut request = request();
+        request.conversation = vec![("Earlier?".to_string(), "An answer.".to_string())];
+        let body = Http::body(&request, "a-model");
+        assert_eq!(body["model"], "a-model");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "Earlier?");
+        assert_eq!(body["messages"][2]["content"], "An answer.");
+        assert_eq!(body["messages"][3]["content"], "What changed?");
     }
 }

@@ -137,6 +137,19 @@ fn main() {
         turn.phase = stahl::ask::Phase::Done;
         s.ask.turns.push(turn);
     }
+    /// A provider in Settings, so the consent prompt has somewhere to send to.
+    fn provider(s: &mut State) {
+        s.settings.currency.replace_text("EUR");
+        s.settings
+            .provider_url
+            .replace_text("https://api.example.com/v1");
+        s.settings.api_key.replace_text("sk-demo");
+        s.settings.model.replace_text("gpt-4o-mini");
+        s.save_settings();
+        s.settle();
+        // The toast would sit over the page in a screenshot.
+        s.toast = None;
+    }
     /// A question answered by the demo's scripted model.
     fn ask_scripted(s: &mut State, question: &str) {
         scene(s, Page::Ask);
@@ -599,6 +612,42 @@ fn main() {
             ("phone-counsel", |s| {
                 s.compact = true;
                 ask_scripted(s, "What changed this month?");
+            }),
+            // A provider away from this machine: the question waits for a yes.
+            ("counsel-consent", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+            }),
+            ("counsel-consent-open", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+                s.consent_toggle();
+            }),
+            ("counsel-consent-light", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-counsel-consent", |s| {
+                s.compact = true;
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+            }),
+            // No provider: the app answers what it can itself.
+            ("counsel-no-model", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("Should I buy a house?");
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

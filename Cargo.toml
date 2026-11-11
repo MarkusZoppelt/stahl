@@ -22,7 +22,7 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "2bdfae16568782a56
 portfolio_rs = "0.10.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "net", "io-util"] }
 semver = "1"
 sha2 = "0.11"
 tempfile = "3"

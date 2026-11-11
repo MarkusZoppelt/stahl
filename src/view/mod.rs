@@ -61,6 +61,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             s.measure.clear();
             return true;
         }
+        if s.consent.is_some() {
+            s.consent_cancel();
+            return true;
+        }
         if s.ask_stop() {
             return true;
         }

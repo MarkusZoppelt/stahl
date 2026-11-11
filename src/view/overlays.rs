@@ -1,7 +1,9 @@
 //! What floats above the window: the command palette, dialogs, toasts, and the parse failure.
 
 use rune::{El, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, tok::motion::LEAD};
-use rune_kit::{Button, ButtonVariant, Checkbox, Dialog, Keybind, TextInput, Toast, ToastRegion};
+use rune_kit::{
+    Button, ButtonVariant, Checkbox, ControlSize, Dialog, Keybind, TextInput, Toast, ToastRegion,
+};
 
 use crate::{
     backend::{WorkspaceField, plan_workspace},
@@ -29,6 +31,9 @@ pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
     }
     if s.guide {
         guide::dialog(s, t, layer);
+    }
+    if s.consent.is_some() {
+        consent(s, t, layer);
     }
     if let Some(confirm) = &s.confirm {
         confirmation(confirm, t, layer);
@@ -909,6 +914,108 @@ fn new_workspace(s: &State, t: &Theme, layer: &mut Vec<El>) {
         .on_close(|s: &mut State| s.new_workspace = None)
         .child(fields)
         .build(k, layer);
+}
+
+/// The one-time question before a question goes to a provider away from this machine.
+fn consent(s: &State, t: &Theme, layer: &mut Vec<El>) {
+    let k = &t.kit;
+    let Some(consent) = &s.consent else {
+        return;
+    };
+    let host = consent.host.clone();
+    let explanation = format!(
+        "Your question, your holdings and what they are worth, and your policy will go to {} at \
+         {}. Stahl sends nothing else, and only when you ask a question.",
+        consent.model, host
+    );
+    let shown = consent.show;
+    let body = if shown {
+        Some(
+            el().key("consent-body")
+                .w_full()
+                .max_h(240.0)
+                .min_h(0.0)
+                .radius(8.0)
+                .fill(t.sunken)
+                .border(1.0, k.c.border_muted)
+                .padding(12.0)
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .child(
+                    text(consent.body.clone())
+                        .font(k.ty.mono.lh(16.0))
+                        .color(k.c.text_muted)
+                        .wrap_anywhere(),
+                ),
+        )
+    } else {
+        None
+    };
+    let panel = ui::floating(t)
+        .key("consent-panel")
+        .role("dialog")
+        .label("Before this question goes out")
+        .w_full()
+        .max_w(620.0)
+        .gap(14.0)
+        .padding(20.0)
+        .transition(ui::float_in())
+        .child(ui::title("Before this question goes out", t))
+        .child(text(explanation).font(k.ty.ui).color(k.c.text_muted).wrap())
+        .child(
+            Button::new(if shown {
+                "Hide what is sent"
+            } else {
+                "Show exactly what is sent"
+            })
+            .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Small)
+            .icon(&icons::EYE)
+            .on_press(|s: &mut State| s.consent_toggle())
+            .build(k)
+            .key("consent-show"),
+        )
+        .children(body)
+        .child(
+            row()
+                .center_y()
+                .w_full()
+                .justify_end()
+                .gap(8.0)
+                .child(
+                    Button::new("Cancel")
+                        .on_press(|s: &mut State| s.consent_cancel())
+                        .build(k)
+                        .key("consent-cancel"),
+                )
+                .child(
+                    Button::new(format!("Send to {host}"))
+                        .variant(ButtonVariant::Submit)
+                        .icon(&icons::ARROW_UP)
+                        .on_press(|s: &mut State| s.consent_send())
+                        .build(k)
+                        .key("consent-send"),
+                ),
+        );
+    layer.push(
+        el().key("consent-scrim")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(k.c.scrim.alpha(0.3))
+            .a11y_hidden(),
+    );
+    layer.push(
+        col()
+            .key("consent-layer")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .center()
+            .padding(16.0)
+            .child(panel),
+    );
 }
 
 fn confirmation(confirm: &Confirm, t: &Theme, layer: &mut Vec<El>) {

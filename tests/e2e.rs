@@ -3599,3 +3599,72 @@ fn a_suggested_question_on_the_overview_asks_it() {
     app.settle();
     assert!(app.has_text("Because prices moved and you did not."));
 }
+
+#[test]
+fn a_question_to_a_provider_asks_before_it_goes() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("https://api.example.com/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(app.rt.state.consent.is_some(), "the prompt asks first");
+    assert!(app.exists("consent-panel"));
+    assert!(app.has_text("api.example.com"));
+
+    app.click("consent-show");
+    assert!(
+        app.has_text("You are Counsel"),
+        "the exact system prompt is shown"
+    );
+    assert!(app.has_text("\"stream\": true"));
+
+    app.click("consent-cancel");
+    assert!(app.rt.state.consent.is_none());
+    assert_eq!(
+        app.rt.state.ask.input.text, "What changed this month?",
+        "the question goes back in the input"
+    );
+    assert!(app.rt.state.ask.turns.is_empty(), "nothing was sent");
+    assert!(
+        !app.dir.path().join("ask-consent.json").exists(),
+        "nothing was remembered"
+    );
+}
+
+#[test]
+fn a_question_to_this_computer_needs_no_prompt() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://127.0.0.1:11434/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    assert!(
+        app.has_text("on this computer"),
+        "the line under the input says where it goes"
+    );
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(
+        app.rt.state.consent.is_none(),
+        "a provider on this machine is not asked about"
+    );
+    // It goes straight out: nothing to allow, and a turn is on its way.
+    app.settle();
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "What changed this month?"
+    );
+}

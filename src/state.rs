@@ -516,6 +516,21 @@ pub struct Palette {
     pub selected: usize,
 }
 
+/// The one-time question before a question goes to a provider the owner hasn't allowed yet.
+pub struct Consent {
+    /// The question, to put back if they change their mind.
+    pub question: String,
+    /// The request as it will go, so nothing is rebuilt after they say yes.
+    pub request: crate::ask::Request,
+    pub model: String,
+    pub host: String,
+    /// The exact body: what "Show exactly what is sent" shows.
+    pub body: String,
+    pub show: bool,
+    /// Drops the request if the prompt is abandoned.
+    pub cancel: tokio::sync::oneshot::Sender<()>,
+}
+
 pub struct SettingsForm {
     pub currency: TextEdit,
     pub provider_url: TextEdit,
@@ -824,6 +839,8 @@ pub struct State {
     ask_events_tx: Sender<crate::ask::Event>,
     /// The model that answers questions.
     pub model: Arc<dyn crate::ask::Model>,
+    /// A question waiting for the owner's yes before it leaves the machine.
+    pub consent: Option<Consent>,
 
     // Since the last look.
     /// The portfolio this session's look was noted for, so reopening it doesn't count again.
@@ -842,6 +859,38 @@ pub enum BadNumber {
         thousands: String,
         decimal: String,
     },
+}
+
+/// Long lines broken at spaces, so a request reads as a page rather than one endless line.
+fn wrap_lines(text: &str, width: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let mut at = 0;
+        let mut rest = line;
+        while rest.chars().count() > width {
+            let cut = rest
+                .char_indices()
+                .take(width + 1)
+                .filter(|(_, character)| *character == ' ')
+                .map(|(index, _)| index)
+                .last()
+                .unwrap_or_else(|| {
+                    rest.char_indices()
+                        .nth(width)
+                        .map_or(rest.len(), |(index, _)| index)
+                });
+            out.push_str(&rest[..cut]);
+            out.push('\n');
+            rest = rest[cut..].trim_start();
+            at += 1;
+            if at > 10_000 {
+                break;
+            }
+        }
+        out.push_str(rest);
+        out.push('\n');
+    }
+    out
 }
 
 /// Marks that only ever separate thousands: `1 000`, `1'000`, and the spaces locales format with.
@@ -1069,6 +1118,7 @@ impl State {
             ask_events,
             ask_events_tx,
             model: Arc::new(crate::ask::Builtin),
+            consent: None,
             updates: Updates {
                 updater: Updater::disabled(),
                 available: None,
@@ -1268,6 +1318,10 @@ impl State {
     /// floats over the page, then a holding's details, then a page reached through More.
     /// Returns whether there was anywhere to go back to.
     pub fn go_back(&mut self) -> bool {
+        if self.consent.is_some() {
+            self.consent_cancel();
+            return true;
+        }
         if self.palette.take().is_some()
             || self.form.take().is_some()
             || self.confirm.take().is_some()
@@ -2578,42 +2632,113 @@ impl State {
     /// Send what is in the input. Nothing happens for an empty question, or while an answer is
     /// still arriving: one question at a time.
     pub fn ask_send(&mut self) {
-        if self.ask.thinking {
+        if self.ask.thinking || self.consent.is_some() {
             return;
         }
         let question = self.ask.input.text.trim().to_string();
         if question.is_empty() {
             return;
         }
-        self.ask.input.replace_text("");
-        self.ask.turns.push(crate::ask::Turn::new(question.clone()));
-        self.ask.generation += 1;
-        self.ask.thinking = true;
-        self.ask.streaming = true;
-        self.ask.partial = None;
-        self.ask.lines = crate::ask::Lines::new();
         let table = crate::facts::of(self);
         let conversation = self.ask_conversation();
+        let (cancel, receiver) = tokio::sync::oneshot::channel();
         let request = crate::ask::Request {
             question,
             conversation,
             system: crate::ask::prompt(self, &table),
             facts: table,
+            cancel: Some(receiver),
         };
-        let model = self.model.clone();
+        let source = self.ask_source();
+        self.ask.source = source.clone();
+        // A provider on this machine never leaves it. Any other host is asked about once.
+        if let crate::ask::Source::Http { model, host } = source
+            && !crate::ask::is_local_host(&host)
+            && !self.backend.consented_hosts().contains(&host)
+        {
+            let body = self.consent_text(&request);
+            self.consent = Some(Consent {
+                question: request.question.clone(),
+                request,
+                model,
+                host,
+                body,
+                show: false,
+                cancel,
+            });
+            return;
+        }
+        self.ask.input.replace_text("");
+        self.ask_dispatch(request, cancel);
+    }
+
+    /// Where an answer would come from now: the configured provider, or the app itself.
+    pub fn ask_source(&self) -> crate::ask::Source {
+        match self.backend.llm_now() {
+            Some(llm) => crate::ask::Source::Http {
+                model: if llm.model.trim().is_empty() {
+                    "the model".to_string()
+                } else {
+                    llm.model
+                },
+                host: crate::ask::host_of(&llm.url),
+            },
+            None => crate::ask::Source::Builtin,
+        }
+    }
+
+    /// The model to ask: the provider from Settings if there is one, else the one wired in.
+    fn ask_model(&self) -> Arc<dyn crate::ask::Model> {
+        match self.backend.llm_now() {
+            Some(llm) => Arc::new(crate::ask::Http::new(
+                llm.url,
+                llm.key,
+                llm.model,
+                self.backend.handle(),
+            )),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The question the consent prompt asks, and the exact text of the request.
+    fn consent_text(&self, request: &crate::ask::Request) -> String {
+        let body = match self.ask.source.clone() {
+            crate::ask::Source::Http { model, .. } => {
+                let model = if model == "the model" {
+                    self.settings.model.text.clone()
+                } else {
+                    model
+                };
+                crate::ask::Http::body(request, &model)
+            }
+            _ => serde_json::json!({ "question": request.question }),
+        };
+        wrap_lines(&serde_json::to_string_pretty(&body).unwrap_or_default(), 84)
+    }
+
+    /// Ask the model `request`, and show the answer in a new turn.
+    fn ask_dispatch(
+        &mut self,
+        request: crate::ask::Request,
+        cancel: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.ask
+            .turns
+            .push(crate::ask::Turn::new(request.question.clone()));
+        self.ask.generation += 1;
+        self.ask.thinking = true;
+        self.ask.streaming = true;
+        self.ask.partial = None;
+        self.ask.lines = crate::ask::Lines::new();
+        self.ask.cancel = Some(cancel);
+        let model = self.ask_model();
         match model.ask(request) {
             crate::ask::Reply::Ready(text) => self.ask_ready(&text),
             crate::ask::Reply::Pieces(mut pieces) => {
-                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.ask.cancel = Some(cancel.clone());
                 let events = self.ask_events_tx.clone();
                 let waker = self.waker.clone();
                 self.backend.spawn(async move {
-                    while !cancel.load(std::sync::atomic::Ordering::SeqCst) {
-                        let event = match pieces.recv().await {
-                            Some(event) => event,
-                            None => crate::ask::Event::Done,
-                        };
+                    while let Some(event) = pieces.recv().await {
                         let finished = !matches!(event, crate::ask::Event::Text(_));
                         if events.send(event).is_err() {
                             break;
@@ -2627,6 +2752,33 @@ impl State {
                     }
                 });
             }
+        }
+    }
+
+    /// The owner allowed questions to go to this host: remember it, and send.
+    pub fn consent_send(&mut self) {
+        let Some(consent) = self.consent.take() else {
+            return;
+        };
+        if let Err(error) = self.backend.allow_host(&consent.host) {
+            self.show_toast(error);
+        }
+        self.ask.input.replace_text("");
+        self.ask_dispatch(consent.request, consent.cancel);
+    }
+
+    /// The owner changed their mind. The question goes back in the input.
+    pub fn consent_cancel(&mut self) {
+        let Some(consent) = self.consent.take() else {
+            return;
+        };
+        self.ask.input.replace_text(&consent.question);
+    }
+
+    /// Show or hide the exact request in the consent prompt.
+    pub fn consent_toggle(&mut self) {
+        if let Some(consent) = &mut self.consent {
+            consent.show = !consent.show;
         }
     }
 
@@ -2760,10 +2912,9 @@ impl State {
         if !self.ask.thinking {
             return false;
         }
-        if let Some(cancel) = &self.ask.cancel {
-            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(cancel) = self.ask.cancel.take() {
+            let _ = cancel.send(());
         }
-        self.ask.cancel = None;
         self.ask.thinking = false;
         self.ask.streaming = false;
         self.ask.queued.clear();

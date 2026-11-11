@@ -380,8 +380,9 @@ pub fn settings(s: &State, t: &Theme) -> El {
                 .gap(16.0)
                 .child(ui::header(
                     "AI provider",
-                    "An Anthropic or OpenAI-compatible endpoint, saved in the config Stahl shares \
-                     with portfolio_rs. Stahl itself doesn't use it yet.",
+                    "An OpenAI-compatible endpoint. Counsel sends a question here only when you \
+                     ask one, and only after you allow the host. The key stays in the config \
+                     file, readable only by you.",
                     t,
                 ))
                 .child(field(
