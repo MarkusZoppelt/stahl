@@ -201,6 +201,11 @@ fn main() {
                 scene(s, Page::Rebalance);
                 stahl::view::rebalance::set_amount(s, 2000.0);
             }),
+            ("rebalance-private", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 0.6);
+                s.privacy = true;
+            }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {
                 scene(s, Page::Documents);

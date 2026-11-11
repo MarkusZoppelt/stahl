@@ -3164,6 +3164,14 @@ fn the_rebalance_slider_moves_the_plan_and_the_total_stays() {
     let values = stahl::view::rebalance::values(&app.rt.state);
     assert!((values.iter().sum::<f64>() - 107_400.0).abs() < 0.01);
     assert!(values.iter().all(|value| *value >= -1e-9));
+    // What gets copied is the plan on screen.
+    let text = stahl::view::rebalance::markdown(&app.rt.state);
+    assert!(text.contains("## On target"), "{text}");
+    assert!(
+        text.contains("| Stocks | Increase | 13,700.00 EUR |"),
+        "{text}"
+    );
+    assert!(text.contains("Stahl never trades."), "{text}");
 
     // The keyboard: a point an arrow, five on Page keys, the ends on Home and End.
     app.rt.update(|_, tx| tx.focus("rebalance-rail", true));
@@ -3266,6 +3274,47 @@ fn a_row_cannot_spend_more_cash_than_there_is() {
     );
     assert!((values.iter().sum::<f64>() - 107_400.0).abs() < 0.01);
     assert!(values[4] < 0.01, "cash ran out: {values:?}");
+}
+
+#[test]
+fn on_a_phone_a_thumb_drags_across_and_a_row_still_scrolls_the_page() {
+    let mut app = Harness::phone();
+    app.click("tab-more");
+    app.tap(Page::Rebalance.key());
+    app.click(Page::Rebalance.key());
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    app.tap("rebalance-thumb-0");
+
+    let (x, y) = app.rt.find("rebalance-thumb-0").unwrap();
+    // A finger across the thumb sets the class; it must not pan the page.
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x + 60.0, y, 0.08);
+    app.rt.touch(1, TouchPhase::Ended, x + 60.0, y, 0.12);
+    app.settle();
+    assert!(
+        matches!(
+            app.rt.state.rebalance.plan,
+            stahl::state::RebalancePlan::Adjusted { .. }
+        ),
+        "a finger across the thumb moves the class"
+    );
+
+    // A finger down the row, away from the thumb, is the page's to scroll: it takes no
+    // class with it. (Rune pans the scroll view because only the thumb drags.)
+    let before = stahl::view::rebalance::values(&app.rt.state);
+    let (rx, ry) = app.rt.find("rebalance-track-0").unwrap();
+    // Right of the thumb, which sits just past the middle of the track.
+    app.rt.touch(2, TouchPhase::Started, rx + 130.0, ry, 0.0);
+    app.rt
+        .touch(2, TouchPhase::Moved, rx + 130.0, ry - 80.0, 0.08);
+    app.rt
+        .touch(2, TouchPhase::Ended, rx + 130.0, ry - 80.0, 0.12);
+    app.settle();
+    assert_eq!(
+        stahl::view::rebalance::values(&app.rt.state),
+        before,
+        "a finger down the row leaves the plan alone"
+    );
 }
 
 #[test]

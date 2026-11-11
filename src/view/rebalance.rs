@@ -51,8 +51,9 @@ const SLICE_GAP: f32 = 2.0;
 const GHOST_GAP: f32 = 1.0;
 /// How close to the halfway mark a drag sticks to it, as a share of the slider.
 const DETENT: f64 = 0.012;
-/// The finest change a drag commits the figures at: half a point of the plan, or of a share.
-const GRAIN: f64 = 0.005;
+/// The finest change a drag commits the figures at: one point of the plan, or half a point of
+/// a share.
+const GRAIN: f64 = 0.01;
 const SHARE_GRAIN: f64 = 0.5;
 /// How near its target tick a thumb lands on it, in points of share.
 const SNAP: f64 = 1.0;
@@ -76,7 +77,7 @@ pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .gap(12.0)
         .child(sentence(s, t, &classes, &plan))
         .child(rail(s, t, narrow))
-        .child(rail_labels(s, t))
+        .child(rail_labels(t))
         .child(money_row(s, t))
         .child(ui::rule(t))
         .child(plot(s, t, &classes, narrow))
@@ -117,6 +118,8 @@ fn load_classes(s: &State) -> Vec<Class> {
         });
         out.push(class(&item.asset_class, item.value, target, None));
     }
+    // Cash pays for the rest, so it reads last, whatever order the policy lists it in.
+    out.sort_by_key(|class| class.cash);
     out
 }
 
@@ -405,7 +408,7 @@ fn detent(t: &Theme, height: f32) -> El {
 }
 
 /// As it is, Halfway, On target: the slider's three stops, at the ends and the middle.
-fn rail_labels(_s: &State, t: &Theme) -> El {
+fn rail_labels(t: &Theme) -> El {
     let label = |line: &str, align: rune::Align| {
         text(line.to_string())
             .font(t.kit.ty.text_xsmall)
@@ -988,11 +991,15 @@ fn rail_drag(s: &mut State, drag: &mut Drag, tx: &mut Tx) {
         Phase::Down => {
             begin(s);
             s.rebalance.row = None;
-            rail_to(s, f64::from(drag.x), tx, true);
+            rail_to(s, f64::from(drag.x), true);
         }
-        Phase::Move => rail_to(s, f64::from(drag.x), tx, false),
+        Phase::Move => {
+            if !rail_to(s, f64::from(drag.x), false) {
+                tx.live_only();
+            }
+        }
         Phase::Up => {
-            rail_to(s, f64::from(drag.x), tx, true);
+            rail_to(s, f64::from(drag.x), true);
             s.rebalance.dragging = false;
         }
     }
@@ -1006,17 +1013,24 @@ fn begin(s: &mut State) {
     s.rebalance.press_values = plan.values;
 }
 
-/// Move the slider to the pointer's x, snapping to the halfway mark nearby.
-fn rail_to(s: &mut State, x: f64, tx: &mut Tx, commit: bool) {
+/// Move the slider to the pointer's x, snapping to the stops nearby. False when the figures
+/// did not change, so the caller can leave the view alone.
+fn rail_to(s: &mut State, x: f64, commit: bool) -> bool {
     let width = f64::from(s.rebalance.rail_width.max(1.0));
     let mut fraction = (x / width).clamp(0.0, 1.0);
-    if (fraction - 0.5).abs() < DETENT {
+    // The ends and the middle are stops of their own, so they land exactly.
+    if fraction < DETENT {
+        fraction = 0.0;
+    } else if fraction > 1.0 - DETENT {
+        fraction = 1.0;
+    } else if (fraction - 0.5).abs() < DETENT {
         fraction = 0.5;
     }
-    fraction_to(s, fraction, tx, commit);
+    fraction_to(s, fraction, commit)
 }
 
-fn fraction_to(s: &mut State, fraction: f64, tx: &mut Tx, commit: bool) {
+/// Set the slider, paint the controls, and say whether the figures must run again.
+fn fraction_to(s: &mut State, fraction: f64, commit: bool) -> bool {
     s.rebalance.fraction = fraction.clamp(0.0, 1.0);
     s.rebalance.plan = RebalancePlan::Blend;
     let classes = load_classes(s);
@@ -1025,8 +1039,9 @@ fn fraction_to(s: &mut State, fraction: f64, tx: &mut Tx, commit: bool) {
     let grain = (s.rebalance.fraction / GRAIN).round() as i64;
     if commit || grain != s.rebalance.step {
         s.rebalance.step = grain;
+        true
     } else {
-        tx.live_only();
+        false
     }
 }
 
@@ -1037,13 +1052,11 @@ fn rail_step(s: &mut State, by: i32) {
     }
     let points = if by.abs() >= 10 { 5.0 } else { 1.0 };
     let fraction = s.rebalance.fraction + by.signum() as f64 * points / 100.0;
-    let mut tx = Tx::default();
-    fraction_to(s, fraction, &mut tx, true);
+    fraction_to(s, fraction, true);
 }
 
 fn rail_limit(s: &mut State, max: bool) {
-    let mut tx = Tx::default();
-    fraction_to(s, if max { 1.0 } else { 0.0 }, &mut tx, true);
+    fraction_to(s, if max { 1.0 } else { 0.0 }, true);
 }
 
 /// Return goes to the nearest of the three stops.
@@ -1057,8 +1070,7 @@ fn rail_snap(s: &mut State) {
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .unwrap_or(0.0);
-    let mut tx = Tx::default();
-    fraction_to(s, nearest, &mut tx, true);
+    fraction_to(s, nearest, true);
 }
 
 /// A row's thumb (`by_pointer`: the press was on the thumb, so follow the travel) or its track
@@ -1076,7 +1088,7 @@ fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer
                 let top = top_share(&classes);
                 let width = f64::from(s.rebalance.track_width.max(1.0));
                 let want = f64::from(drag.x) / width * top;
-                to_share(s, index, want, tx, true);
+                to_share(s, index, want, true);
             }
         }
         Phase::Move => {
@@ -1092,7 +1104,9 @@ fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer
                 let width = f64::from(s.rebalance.track_width.max(1.0));
                 f64::from(drag.x) / width * top
             };
-            to_share(s, index, want, tx, false);
+            if !to_share(s, index, want, false) {
+                tx.live_only();
+            }
         }
         Phase::Up => {
             if s.rebalance.row == Some(index) {
@@ -1105,7 +1119,7 @@ fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer
                     let width = f64::from(s.rebalance.track_width.max(1.0));
                     f64::from(drag.x) / width * top
                 };
-                to_share(s, index, want, tx, true);
+                to_share(s, index, want, true);
             }
             s.rebalance.dragging = false;
             s.rebalance.row = None;
@@ -1115,11 +1129,11 @@ fn pointer(s: &mut State, drag: &mut Drag, tx: &mut Tx, index: usize, by_pointer
 
 /// Put `index` at `want` percent of the portfolio, snapping onto its target tick nearby. The
 /// figures commit only every half point, so a drag doesn't rebuild the page on every move.
-fn to_share(s: &mut State, index: usize, want: f64, tx: &mut Tx, commit: bool) {
+fn to_share(s: &mut State, index: usize, want: f64, commit: bool) -> bool {
     let classes = load_classes(s);
     let values = s.rebalance.press_values.clone();
     if index >= classes.len() || values.len() != classes.len() {
-        return;
+        return true;
     }
     let total: f64 = values.iter().sum();
     let top = top_share(&classes);
@@ -1144,8 +1158,9 @@ fn to_share(s: &mut State, index: usize, want: f64, tx: &mut Tx, commit: bool) {
         };
         s.rebalance.amount.replace_text("");
         s.rebalance.amount_error = None;
+        true
     } else {
-        tx.live_only();
+        false
     }
 }
 
@@ -1160,8 +1175,7 @@ fn step(s: &mut State, index: usize, by: i32) {
     }
     let points = if by.abs() >= 10 { 5.0 } else { 1.0 };
     let want = share_of(&plan, index) + by.signum() as f64 * points;
-    let mut tx = Tx::default();
-    move_row(s, &classes, &plan, index, want, &mut tx);
+    move_row(s, &classes, &plan, index, want);
 }
 
 fn limit(s: &mut State, index: usize, max: bool) {
@@ -1178,8 +1192,7 @@ fn limit(s: &mut State, index: usize, max: bool) {
     } else {
         0.0
     };
-    let mut tx = Tx::default();
-    move_row(s, &classes, &plan, index, want, &mut tx);
+    move_row(s, &classes, &plan, index, want);
 }
 
 /// Return puts a class on its target tick.
@@ -1194,11 +1207,11 @@ fn snap(s: &mut State, index: usize) {
         .map(|value| value / total_of(&plan) * 100.0)
         .unwrap_or(0.0)
         .min(top_share(&classes));
-    let mut tx = Tx::default();
-    move_row(s, &classes, &plan, index, want, &mut tx);
+    move_row(s, &classes, &plan, index, want);
 }
 
-fn move_row(s: &mut State, classes: &[Class], plan: &Plan, index: usize, want: f64, tx: &mut Tx) {
+/// Make one class's share the plan, as a step, a limit or a snap does.
+fn move_row(s: &mut State, classes: &[Class], plan: &Plan, index: usize, want: f64) {
     s.rebalance.press_values = plan.values.clone();
     s.rebalance.press_at = share_of(plan, index);
     s.rebalance.step = (want / SHARE_GRAIN).round() as i64;
@@ -1210,7 +1223,6 @@ fn move_row(s: &mut State, classes: &[Class], plan: &Plan, index: usize, want: f
     };
     s.rebalance.amount.replace_text("");
     s.rebalance.amount_error = None;
-    let _ = tx;
 }
 
 // --- Drawing ---
