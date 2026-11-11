@@ -225,7 +225,7 @@ pub fn review(s: &State, t: &Theme) -> El {
     page
 }
 
-pub fn rebalance(s: &State, t: &Theme, _cx: &Cx<State>) -> El {
+pub fn rebalance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     if !s.has_policy {
         return no_policy(
             "rebalance-no-policy",
@@ -269,6 +269,7 @@ pub fn rebalance(s: &State, t: &Theme, _cx: &Cx<State>) -> El {
             .child(
                 row()
                     .center_y()
+                    .flex_wrap()
                     .gap(4.0)
                     .child(ui::copy_button(
                         "copy-simulation",
@@ -282,7 +283,7 @@ pub fn rebalance(s: &State, t: &Theme, _cx: &Cx<State>) -> El {
                     )),
             ),
     )
-    .child(super::rebalance::instrument(s, t))
+    .child(super::rebalance::instrument(s, t, cx))
 }
 
 const STRATEGIES: [(&str, &str); 4] = [

@@ -24,7 +24,7 @@ mod insights;
 mod overlays;
 mod plan;
 mod portfolio;
-mod rebalance;
+pub mod rebalance;
 pub mod ui;
 mod updates;
 

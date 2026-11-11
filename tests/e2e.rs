@@ -197,7 +197,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Performance, "Time-weighted return"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full Rebalance to Targets"),
+        (Page::Rebalance, "Full rebalance"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -2418,7 +2418,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Performance, "Time-weighted return"),
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full Rebalance to Targets"),
+        (Page::Rebalance, "Full rebalance"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -2672,43 +2672,92 @@ fn a_rebalance_boundary_moves_by_drag_and_by_key() {
         .find(|element| element.key.as_deref() == Some("rebalance-bar"))
         .expect("the bar");
     let [x, y, w, h] = bar.rect;
-    // Stocks is about 37% of the demo book. Grab the boundary and pull it right.
-    let from = x + w * 0.37;
     let mid = y + h / 2.0;
+    // Crypto | Cash sits at 72% of the demo book; its mark, every class before it on
+    // target, is at 80%. Grab it and pull it most of the way there: the magnet does the rest.
+    let from = x + w * 0.72;
     app.rt.pointer_move(from, mid);
     app.rt.frame(1.0 / 60.0);
     app.rt.pointer_down(from, mid);
     app.rt.frame(1.0 / 60.0);
     let skipped = app.rt.live_only_events();
-    app.rt.pointer_move(from + 90.0, mid);
-    app.rt.frame(1.0 / 60.0);
-    app.rt.pointer_move(from + 140.0, mid);
-    app.rt.frame(1.0 / 60.0);
+    let mut to = from;
+    for _ in 0..12 {
+        to += w * 0.0062;
+        app.rt.pointer_move(to, mid);
+        app.rt.frame(1.0 / 60.0);
+    }
     assert!(
         app.rt.live_only_events() > skipped,
         "a drag must not rebuild the view on every move"
     );
-    app.rt.pointer_up(from + 140.0, mid);
+    app.rt.pointer_up(to, mid);
     app.settle();
+    let state = &app.rt.state.rebalance;
     assert!(
-        app.rt.state.rebalance.origin == stahl::state::RebalanceOrigin::Custom,
+        state.origin == stahl::state::RebalanceOrigin::Custom,
         "letting go keeps the split"
     );
-    assert!(app.has_text("Increase") || app.has_text("Reduce"));
+    let total: f64 = state.values.iter().sum();
+    let before: f64 = state.values[..4].iter().sum();
+    assert!(
+        (before / total - 0.8).abs() < 1e-9,
+        "the boundary snapped onto its mark, at {}",
+        before / total
+    );
+    assert!(
+        (total - 107_400.0).abs() < 0.01 && state.values.iter().all(|value| *value >= 0.0),
+        "the total stays and nothing goes negative"
+    );
+    assert!(app.has_text("Increase") && app.has_text("Reduce"));
 
-    app.rt.update(|_, tx| tx.focus("rebalance-handle-0", true));
+    // The keyboard: Left moves a boundary half a point, Return puts it back on its mark.
+    app.rt.update(|_, tx| tx.focus("rebalance-handle-3", true));
     app.rt.frame(1.0 / 60.0);
-    let before = app.rt.state.rebalance.values.clone();
     app.press(Key::Left);
-    assert_ne!(
-        app.rt.state.rebalance.values, before,
-        "Left moves the boundary"
+    app.press(Key::Left);
+    let moved: f64 = app.rt.state.rebalance.values[..4].iter().sum();
+    assert!(
+        (moved / total - 0.79).abs() < 1e-9,
+        "two steps left is a point"
     );
     app.press(Key::Enter);
+    let back: f64 = app.rt.state.rebalance.values[..4].iter().sum();
     assert!(
-        app.rt.state.rebalance.origin == stahl::state::RebalanceOrigin::Custom,
-        "Enter snaps toward a target and stays a plan"
+        (back / total - 0.8).abs() < 1e-9,
+        "Return snaps to the mark"
     );
+}
+
+#[test]
+fn a_preset_moves_the_bar_and_is_what_gets_copied() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    app.click("rebalance-presets/segment1");
+    assert_eq!(
+        app.rt.state.rebalance.origin,
+        stahl::state::RebalanceOrigin::Full
+    );
+    assert!(app.has_text("Full Rebalance to Targets"));
+    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
+    assert!(markdown.contains("## Full Rebalance to Targets"));
+    assert!(markdown.contains("| Stocks | Increase |"));
+    assert!(markdown.contains("Stahl never trades."));
+    // Every boundary sits on its mark, so every handle shows it.
+    for index in 0..4 {
+        let handle = app
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(&format!("rebalance-handle-{index}")))
+            .expect("a handle");
+        assert!(handle.label.is_some());
+    }
+
+    app.click("rebalance-presets/segment0");
+    assert!(app.has_text("As it is"));
+    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
+    assert!(markdown.contains("No trades."));
 }
 
 #[test]

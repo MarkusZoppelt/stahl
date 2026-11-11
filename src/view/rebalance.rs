@@ -1,7 +1,18 @@
 //! The rebalance bar: a split the owner can drag, with the trades that would get there.
+//!
+//! The bar's geometry lives in `Live` values (`State::rebalance`), so a pointer move redraws
+//! the bar without running the view. The view runs again only when a figure under the bar
+//! would change (each quarter point, or when the magnet takes or lets go), and then the
+//! amounts roll to their new digits.
 
-use rune::{Color, Cursor, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, RollingText, TextInput};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    mem,
+};
+
+use rune::{Color, Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, el, row, text};
+use rune_kit::{RollingText, SegmentedControl, TextInput};
 
 use crate::{
     format,
@@ -11,21 +22,34 @@ use crate::{
     view::ui,
 };
 
+/// The lane above the bar for the target marks and their tolerance bands.
+const MARK: f32 = 14.0;
+/// How far a mark reaches down into the bar.
+const NOTCH: f32 = 10.0;
 /// The bar's height. Tall enough for a finger.
 const BAR_H: f32 = 48.0;
-/// A handle's hit width. The grip drawn in it is a hairline.
+/// The in-band lane under each class, and the space above it.
+const LANE: f32 = 3.0;
+const LANE_GAP: f32 = 6.0;
+const FRAME_H: f32 = MARK + BAR_H + LANE_GAP + LANE;
+/// Space between two classes on the bar.
+const GAP: f32 = 2.0;
+/// A handle's hit width. The grip drawn in it is narrow.
 const HANDLE: f32 = 28.0;
 const GRIP: f32 = 6.0;
-/// How close a press must be to a boundary to grab it, in points.
+/// How close a press on the bar must be to a boundary to grab it, in points.
 const GRAB: f32 = 22.0;
+/// The magnet's reach, in points, and how far the pointer must go to pull free.
+const ENGAGE: f32 = 12.0;
+const RELEASE: f32 = 26.0;
 
-/// The magnet: quick, with a small bounce, so a boundary settles onto its target.
-const SNAP: Spring = Spring::new(0.18, 0.22);
-/// A jump from the keyboard, or a resize, glides rather than pops.
-const GLIDE: Spring = Spring::new(0.42, 0.06);
+/// Under a finger or pointer: quick, with a little give, so the magnet lands with a bounce.
+const FOLLOW: Spring = Spring::new(0.16, 0.18);
+/// A preset, new money or a key: the whole bar travels together.
+const GLIDE: Spring = Spring::new(0.5, 0.08);
 
 /// The allocation as a bar, and the trades that would reach the split it shows.
-pub fn instrument(s: &State, t: &Theme) -> El {
+pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let classes = load_classes(s);
     if classes.len() < 2 {
         return ui::caption("Add another asset class to drag a boundary.", t);
@@ -35,7 +59,20 @@ pub fn instrument(s: &State, t: &Theme) -> El {
         .w_full()
         .gap(16.0)
         .child(bar_card(s, t, &classes, &plan))
-        .child(trades_card(s, t, &classes, &plan))
+        .child(if ui::is_wide(s, cx) {
+            row()
+                .w_full()
+                .gap(16.0)
+                .items_start()
+                .child(trades_card(s, t, &classes, &plan).grow(2.0).w(0.0))
+                .child(money_card(s, t, &plan).grow(1.0).w(0.0))
+        } else {
+            col()
+                .w_full()
+                .gap(16.0)
+                .child(money_card(s, t, &plan))
+                .child(trades_card(s, t, &classes, &plan))
+        })
 }
 
 fn load_classes(s: &State) -> Vec<Class> {
@@ -69,17 +106,6 @@ fn load_classes(s: &State) -> Vec<Class> {
             })
         });
         out.push(class(&item.asset_class, item.value, target, None));
-    }
-    if out.is_empty()
-        && let Some(scenario) = s
-            .simulation
-            .data
-            .as_ref()
-            .and_then(|simulation| simulation.scenarios.first())
-    {
-        for item in &scenario.new_allocation {
-            out.push(class(&item.asset_class, 0.0, Some(item.percent), None));
-        }
     }
     out
 }
@@ -127,228 +153,230 @@ fn names_match(s: &State, classes: &[Class]) -> bool {
             .all(|(name, class)| name == &class.name)
 }
 
-fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    ui::card(t)
-        .child(ui::header(
-            "Allocation",
-            "Drag a boundary. It snaps to its target when it gets close. Arrow keys move a \
-             focused boundary, and Enter snaps it.",
-            t,
-        ))
-        .child(policy_track(classes, t))
-        .child(bar(s, t, classes, plan))
-        .child(legend(s, t, classes, plan))
-        .child(presets(s, t))
-        .child(amount_field(s, t, plan))
+fn share(plan: &Plan, index: usize) -> f64 {
+    if plan.total <= 0.0 {
+        return 0.0;
+    }
+    plan.values.get(index).copied().unwrap_or(0.0) / plan.total * 100.0
 }
 
-fn policy_track(classes: &[Class], t: &Theme) -> El {
-    let targeted: Vec<_> = classes
-        .iter()
-        .filter(|class| class.target.is_some())
-        .collect();
-    let sum: f64 = targeted.iter().filter_map(|class| class.target).sum();
-    if sum <= 0.0 {
-        return el();
+// --- The bar ---
+
+const PRESETS: [&str; 3] = ["As it is", "Full rebalance", "Conservative"];
+
+fn preset_index(origin: RebalanceOrigin) -> Option<usize> {
+    match origin {
+        RebalanceOrigin::Today => Some(0),
+        RebalanceOrigin::Full => Some(1),
+        RebalanceOrigin::Conservative => Some(2),
+        RebalanceOrigin::Flow(_) | RebalanceOrigin::Custom => None,
     }
-    col()
-        .w_full()
-        .gap(6.0)
-        .child(ui::caption("Targets", t))
+}
+
+fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
+    let presets = SegmentedControl::new(&PRESETS, preset_index(s.rebalance.origin))
+        .label("Start from")
+        .fit()
+        .on_pick(|s: &mut State, index, _| {
+            choose(
+                s,
+                match index {
+                    1 => RebalanceOrigin::Full,
+                    2 => RebalanceOrigin::Conservative,
+                    _ => RebalanceOrigin::Today,
+                },
+            );
+        })
+        .build(&t.kit)
+        .key("rebalance-presets");
+    ui::card(t)
+        .gap(16.0)
         .child(
             row()
                 .center_y()
                 .w_full()
-                .h(8.0)
-                .radius(2.0)
-                .clip_rounded(2.0)
-                .a11y_hidden()
-                .children(targeted.iter().filter_map(|class| {
-                    let share = class.target? / sum;
-                    Some(
-                        el().h_full()
-                            .w_frac(share as f32)
-                            .fill(t.class_color(&class.name).alpha(0.55)),
+                .justify_between()
+                .flex_wrap()
+                .gaps(12.0, 12.0)
+                .child(
+                    ui::header(
+                        "Allocation",
+                        "Drag a boundary. Near its mark, where every class before it is on \
+                         target, it snaps. The band above a mark is that class's tolerance.",
+                        t,
                     )
-                })),
+                    .grow(1.0)
+                    .min_w(240.0)
+                    .w(0.0),
+                )
+                .child(presets),
+        )
+        .child(bar(s, t, classes, plan))
+        .child(legend(t, classes, plan))
+        .child(
+            ui::caption(
+                "Arrow keys move a focused boundary by half a point, Page Up and Page Down by \
+                 five, and Return puts it on its mark.",
+                t,
+            )
+            .wrap(),
         )
 }
 
 fn bar(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    // The frame is taller than the bar, so handles and target ticks can stand proud of the clip.
-    el().w_full()
-        .h(BAR_H + 16.0)
-        .child(track(s, t, classes, plan))
-        .child(ticks(t, classes))
-        .child(handles(s, t, classes, plan))
-}
-
-fn track(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let total = plan.total.max(0.0);
+    let spring = if s.rebalance.dragging { FOLLOW } else { GLIDE };
+    let placed = s.rebalance.placed;
+    let marks = rebalance::target_boundaries(classes).unwrap_or_default();
+    let segments = classes.iter().enumerate().map(|(index, class)| {
+        let body = el()
+            .key(format!("rebalance-seg-{index}"))
+            .absolute(0.0, MARK)
+            .radius(3.0)
+            .fill(t.class_color(&class.name));
+        if placed {
+            body.live_rect(s.rebalance.rects[index].smooth(spring))
+        } else {
+            body
+        }
+    });
+    let lanes = classes.iter().enumerate().map(|(index, class)| {
+        let value = plan.values.get(index).copied().unwrap_or(0.0);
+        let lane = el()
+            .key(format!("rebalance-lane-{index}"))
+            .absolute(0.0, MARK + BAR_H + LANE_GAP)
+            .radius(1.0)
+            .fill(band_color(t, class, value, plan.total));
+        if placed {
+            lane.live_rect(s.rebalance.lanes[index].smooth(spring))
+        } else {
+            lane
+        }
+    });
+    let handles = (0..classes.len() - 1).map(|index| handle(s, t, classes, plan, index, spring));
     el().key("rebalance-bar")
-        .absolute(0.0, 8.0)
         .w_full()
-        .h(BAR_H)
-        .radius(8.0)
-        .clip_rounded(8.0)
-        .fill(t.sunken)
+        .h(FRAME_H)
         .cursor(Cursor::ResizeColumn)
         .role("group")
         .label("Allocation")
         .on_layout_tx(|s: &mut State, rect: [f32; 4], tx: &mut Tx| {
             let width = rect[2];
-            let first = !s.rebalance.placed;
-            if !first && (s.rebalance.bar_width - width).abs() < 0.5 {
+            if s.rebalance.placed && (s.rebalance.bar_width - width).abs() < 0.5 {
                 return;
             }
             s.rebalance.bar_width = width;
             if !s.rebalance.dragging {
-                let classes = load_classes(s);
-                let plan = shown(s, &classes);
-                paint(s, &plan.values, false);
+                let values = shown(s, &load_classes(s)).values;
+                paint(s, &values, false);
             }
-            if first {
-                s.rebalance.placed = true;
-            } else {
+            if s.rebalance.placed {
                 tx.live_only();
+            } else {
+                s.rebalance.placed = true;
             }
         })
-        .on_drag(|s: &mut State, drag: &mut Drag, tx: &mut Tx| gesture(s, drag, tx, drag.x))
+        .on_drag(|s: &mut State, drag: &mut Drag, tx: &mut Tx| gesture(s, drag, tx, None))
         .child(
-            row().center_y().w_full().h_full().children(
-                classes
-                    .iter()
-                    .enumerate()
-                    .map(|(index, class)| segment(s, t, class, index, share(plan, index, total))),
-            ),
+            el().absolute(0.0, MARK)
+                .w_full()
+                .h(BAR_H)
+                .radius(3.0)
+                .fill(t.sunken),
         )
+        .children(segments)
+        .children(lanes)
+        .child(guides(t, classes, &marks))
+        .children(handles)
 }
 
-fn share(plan: &Plan, index: usize, total: f64) -> f32 {
-    if total <= 0.0 {
-        return 0.0;
-    }
-    (plan.values.get(index).copied().unwrap_or(0.0) / total).clamp(0.0, 1.0) as f32
-}
-
-fn segment(s: &State, t: &Theme, class: &Class, index: usize, fraction: f32) -> El {
-    let mut body = el()
-        .key(format!("rebalance-seg-{index}"))
-        .h_full()
-        .w_frac(fraction)
-        .fill(t.class_color(&class.name))
-        .motion(GLIDE)
-        .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
-            gesture(s, drag, tx, segment_x(s, index, drag.x));
-        });
-    if s.rebalance.placed {
-        body = body.live_rect(s.rebalance.rects[index].smooth(SNAP));
-    }
-    let edge = el()
-        .pin(Some(0.0), Some(0.0), Some(0.0), None)
-        .h(3.0)
-        .fill(band_color(t, class, shown_value(s, index), shown_total(s)));
-    body.child(if s.rebalance.dragging {
-        edge.live_fill(&s.rebalance.bands[index])
-    } else {
-        edge
-    })
-}
-
-fn ticks(t: &Theme, classes: &[Class]) -> El {
-    let mut cum = 0.0;
-    let mut marks = Vec::new();
-    for (index, class) in classes.iter().enumerate() {
-        let Some(target) = class.target else {
-            break;
+/// Each boundary's target, as a mark notched into the top of the bar, and above it the band
+/// where the class before it is within tolerance (when every class before that is on
+/// target).
+fn guides(t: &Theme, classes: &[Class], marks: &[f64]) -> El {
+    let ink = t.kit.c.text_base;
+    let mut layer = el().absolute(0.0, 0.0).w_full().h(MARK + NOTCH);
+    for (index, mark) in marks.iter().enumerate() {
+        let Some(class) = classes.get(index) else {
+            continue;
         };
-        cum += target / 100.0;
-        if index + 1 == classes.len() {
-            break;
+        let band = class
+            .target
+            .map(|_| class.tolerance.unwrap_or(rebalance::DEFAULT_TOLERANCE) / 100.0)
+            .unwrap_or(0.0);
+        let from = (mark - band).max(0.0);
+        let to = (mark + band).min(1.0);
+        if to > from {
+            layer = layer.child(
+                row()
+                    .absolute(0.0, 3.0)
+                    .w_full()
+                    .h(4.0)
+                    .child(el().w_frac(from as f32))
+                    .child(
+                        el().w_frac((to - from) as f32)
+                            .h_full()
+                            .radius(2.0)
+                            .fill(t.class_color(&class.name).alpha(0.55)),
+                    ),
+            );
         }
-        let at = cum as f32;
-        marks.push(
+        layer = layer.child(
             row()
-                .center_y()
                 .absolute(0.0, 0.0)
                 .w_full()
-                .h(8.0)
-                .a11y_hidden()
-                .child(el().w_frac(at).h_full())
-                .child(
-                    el().w(2.0)
-                        .h_full()
-                        .radius(1.0)
-                        .fill(t.kit.c.text_base.alpha(0.7))
-                        .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
-                            let x = at * s.rebalance.bar_width + drag.x;
-                            gesture(s, drag, tx, x);
-                        }),
-                ),
+                .h(MARK + NOTCH)
+                .child(el().w_frac(*mark as f32))
+                .child(el().w(2.0).h_full().offset(-1.0, 0.0).radius(1.0).fill(ink)),
         );
     }
-    col().w_full().h_full().absolute(0.0, 0.0).children(marks)
+    layer.inert().a11y_hidden()
 }
 
-fn handles(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let total = plan.total.max(0.0);
-    let mut cum = 0.0_f64;
-    let mut row_handles = Vec::new();
-    for index in 0..classes.len().saturating_sub(1) {
-        cum += plan.values.get(index).copied().unwrap_or(0.0);
-        let at = if total > 0.0 { cum / total } else { 0.0 };
-        let left = &classes[index];
-        let right = &classes[index + 1];
-        row_handles.push(
-            row()
-                .center_y()
-                .absolute(0.0, 0.0)
-                .w_full()
-                .h(BAR_H + 16.0)
-                .child(el().w_frac(at as f32).h_full())
-                .child(handle(s, t, index, left, right, plan)),
-        );
-    }
-    col()
-        .w_full()
-        .h_full()
-        .absolute(0.0, 0.0)
-        .children(row_handles)
-}
-
-fn handle(s: &State, t: &Theme, index: usize, left: &Class, right: &Class, plan: &Plan) -> El {
-    let total = plan.total.max(0.0);
+fn handle(
+    s: &State,
+    t: &Theme,
+    classes: &[Class],
+    plan: &Plan,
+    index: usize,
+    spring: Spring,
+) -> El {
+    let (left, right) = (&classes[index], &classes[index + 1]);
     let before: f64 = plan.values.iter().take(index).sum();
-    let pair = plan.values.get(index).copied().unwrap_or(0.0)
-        + plan.values.get(index + 1).copied().unwrap_or(0.0);
-    let (min, now, max) = if total > 0.0 {
-        (
-            before / total * 100.0,
-            (before + plan.values.get(index).copied().unwrap_or(0.0)) / total * 100.0,
-            (before + pair) / total * 100.0,
-        )
-    } else {
-        (0.0, 0.0, 100.0)
+    let value = plan.values.get(index).copied().unwrap_or(0.0);
+    let pair = value + plan.values.get(index + 1).copied().unwrap_or(0.0);
+    let percent = |amount: f64| {
+        if plan.total > 0.0 {
+            amount / plan.total * 100.0
+        } else {
+            0.0
+        }
     };
-    let label = format!("Boundary between {} and {}", left.name, right.name);
-    let value = format!(
-        "{} {:.1} percent, {} {:.1} percent",
-        left.name,
-        share_of(s, index),
-        right.name,
-        share_of(s, index + 1)
-    );
-    el().key(format!("rebalance-handle-{index}"))
+    let on_mark = rebalance::snap_points(classes, &plan.values, index, plan.total)
+        .first()
+        .is_some_and(|point| (point - value).abs() < plan.total * 1e-6);
+    let grip = if on_mark { t.up } else { t.kit.c.text_base };
+    let mut handle = el()
+        .key(format!("rebalance-handle-{index}"))
+        .absolute(-HANDLE / 2.0, 0.0)
         .w(HANDLE)
-        .h(BAR_H + 16.0)
-        .offset(-HANDLE / 2.0, 0.0)
+        .h(FRAME_H)
         .cursor(Cursor::ResizeColumn)
-        .label(label)
-        .description("Left and right move the boundary. Enter snaps it to the target.")
-        .a11y_value(value)
-        .range_value(now, min, max)
+        .label(format!("Boundary between {} and {}", left.name, right.name))
+        .description("Arrow keys move it. Return puts it on its target.")
+        .a11y_value(format!(
+            "{} {:.1} percent, {} {:.1} percent",
+            left.name,
+            share(plan, index),
+            right.name,
+            share(plan, index + 1)
+        ))
+        .range_value(
+            percent(before + value),
+            percent(before),
+            percent(before + pair),
+        )
         .range_step(0.5)
-        .live_offset(&s.rebalance.offsets[index])
+        .focus_ring(2.0, 2.0, t.info)
         .on_step(move |s: &mut State, delta: i32, _| step(s, index, delta))
         .on_step_limit(move |s: &mut State, max: bool, _| limit(s, index, max))
         .on_key(move |s: &mut State, ev: &KeyEvent, _| {
@@ -360,134 +388,98 @@ fn handle(s: &State, t: &Theme, index: usize, left: &Class, right: &Class, plan:
             }
         })
         .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
-            gesture(s, drag, tx, handle_x(s, index, drag.x));
+            gesture(s, drag, tx, Some(index));
         })
         .child(
-            el().w(GRIP)
-                .h(BAR_H + 12.0)
+            el().absolute((HANDLE - GRIP) / 2.0, MARK - 4.0)
+                .w(GRIP)
+                .h(BAR_H + 8.0)
                 .radius(3.0)
-                .fill(t.kit.c.text_base)
-                .absolute((HANDLE - GRIP) / 2.0, 2.0),
-        )
-}
-
-fn share_of(s: &State, index: usize) -> f64 {
-    let classes = load_classes(s);
-    let plan = shown(s, &classes);
-    if plan.total <= 0.0 {
-        return 0.0;
+                .fill(grip)
+                .border(1.5, t.sunken),
+        );
+    if s.rebalance.placed {
+        handle = handle.live_offset(s.rebalance.offsets[index].smooth(spring));
+    } else {
+        handle = handle.opacity(0.0);
     }
-    plan.values.get(index).copied().unwrap_or(0.0) / plan.total * 100.0
+    handle
 }
 
-fn legend(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let total = plan.total.max(0.0);
+fn legend(t: &Theme, classes: &[Class], plan: &Plan) -> El {
     row()
-        .center_y()
+        .w_full()
         .flex_wrap()
-        .gaps(6.0, 16.0)
+        .gaps(10.0, 24.0)
         .children(classes.iter().enumerate().map(|(index, class)| {
             let value = plan.values.get(index).copied().unwrap_or(0.0);
-            let percent = if total > 0.0 {
-                value / total * 100.0
-            } else {
-                0.0
+            let percent = share(plan, index);
+            let status = band_color(t, class, value, plan.total);
+            let (word, target) = match (
+                class.target,
+                rebalance::inside_band(class, value, plan.total),
+            ) {
+                (Some(target), Some(inside)) => (
+                    if inside { "inside" } else { "outside" },
+                    format!(
+                        "of {target:.0} ±{:.0}",
+                        class.tolerance.unwrap_or(rebalance::DEFAULT_TOLERANCE)
+                    ),
+                ),
+                _ => ("no target", String::new()),
             };
-            let band = band_label(class, value, total);
-            let color = band_color(t, class, value, total);
-            let dot = ui::dot(color);
-            row()
-                .center_y()
-                .gap(6.0)
-                .child(if s.rebalance.dragging {
-                    dot.live_fill(&s.rebalance.bands[index])
-                } else {
-                    dot
-                })
+            col()
+                .gap(2.0)
                 .child(
-                    text(class.name.clone())
-                        .font(t.kit.ty.ui)
-                        .color(t.kit.c.text_base),
+                    row()
+                        .center_y()
+                        .gap(6.0)
+                        .child(ui::dot(t.class_color(&class.name)))
+                        .child(
+                            text(class.name.clone())
+                                .font(t.kit.ty.ui_medium)
+                                .color(t.kit.c.text_base),
+                        )
+                        .child(
+                            RollingText::new(
+                                format!("rebalance-pct-{index}"),
+                                format!("{percent:.1}%"),
+                            )
+                            .value(percent)
+                            .font(NUMBER)
+                            .color(t.kit.c.text_base)
+                            .build(&t.kit),
+                        ),
                 )
-                .child(percent_label(s, t, index, percent))
-                .child(text(band).font(t.kit.ty.text_xsmall).color(color))
+                .child(
+                    row()
+                        .center_y()
+                        .gap(4.0)
+                        .pl(14.0)
+                        .child(text(word).font(t.kit.ty.text_xsmall).color(status))
+                        .child(
+                            text(target)
+                                .font(t.kit.ty.text_xsmall)
+                                .color(t.kit.c.text_muted),
+                        ),
+                )
         }))
-}
-
-fn percent_label(s: &State, t: &Theme, index: usize, percent: f64) -> El {
-    if s.rebalance.dragging {
-        text("100.0%")
-            .font(NUMBER)
-            .color(t.kit.c.text_muted)
-            .live_text(&s.rebalance.percents[index])
-    } else {
-        RollingText::new(format!("rebalance-pct-{index}"), format!("{percent:.1}%"))
-            .value(percent)
-            .font(NUMBER)
-            .color(t.kit.c.text_muted)
-            .build(&t.kit)
-    }
-}
-
-fn band_label(class: &Class, value: f64, total: f64) -> String {
-    match (class.target, rebalance::inside_band(class, value, total)) {
-        (Some(target), Some(true)) => format!("inside {target:.0}%"),
-        (Some(target), Some(false)) => format!("outside {target:.0}%"),
-        _ => "no target".to_string(),
-    }
 }
 
 fn band_color(t: &Theme, class: &Class, value: f64, total: f64) -> Color {
     match rebalance::inside_band(class, value, total) {
         Some(true) => t.up,
         Some(false) => t.warn,
-        None => t.kit.c.text_muted,
+        None => t.kit.c.border_base,
     }
 }
 
-fn shown_total(s: &State) -> f64 {
-    shown(s, &load_classes(s)).total
-}
-
-fn shown_value(s: &State, index: usize) -> f64 {
-    shown(s, &load_classes(s))
-        .values
-        .get(index)
-        .copied()
-        .unwrap_or(0.0)
-}
-
-fn presets(s: &State, t: &Theme) -> El {
-    let button = |label: &'static str, origin: RebalanceOrigin, key: &'static str| {
-        let active = s.rebalance.origin == origin;
-        let mut button = Button::new(label).on_press(move |s: &mut State| choose(s, origin));
-        if active {
-            button = button.variant(ButtonVariant::Submit);
-        }
-        button.build(&t.kit).key(key)
-    };
-    row()
-        .center_y()
-        .flex_wrap()
-        .gaps(8.0, 8.0)
-        .child(button("Today", RebalanceOrigin::Today, "rebalance-today"))
-        .child(button(
-            "Full Rebalance to Targets",
-            RebalanceOrigin::Full,
-            "rebalance-full",
-        ))
-        .child(button(
-            "Conservative Partial Rebalance",
-            RebalanceOrigin::Conservative,
-            "rebalance-conservative",
-        ))
-}
+// --- Presets and new money ---
 
 fn choose(s: &mut State, origin: RebalanceOrigin) {
     s.rebalance.origin = origin;
     s.rebalance.amount.replace_text("");
     s.rebalance.amount_error = None;
-    glide(s);
 }
 
 /// The plan on screen, as Markdown, whatever produced it.
@@ -501,14 +493,13 @@ pub fn markdown(s: &State) -> String {
         .as_ref()
         .map(|simulation| simulation.policy_name.clone())
         .unwrap_or_default();
-    let currency = s.currency();
     rebalance::to_markdown(
         &plan,
         &classes,
         heading,
         detail,
         &policy,
-        &currency,
+        &s.currency(),
         format::amount,
     )
 }
@@ -533,16 +524,16 @@ fn plan_copy(s: &State) -> (&'static str, &'static str) {
         ),
         RebalanceOrigin::Custom => (
             "This split",
-            "What the bar is showing now. Nothing has been traded.",
+            "What the bar shows now, and the trades that would get there.",
         ),
         RebalanceOrigin::Today => (
             "As it is",
-            "The portfolio as it is. Drag a boundary, or say how much you have to invest.",
+            "No trades yet. Drag a boundary, pick a starting point, or add new money.",
         ),
     }
 }
 
-fn amount_field(s: &State, t: &Theme, plan: &Plan) -> El {
+fn money_card(s: &State, t: &Theme, plan: &Plan) -> El {
     let input = TextInput::new(&s.rebalance.amount)
         .placeholder("2000")
         .width(None)
@@ -551,27 +542,25 @@ fn amount_field(s: &State, t: &Theme, plan: &Plan) -> El {
         .on_change(|s: &mut State, _| apply_amount(s))
         .build(&t.kit)
         .key("rebalance-amount");
-    let mut field = col()
-        .w_full()
-        .gap(6.0)
-        .child(ui::caption("New money", t))
-        .child(input)
-        .child(ui::caption(
-            "Buys only, to get closer to your targets. A negative amount is a withdrawal, \
-             selling only.",
+    let mut card = ui::card(t)
+        .child(ui::header(
+            "I have this much to invest",
+            "Where new money should go to get closest to your targets, buying only. A \
+             negative amount is a withdrawal, selling only.",
             t,
-        ));
+        ))
+        .child(input);
     if let Some(error) = &s.rebalance.amount_error {
-        field = field.child(ui::danger(error.clone(), t).key("rebalance-amount-error"));
+        card = card.child(ui::danger(error.clone(), t).key("rebalance-amount-error"));
     } else if let RebalanceOrigin::Flow(amount) = s.rebalance.origin {
         let note = if amount >= 0.0 {
             format!("Buying only. Afterwards {}.", s.money(plan.total))
         } else {
             format!("Selling only. Afterwards {}.", s.money(plan.total))
         };
-        field = field.child(ui::caption(note, t).key("rebalance-flow"));
+        card = card.child(ui::caption(note, t).key("rebalance-flow"));
     }
-    field
+    card
 }
 
 /// Read the amount field and, if it is a number, place it. Anything ambiguous stays unparsed.
@@ -586,19 +575,14 @@ fn apply_amount(s: &mut State) {
         Ok(None) => {
             s.rebalance.amount_error = None;
             s.rebalance.origin = RebalanceOrigin::Today;
-            glide(s);
         }
-        Ok(Some(amount)) => {
-            let classes = load_classes(s);
-            match rebalance::place(&classes, amount) {
-                Ok(_) => {
-                    s.rebalance.amount_error = None;
-                    s.rebalance.origin = RebalanceOrigin::Flow(amount);
-                    glide(s);
-                }
-                Err(error) => s.rebalance.amount_error = Some(error.message().to_string()),
+        Ok(Some(amount)) => match rebalance::place(&load_classes(s), amount) {
+            Ok(_) => {
+                s.rebalance.amount_error = None;
+                s.rebalance.origin = RebalanceOrigin::Flow(amount);
             }
-        }
+            Err(error) => s.rebalance.amount_error = Some(error.message().to_string()),
+        },
         Err(error) => s.rebalance.amount_error = Some(amount_error(&text, error)),
     }
 }
@@ -615,26 +599,60 @@ fn amount_error(text: &str, error: BadNumber) -> String {
     }
 }
 
-fn glide(s: &mut State) {
-    let classes = load_classes(s);
-    let plan = shown(s, &classes);
-    let values = plan.values;
-    for offset in &s.rebalance.offsets {
-        offset.snap([0.0, 0.0]);
-    }
-    paint(s, &values, true);
-}
+// --- The trades ---
 
 fn trades_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
     let (heading, detail) = plan_copy(s);
+    let bought: f64 = plan
+        .trades
+        .iter()
+        .filter(|trade| trade.action == rebalance::Action::Increase)
+        .map(|trade| trade.amount)
+        .sum();
+    let sold: f64 = plan
+        .trades
+        .iter()
+        .filter(|trade| trade.action == rebalance::Action::Reduce)
+        .map(|trade| trade.amount)
+        .sum();
+    let summary = if plan.trades.is_empty() {
+        format!("No trades. The total is {}.", s.money(plan.total))
+    } else if plan.external.abs() < 0.01 {
+        format!(
+            "Buys {} and sells {}. The total stays {}.",
+            s.money(bought),
+            s.money(sold),
+            s.money(plan.total)
+        )
+    } else {
+        format!(
+            "Buys {} and sells {}. Afterwards {}.",
+            s.money(bought),
+            s.money(sold),
+            s.money(plan.total)
+        )
+    };
     ui::card(t)
+        .key("rebalance-trades")
         .child(ui::header(heading, detail, t))
         .child(trade_table(s, t, classes, plan))
-        .child(ui::caption("Stahl never trades.", t))
+        .child(
+            col()
+                .gap(4.0)
+                .child(
+                    text(summary)
+                        .font(t.kit.ty.ui)
+                        .color(t.kit.c.text_base)
+                        .wrap(),
+                )
+                .child(ui::caption(
+                    "Stahl never trades. This is a plan, not an order.",
+                    t,
+                )),
+        )
 }
 
 fn trade_table(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
-    let total = plan.total.max(0.0);
     let rows = classes
         .iter()
         .enumerate()
@@ -642,18 +660,45 @@ fn trade_table(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
             let value = plan.values.get(index).copied().unwrap_or(0.0);
             let delta = value - class.value.max(0.0);
             let (word, ink) = action(delta, t);
-            let percent = if total > 0.0 {
-                value / total * 100.0
-            } else {
-                0.0
-            };
+            let percent = share(plan, index);
             vec![
-                text(class.name.clone())
-                    .font(t.kit.ty.ui)
-                    .color(t.kit.c.text_base),
-                action_cell(s, t, index, word, ink),
-                amount_cell(s, t, index, delta, ink),
-                percent_label(s, t, index, percent),
+                row()
+                    .center_y()
+                    .gap(8.0)
+                    .child(ui::dot(t.class_color(&class.name)))
+                    .child(
+                        text(class.name.clone())
+                            .font(t.kit.ty.ui)
+                            .color(t.kit.c.text_base),
+                    ),
+                if word == "Hold" {
+                    ui::caption(word, t)
+                } else {
+                    ui::badge(word, ink)
+                },
+                RollingText::new(
+                    format!("rebalance-amt-{index}"),
+                    if delta.abs() < 0.01 {
+                        "—".to_string()
+                    } else {
+                        s.money(delta.abs())
+                    },
+                )
+                .value(delta.abs())
+                .font(NUMBER)
+                .color(if word == "Hold" {
+                    t.kit.c.text_muted
+                } else {
+                    ink
+                })
+                .trailing()
+                .build(&t.kit),
+                RollingText::new(format!("rebalance-after-{index}"), format!("{percent:.1}%"))
+                    .value(percent)
+                    .font(NUMBER)
+                    .color(t.kit.c.text_muted)
+                    .trailing()
+                    .build(&t.kit),
             ]
         })
         .collect();
@@ -670,44 +715,15 @@ fn action(delta: f64, t: &Theme) -> (&'static str, Color) {
     }
 }
 
-fn action_cell(s: &State, t: &Theme, index: usize, word: &str, ink: Color) -> El {
-    if s.rebalance.dragging {
-        text("Increase")
-            .font(NUMBER)
-            .color(ink)
-            .live_text(&s.rebalance.actions[index])
-            .live_text_color(&s.rebalance.inks[index])
-    } else if word == "Hold" {
-        ui::caption(word, t)
-    } else {
-        ui::badge(word, ink)
-    }
-}
+// --- Input ---
 
-fn amount_cell(s: &State, t: &Theme, index: usize, delta: f64, ink: Color) -> El {
-    if s.rebalance.dragging {
-        text("€000,000.00")
-            .font(NUMBER)
-            .color(ink)
-            .live_text(&s.rebalance.amounts[index])
-            .live_text_color(&s.rebalance.inks[index])
-    } else if delta.abs() < 0.01 {
-        ui::caption("—", t)
-    } else {
-        RollingText::new(format!("rebalance-amt-{index}"), s.money(delta.abs()))
-            .value(delta.abs())
-            .font(NUMBER)
-            .color(ink)
-            .build(&t.kit)
-    }
-}
-
-fn gesture(s: &mut State, drag: &mut Drag, tx: &mut Tx, bar_x: f32) {
+/// A press on the bar (`grabbed` is `None`) takes the nearest boundary; a press on a handle
+/// takes that one.
+fn gesture(s: &mut State, drag: &mut Drag, tx: &mut Tx, grabbed: Option<usize>) {
     match drag.phase {
-        Phase::Down => begin(s, bar_x),
+        Phase::Down => begin(s, drag.x, grabbed),
         Phase::Move => {
-            if s.rebalance.boundary.is_some() {
-                apply_move(s, drag.dx);
+            if s.rebalance.boundary.is_some() && !apply_move(s, drag.dx) {
                 tx.live_only();
             }
         }
@@ -715,92 +731,105 @@ fn gesture(s: &mut State, drag: &mut Drag, tx: &mut Tx, bar_x: f32) {
     }
 }
 
-fn begin(s: &mut State, bar_x: f32) {
+fn begin(s: &mut State, x: f32, grabbed: Option<usize>) {
     let classes = load_classes(s);
     if classes.len() < 2 || s.rebalance.bar_width < 1.0 {
         return;
     }
     let plan = shown(s, &classes);
-    let Some(index) = nearest(&plan, bar_x, s.rebalance.bar_width) else {
+    let Some(index) = grabbed.or_else(|| nearest(&plan, x, s.rebalance.bar_width)) else {
         return;
     };
     s.rebalance.boundary = Some(index);
     s.rebalance.press = plan.values.clone();
     s.rebalance.drag_values = plan.values.clone();
     s.rebalance.held = None;
+    s.rebalance.step = quarter(&plan.values, index);
     s.rebalance.dragging = true;
-    write_live(s, &classes, &plan.values);
-    paint(s, &plan.values, false);
-    for offset in &s.rebalance.offsets {
-        offset.snap([0.0, 0.0]);
-    }
 }
 
-fn apply_move(s: &mut State, dx: f32) {
+/// Follow the pointer. True when the figures under the bar changed and the view must run.
+fn apply_move(s: &mut State, dx: f32) -> bool {
     let Some(index) = s.rebalance.boundary else {
-        return;
+        return false;
     };
     let classes = load_classes(s);
     let press = s.rebalance.press.clone();
-    if index >= press.len() {
-        return;
+    if index + 1 >= press.len() || press.len() != classes.len() {
+        return false;
     }
     let total: f64 = press.iter().sum();
-    let width = s.rebalance.bar_width.max(1.0);
-    let want = press[index] + f64::from(dx) / f64::from(width) * total;
-    let engage = f64::from(14.0 / width).max(0.008);
+    let width = f64::from(s.rebalance.bar_width.max(1.0));
+    let want = press[index] + f64::from(dx) / width * total;
     let dragged = rebalance::drag(
         &classes,
         &press,
         index,
         want,
-        engage,
+        f64::from(ENGAGE) / width,
         s.rebalance.held,
-        engage * 2.2,
+        f64::from(RELEASE) / width,
     );
+    let magnet = dragged.held.is_some() != s.rebalance.held.is_some();
     s.rebalance.held = dragged.held;
     s.rebalance.drag_values = dragged.values.clone();
-    paint(s, &dragged.values, dragged.held.is_some());
-    write_live(s, &classes, &dragged.values);
+    paint(s, &dragged.values, true);
+    let step = quarter(&dragged.values, index);
+    if !magnet && step == s.rebalance.step {
+        return false;
+    }
+    s.rebalance.step = step;
+    keep(s, &classes, dragged.values);
+    true
+}
+
+/// The dragged class's share in quarter points: the grain the figures commit at.
+fn quarter(values: &[f64], index: usize) -> i64 {
+    let total: f64 = values.iter().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    (values.get(index).copied().unwrap_or(0.0) / total * 400.0).round() as i64
 }
 
 fn end(s: &mut State, cancel: bool) {
     let classes = load_classes(s);
-    if cancel || s.rebalance.boundary.is_none() {
-        s.rebalance.boundary = None;
-        s.rebalance.held = None;
-        s.rebalance.dragging = false;
-        let plan = shown(s, &classes);
-        paint(s, &plan.values, false);
-        for offset in &s.rebalance.offsets {
-            offset.snap([0.0, 0.0]);
-        }
+    let grabbed = s.rebalance.boundary.take().is_some();
+    s.rebalance.dragging = false;
+    s.rebalance.held = None;
+    let (press, dragged) = (
+        mem::take(&mut s.rebalance.press),
+        mem::take(&mut s.rebalance.drag_values),
+    );
+    if !grabbed || dragged.len() != classes.len() {
         return;
     }
-    let values = s.rebalance.drag_values.clone();
+    if !cancel && dragged != press {
+        keep(s, &classes, dragged);
+    } else if s.rebalance.origin == RebalanceOrigin::Custom {
+        // The figures may have followed the drag; a cancel puts them back.
+        keep(s, &classes, press);
+    }
+}
+
+/// Make `values` the plan on screen, as a split the owner chose.
+fn keep(s: &mut State, classes: &[Class], values: Vec<f64>) {
     s.rebalance.names = classes.iter().map(|class| class.name.clone()).collect();
     s.rebalance.values = values;
     s.rebalance.origin = RebalanceOrigin::Custom;
-    s.rebalance.dragging = false;
-    s.rebalance.boundary = None;
-    s.rebalance.held = None;
-    for offset in &s.rebalance.offsets {
-        offset.snap([0.0, 0.0]);
-    }
-    let values = s.rebalance.values.clone();
-    paint(s, &values, false);
+    s.rebalance.amount.replace_text("");
+    s.rebalance.amount_error = None;
 }
 
-fn nearest(plan: &Plan, bar_x: f32, width: f32) -> Option<usize> {
+fn nearest(plan: &Plan, x: f32, width: f32) -> Option<usize> {
     if plan.values.len() < 2 || width < 1.0 || plan.total <= 0.0 {
         return None;
     }
     let mut best: Option<(usize, f32)> = None;
-    let mut cum = 0.0;
+    let mut at = 0.0;
     for index in 0..plan.values.len() - 1 {
-        cum += plan.values[index];
-        let x = (cum / plan.total) as f32 * width;
-        let distance = (x - bar_x).abs();
+        at += plan.values[index];
+        let distance = ((at / plan.total) as f32 * width - x).abs();
         if distance <= GRAB && best.is_none_or(|(_, near)| distance < near) {
             best = Some((index, distance));
         }
@@ -808,19 +837,9 @@ fn nearest(plan: &Plan, bar_x: f32, width: f32) -> Option<usize> {
     best.map(|(index, _)| index)
 }
 
-fn segment_x(s: &State, index: usize, local: f32) -> f32 {
-    let classes = load_classes(s);
-    let plan = shown(s, &classes);
-    let width = s.rebalance.bar_width;
-    if plan.total <= 0.0 {
-        return local;
-    }
-    let cum: f64 = plan.values.iter().take(index).sum();
-    (cum / plan.total) as f32 * width + local
-}
-
-fn handle_x(s: &State, index: usize, local: f32) -> f32 {
-    segment_x(s, index + 1, 0.0) - HANDLE / 2.0 + local
+/// Move boundary `index` by `steps` half points, as the arrow keys do. The demo's scenes use it.
+pub fn nudge(s: &mut State, index: usize, steps: i32) {
+    step(s, index, steps);
 }
 
 fn step(s: &mut State, index: usize, delta: i32) {
@@ -830,13 +849,13 @@ fn step(s: &mut State, index: usize, delta: i32) {
         return;
     }
     let want = plan.values[index] + plan.total * 0.005 * f64::from(delta);
-    commit_move(s, &classes, &plan.values, index, want);
+    move_to(s, &classes, &plan.values, index, want);
 }
 
 fn limit(s: &mut State, index: usize, max: bool) {
     let classes = load_classes(s);
     let plan = shown(s, &classes);
-    commit_move(
+    move_to(
         s,
         &classes,
         &plan.values,
@@ -848,104 +867,73 @@ fn limit(s: &mut State, index: usize, max: bool) {
 fn snap_to_target(s: &mut State, index: usize) {
     let classes = load_classes(s);
     let plan = shown(s, &classes);
-    let points = rebalance::snap_points(&classes, &plan.values, index, plan.total);
-    let want = plan.values.get(index).copied().unwrap_or(0.0);
-    let Some(point) = points.into_iter().min_by(|left, right| {
-        (want - left)
-            .abs()
-            .partial_cmp(&(want - right).abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) else {
-        return;
-    };
-    commit_move(s, &classes, &plan.values, index, point);
-}
-
-fn commit_move(s: &mut State, classes: &[Class], values: &[f64], index: usize, want: f64) {
-    let floors: Vec<f64> = classes.iter().map(rebalance::floor_of).collect();
-    let next = rebalance::move_boundary(values, &floors, index, want);
-    s.rebalance.names = classes.iter().map(|class| class.name.clone()).collect();
-    s.rebalance.values = next.clone();
-    s.rebalance.origin = RebalanceOrigin::Custom;
-    s.rebalance.dragging = false;
-    for offset in &s.rebalance.offsets {
-        offset.snap([0.0, 0.0]);
+    if let Some(point) = rebalance::snap_points(&classes, &plan.values, index, plan.total)
+        .first()
+        .copied()
+    {
+        move_to(s, &classes, &plan.values, index, point);
     }
-    // A keyboard move glides. A drag has already landed.
-    paint(s, &next, true);
 }
 
+fn move_to(s: &mut State, classes: &[Class], values: &[f64], index: usize, want: f64) {
+    let floors: Vec<f64> = classes.iter().map(rebalance::floor_of).collect();
+    keep(
+        s,
+        classes,
+        rebalance::move_boundary(values, &floors, index, want),
+    );
+}
+
+// --- Drawing ---
+
+/// Glide the bar to whatever the plan on screen is now, unless a finger is on it. Runs
+/// before every frame; it costs a hash when nothing changed.
+pub fn sync(s: &mut State) {
+    if s.rebalance.boundary.is_some() || !s.rebalance.placed {
+        return;
+    }
+    let classes = load_classes(s);
+    let values = shown(s, &classes).values;
+    let mut hasher = DefaultHasher::new();
+    for (class, value) in classes.iter().zip(&values) {
+        class.name.hash(&mut hasher);
+        value.to_bits().hash(&mut hasher);
+    }
+    s.rebalance.bar_width.to_bits().hash(&mut hasher);
+    let painted = hasher.finish().max(1);
+    if painted != s.rebalance.painted {
+        paint(s, &values, s.rebalance.painted != 0);
+        s.rebalance.painted = painted;
+    }
+}
+
+/// Publish the bar's geometry for `values`. `spring` lets the bindings' springs carry it;
+/// otherwise it lands at once.
 fn paint(s: &mut State, values: &[f64], spring: bool) {
     let width = s.rebalance.bar_width;
     let total: f64 = values.iter().copied().sum();
     if width < 1.0 || total <= 0.0 {
         return;
     }
-    let layout = layout_values(s, values.len());
-    let layout_total: f64 = layout.iter().sum();
+    let count = values.len().min(s.rebalance.rects.len());
     let mut x = 0.0_f32;
-    let mut layout_x = 0.0_f32;
-    for (index, value) in values.iter().enumerate().take(s.rebalance.rects.len()) {
+    for (index, value) in values.iter().enumerate().take(count) {
         let w = (*value / total) as f32 * width;
-        let rect = [x, 0.0, w.max(0.0), BAR_H];
+        let gap = if index + 1 < count { GAP } else { 0.0 };
+        let drawn = (w - gap).max(0.0);
+        let rect = [x, MARK, drawn, BAR_H];
+        let lane = [x, MARK + BAR_H + LANE_GAP, drawn, LANE];
+        let offset = [x + w - gap / 2.0, 0.0];
+        let page = &s.rebalance;
         if spring {
-            s.rebalance.rects[index].set(rect);
+            page.rects[index].set(rect);
+            page.lanes[index].set(lane);
+            page.offsets[index].set(offset);
         } else {
-            s.rebalance.rects[index].snap(rect);
+            page.rects[index].snap(rect);
+            page.lanes[index].snap(lane);
+            page.offsets[index].snap(offset);
         }
         x += w;
-        if index + 1 < values.len() && layout_total > 0.0 {
-            layout_x += (layout[index] / layout_total) as f32 * width;
-            let dx = x - layout_x;
-            if spring {
-                s.rebalance.offsets[index].set([dx, 0.0]);
-            } else {
-                s.rebalance.offsets[index].snap([dx, 0.0]);
-            }
-        }
-    }
-}
-
-/// Where the handles are laid out: the committed plan, or these values if it isn't one yet.
-fn layout_values(s: &State, len: usize) -> Vec<f64> {
-    let classes = load_classes(s);
-    let plan = shown(s, &classes);
-    if plan.values.len() == len {
-        plan.values
-    } else {
-        vec![0.0; len]
-    }
-}
-
-fn write_live(s: &mut State, classes: &[Class], values: &[f64]) {
-    let total: f64 = values.iter().sum();
-    let theme = Theme::new(s.is_dark());
-    let hidden = s.privacy;
-    let currency = s.currency();
-    for (index, class) in classes.iter().enumerate().take(s.rebalance.amounts.len()) {
-        let value = values.get(index).copied().unwrap_or(0.0);
-        let delta = value - class.value.max(0.0);
-        let (word, ink) = action(delta, &theme);
-        s.rebalance.actions[index].set(word);
-        s.rebalance.inks[index].set(ink);
-        let amount = if hidden {
-            format::HIDDEN.to_string()
-        } else if delta.abs() < 0.01 {
-            "—".to_string()
-        } else {
-            format::currency(delta.abs(), &currency)
-        };
-        s.rebalance.amounts[index].set(amount);
-        let percent = if total > 0.0 {
-            value / total * 100.0
-        } else {
-            0.0
-        };
-        s.rebalance.percents[index].set(format!("{percent:.1}%"));
-        s.rebalance.bands[index].set(match rebalance::inside_band(class, value, total) {
-            Some(true) => theme.up,
-            Some(false) => theme.warn,
-            None => theme.kit.c.text_muted,
-        });
     }
 }

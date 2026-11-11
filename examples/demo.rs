@@ -114,6 +114,15 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
+            ("rebalance-dragged", |s| {
+                scene(s, Page::Rebalance);
+                // Ten points out of Crypto, into Cash.
+                stahl::view::rebalance::nudge(s, 3, -20);
+            }),
+            ("rebalance-full", |s| {
+                scene(s, Page::Rebalance);
+                s.rebalance.origin = RebalanceOrigin::Full;
+            }),
             ("rebalance-invest", |s| {
                 scene(s, Page::Rebalance);
                 s.rebalance.amount.replace_text("2000");

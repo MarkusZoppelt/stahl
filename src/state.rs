@@ -29,7 +29,7 @@ use portfolio_rs::{
     },
     validate::ValidationReport,
 };
-use rune::{ClipboardContent, Color, FileDialogOptions, Live, LiveText, TextEdit, Tx, Waker};
+use rune::{ClipboardContent, FileDialogOptions, Live, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
@@ -447,7 +447,8 @@ pub enum RebalanceOrigin {
 }
 
 /// The allocation being dragged on the Rebalance page. Live values move the bar without
-/// rebuilding the view; the view must not read `press`, `held` or `drag_values`.
+/// rebuilding the view; the view must not read `press`, `held`, `drag_values`, `step` or
+/// `painted`.
 pub struct RebalancePage {
     /// Class names `values` belong to. A mismatch means the portfolio changed under a drag.
     pub names: Vec<String>,
@@ -456,7 +457,7 @@ pub struct RebalancePage {
     /// New money, or a withdrawal. Parsed with [`parse_number`].
     pub amount: TextEdit,
     pub amount_error: Option<String>,
-    /// A boundary is held. The view reads this to show live amounts instead of rolling ones.
+    /// A boundary is held. The bar follows the pointer on a quicker spring.
     pub dragging: bool,
     /// The bar has been measured, so its segments can follow live rects.
     pub placed: bool,
@@ -465,17 +466,20 @@ pub struct RebalancePage {
     pub press: Vec<f64>,
     pub held: Option<f64>,
     pub drag_values: Vec<f64>,
+    /// The quarter point the dragged class last committed at, so a drag rebuilds the
+    /// view only when the figures under the bar would change.
+    pub step: i64,
+    /// What the bar last drew, so a change from anywhere else glides it there.
+    pub painted: u64,
+    /// Each class's bar, its in-band lane under it, and the boundary after it.
     pub rects: Vec<Live<[f32; 4]>>,
+    pub lanes: Vec<Live<[f32; 4]>>,
     pub offsets: Vec<Live<[f32; 2]>>,
-    pub amounts: Vec<LiveText>,
-    pub percents: Vec<LiveText>,
-    pub actions: Vec<LiveText>,
-    pub bands: Vec<Live<Color>>,
-    pub inks: Vec<Live<Color>>,
 }
 
 impl RebalancePage {
     fn new() -> Self {
+        let rects = || (0..REBALANCE_SLOTS).map(|_| Live::new([0.0; 4])).collect();
         Self {
             names: Vec::new(),
             values: Vec::new(),
@@ -489,33 +493,16 @@ impl RebalancePage {
             press: Vec::new(),
             held: None,
             drag_values: Vec::new(),
-            rects: (0..REBALANCE_SLOTS)
-                .map(|_| Live::new([0.0, 0.0, 0.0, BAR_RECT]))
-                .collect(),
+            step: 0,
+            painted: 0,
+            rects: rects(),
+            lanes: rects(),
             offsets: (0..REBALANCE_SLOTS)
                 .map(|_| Live::new([0.0, 0.0]))
-                .collect(),
-            amounts: (0..REBALANCE_SLOTS)
-                .map(|_| LiveText::new("€000,000.00"))
-                .collect(),
-            percents: (0..REBALANCE_SLOTS)
-                .map(|_| LiveText::new("100.0%"))
-                .collect(),
-            actions: (0..REBALANCE_SLOTS)
-                .map(|_| LiveText::new("Increase"))
-                .collect(),
-            bands: (0..REBALANCE_SLOTS)
-                .map(|_| Live::new(Color::TRANSPARENT))
-                .collect(),
-            inks: (0..REBALANCE_SLOTS)
-                .map(|_| Live::new(Color::TRANSPARENT))
                 .collect(),
         }
     }
 }
-
-/// Placeholder height so a live rect is a bar, not a point, before the first layout.
-const BAR_RECT: f32 = 48.0;
 
 pub struct PolicyPage {
     pub policy: Option<Policy>,
@@ -986,6 +973,7 @@ impl State {
     /// Runs at the start of every frame. True when something on screen changed.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.now = now;
+        crate::view::rebalance::sync(self);
         let mut changed = self.drain() || mem::take(&mut self.settled);
         if self.quit_requested {
             tx.quit();
