@@ -108,12 +108,17 @@ fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
         .gap(2.0)
         .child(ui::caption("Total value", t))
         .child(
-            RollingText::new("hero-total", s.money(summary.total_value))
-                .font(if narrow { HERO_COMPACT } else { HERO })
-                .color(k.c.text_base)
-                .value(summary.total_value)
-                .build(k)
-                .key("total-value"),
+            // The digits are the steel: a sheen follows the room's light across them. It is a
+            // slot over the text, so the text keeps rolling and stays crisp.
+            el().child(
+                RollingText::new("hero-total", s.money(summary.total_value))
+                    .font(if narrow { HERO_COMPACT } else { HERO })
+                    .color(k.c.text_base)
+                    .value(summary.total_value)
+                    .build(k)
+                    .key("total-value"),
+            )
+            .children(s.shaders.then(|| crate::fx::sheen(1.0))),
         )
         .child(
             row()

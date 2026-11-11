@@ -112,7 +112,7 @@ pub fn room(radius: f32) -> El {
 }
 
 /// The steel sheen over a figure: a soft band of light whose place follows the room's light.
-/// `strength` is how much of the effect to show; a title takes a fainter one than the total.
+/// `strength` is how much of the effect to show.
 pub fn sheen(strength: f32) -> El {
     el().absolute(0.0, 0.0)
         .w_full()
@@ -383,6 +383,7 @@ pub struct Gfx {
 enum Kind {
     Door,
     Room,
+    Sheen,
 }
 
 struct Gpu {
@@ -390,6 +391,11 @@ struct Gpu {
     layout: wgpu::PipelineLayout,
     door: wgpu::ShaderModule,
     room: wgpu::ShaderModule,
+    sheen: wgpu::ShaderModule,
+    /// The sheen reads the backdrop, so it binds a texture and a sampler beside the uniform.
+    sheen_layout: wgpu::PipelineLayout,
+    sheen_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
     pipes: HashMap<(Kind, wgpu::TextureFormat), wgpu::RenderPipeline>,
     uniforms: wgpu::Buffer,
     bind: wgpu::BindGroup,
@@ -408,6 +414,10 @@ impl Gpu {
             label: Some("room"),
             source: wgpu::ShaderSource::Wgsl(ROOM_WGSL.into()),
         });
+        let sheen = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sheen"),
+            source: wgpu::ShaderSource::Wgsl(SHEEN_WGSL.into()),
+        });
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("door"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -421,10 +431,54 @@ impl Gpu {
                 count: None,
             }],
         });
+        let sheen_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sheen"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: true,
+                        min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("door"),
             bind_group_layouts: &[Some(&bgl)],
             immediate_size: 0,
+        });
+        let sheen_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sheen"),
+            bind_group_layouts: &[Some(&sheen_bgl)],
+            immediate_size: 0,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sheen"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
         });
         let stride = (UNIFORM_SIZE as u32).max(device.limits().min_uniform_buffer_offset_alignment);
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
@@ -450,6 +504,10 @@ impl Gpu {
             layout,
             door,
             room,
+            sheen,
+            sheen_layout,
+            sheen_bgl,
+            sampler,
             pipes: HashMap::new(),
             uniforms,
             bind,
@@ -466,8 +524,12 @@ impl Gpu {
         let module = match kind {
             Kind::Door => &self.door,
             Kind::Room => &self.room,
+            Kind::Sheen => &self.sheen,
         };
-        let layout = &self.layout;
+        let layout = match kind {
+            Kind::Sheen => &self.sheen_layout,
+            _ => &self.layout,
+        };
         self.pipes.entry((kind, format)).or_insert_with(|| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("door"),
@@ -678,7 +740,11 @@ impl Compositor<State> for Gfx {
         let mut slot = 0usize;
         let clock = f.rt.clock;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
-        f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
+        f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, site| {
+            use rune::render::EffectPhase;
+            let EffectPhase::Draw(pass) = phase else {
+                return;
+            };
             let encode = if site.srgb_blend { 1.0 } else { 0.0 };
             let rect = {
                 let [x, y, w, h] = site.instance.rect;
@@ -722,6 +788,65 @@ impl Compositor<State> for Gfx {
                     flags: [if dark { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
                     scale: site.scale,
                 }
+            } else if site.mark == SHEEN {
+                // The sheen reads the figure it falls on, so it is keyed by the backdrop's own
+                // light and dark rather than by a mask Rune does not keep for text.
+                let Some(backdrop) = site.backdrop else {
+                    return;
+                };
+                if slot >= MAX_SLOTS {
+                    return;
+                }
+                let at = Slot {
+                    center: [0.0, 0.0],
+                    radius: 0.0,
+                    split: 0.0,
+                    light: light.at,
+                    spin: 0.0,
+                    gain: site.data[0],
+                    origin: site.origin,
+                    encode,
+                    mode: 2.0,
+                    window,
+                    rect,
+                    color: [0.84, 0.90, 0.96, 0.0],
+                    flags: [
+                        if dark { 1.0 } else { 0.0 },
+                        0.0,
+                        site.data[0],
+                        site.data[1],
+                    ],
+                    scale: site.scale,
+                };
+                let offset = slot as u64 * gpu.stride as u64;
+                queue.write_buffer(&gpu.uniforms, offset, &at.bytes());
+                let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("sheen"),
+                    layout: &gpu.sheen_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &gpu.uniforms,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(backdrop),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&gpu.sampler),
+                        },
+                    ],
+                });
+                slot += 1;
+                pass.set_pipeline(gpu.pipeline(device, Kind::Sheen, site.format));
+                pass.set_bind_group(0, &bind, &[(slot as u32 - 1) * gpu.stride]);
+                pass.draw(0..3, 0..1);
+                return;
             } else if site.mark == OPEN {
                 // The state starts the opening on the logical clock; the animation runs on the
                 // animation clock. Convert once, so a host that slept before this frame cannot
@@ -1141,6 +1266,83 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
         return lift(p);
     }
     return room(p);
+}
+"#;
+
+/// The steel sheen on a figure: a soft band of light whose place follows the room's light. The
+/// figure itself is the mask, read from the backdrop the slot asked for, so the digits stay the
+/// text Rune drew (they still roll, and stay crisp); the band only shades what is already there.
+const SHEEN_WGSL: &str = r#"
+struct S {
+    center: vec2f,
+    radius: f32,
+    split: f32,
+    light: vec2f,
+    spin: f32,
+    gain: f32,
+    origin: vec2f,
+    encode: f32,
+    mode: f32,
+    window: vec2f,
+    scale: f32,
+    pad0: f32,
+    rect: vec4f,
+    color: vec4f,
+    flags: vec4f,
+    pad1: vec4f,
+};
+
+@group(0) @binding(0) var<uniform> u: S;
+@group(0) @binding(1) var backdrop: texture_2d<f32>;
+@group(0) @binding(2) var samp: sampler;
+
+fn to_lin(c: vec3f) -> vec3f {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3f(0.0)) + 0.055) / 1.055, vec3f(2.4));
+    return select(hi, lo, c <= vec3f(0.04045));
+}
+
+fn encode_out(straight: vec3f, alpha: f32) -> vec4f {
+    let encoded = select(to_lin(straight), straight, u.encode > 0.5);
+    return vec4f(encoded * alpha, alpha);
+}
+
+@vertex
+fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+    let p = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+    return vec4f(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+    let size = vec2f(textureDimensions(backdrop));
+    let under = textureSampleLevel(backdrop, samp, pos.xy / size, 0.0);
+    let rgb = under.rgb / max(under.a, 0.0001);
+    let lum = dot(rgb, vec3f(0.2126, 0.7152, 0.0722));
+    let dark = u.flags.x > 0.5;
+    // The figure is either the brightest thing in its box (dark theme) or the darkest (paper).
+    let ink = select(smoothstep(0.55, 0.30, lum), smoothstep(0.30, 0.62, lum), dark);
+    if (ink <= 0.001) { return vec4f(0.0); }
+
+    let r = u.rect;
+    let p = (pos.xy + u.origin) / u.scale;
+    let s = (p.x - r.x) / max(r.z, 1.0);
+    let v = (p.y - r.y) / max(r.w, 1.0);
+    // The band runs at about a hundred degrees, as the landing page's title does.
+    let across = s + (v - 0.5) * 0.34;
+    // The light's place across the window, mapped onto the figure: at rest it is the middle.
+    let centre = clamp(0.5 + (u.light.x / max(u.window.x, 1.0) - 0.5) * 1.1, -0.15, 1.15);
+    let band = exp(-pow((across - centre) / 0.24, 2.0));
+
+    let strength = clamp(u.flags.z, 0.0, 1.0);
+    if (dark) {
+        // White digits have nowhere brighter to go: the rest of the steel dims a little, so the
+        // band reads as the lit part.
+        return encode_out(vec3f(0.0), ink * (1.0 - band) * 0.10 * strength);
+    }
+    // Ink on paper lightens toward steel where the light runs across it.
+    let alpha = ink * band * 0.22 * strength;
+    return encode_out(u.color.rgb, alpha);
 }
 "#;
 
