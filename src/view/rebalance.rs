@@ -213,14 +213,15 @@ fn bar_card(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
         )
         .child(bar(s, t, classes, plan))
         .child(legend(t, classes, plan))
-        .child(
+        // A phone has no arrow keys to speak of; the finger is the path there.
+        .children((!s.compact).then(|| {
             ui::caption(
                 "Arrow keys move a focused boundary by half a point, Page Up and Page Down by \
                  five, and Return puts it on its mark.",
                 t,
             )
-            .wrap(),
-        )
+            .wrap()
+        }))
 }
 
 fn bar(s: &State, t: &Theme, classes: &[Class], plan: &Plan) -> El {
