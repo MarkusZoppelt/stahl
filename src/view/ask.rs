@@ -72,6 +72,69 @@ fn thread(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         )
 }
 
+/// The Overview's own line into Counsel: an input, and the questions this portfolio raises.
+pub fn overview_line(s: &State, t: &Theme, narrow: bool) -> El {
+    let k = &t.kit;
+    let input = TextInput::new(&s.ask.input)
+        .placeholder("What's on your mind?")
+        .leading_icon(&icons::SPARKLES)
+        .label("Ask counsel about your portfolio")
+        .plain()
+        .width(None)
+        .on_edit(|s: &mut State| &mut s.ask.input)
+        .on_key(|s: &mut State, event, _| {
+            if event.key == Key::Enter {
+                s.ask_here();
+                return true;
+            }
+            false
+        })
+        .build(k)
+        .key("overview-ask");
+    let field = row()
+        .center_y()
+        .w_full()
+        .max_w(if narrow { 100_000.0 } else { 460.0 })
+        .h(34.0)
+        .px(10.0)
+        .radius(8.0)
+        .border(1.0, k.c.border_muted)
+        .hover(k.c.hover)
+        .child(input);
+    // On a phone the total stays close to the top, so only the two nearest questions show.
+    let mut questions = suggestions(s);
+    if narrow {
+        questions.truncate(2);
+    }
+    let chips = questions.into_iter().enumerate().map(|(index, question)| {
+        let asked = question.clone();
+        ui::entering(
+            Button::new(question)
+                .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Small)
+                .icon(&icons::SPARKLES)
+                .on_press(move |s: &mut State| s.ask_about(asked.clone()))
+                .build(k)
+                .key(format!("overview-ask-{index}")),
+            index,
+        )
+    });
+    let chips = if narrow {
+        col().w_full().items_start().gap(2.0).children(chips)
+    } else {
+        row().center_y().w_full().gap(4.0).children(chips)
+    };
+    ui::entering(
+        col()
+            .key("overview-counsel")
+            .w_full()
+            .gap(6.0)
+            .child(field)
+            .child(chips),
+        0,
+    )
+}
+
 /// What Counsel says before anything has been asked.
 fn empty(s: &State, t: &Theme) -> El {
     let k = &t.kit;

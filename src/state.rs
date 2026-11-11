@@ -506,6 +506,8 @@ pub enum Command {
     AddPosition,
     CopyBriefing,
     CheckForUpdates,
+    /// Ask Counsel this question, from the palette.
+    Ask(String),
     Close,
 }
 
@@ -2504,6 +2506,7 @@ impl State {
                 self.navigate(Page::Holdings);
                 self.open_form(None);
             }
+            Command::Ask(question) => self.ask_about(question),
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
             Command::Close => self.reset(),
@@ -2554,6 +2557,21 @@ impl State {
     pub fn ask_question(&mut self, question: impl Into<String>) {
         let question = question.into();
         self.ask.input.replace_text(&question);
+        self.ask_send();
+    }
+
+    /// Ask `question` on the Counsel page, from anywhere: a palette row, a chip, a next step.
+    pub fn ask_about(&mut self, question: impl Into<String>) {
+        self.navigate(Page::Ask);
+        self.ask_question(question);
+    }
+
+    /// Send what is in the input from the Overview's line, on the Counsel page.
+    pub fn ask_here(&mut self) {
+        if self.ask.input.text.trim().is_empty() {
+            return;
+        }
+        self.navigate(Page::Ask);
         self.ask_send();
     }
 

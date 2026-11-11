@@ -3554,3 +3554,48 @@ fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
     );
     assert!(app.has_text("Go 50% of the way"));
 }
+
+#[test]
+fn the_palette_asks_counsel_what_was_typed() {
+    let mut app = Harness::boot(true, None);
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(
+        app.has_text("Ask counsel: what changed this month?"),
+        "the typed question is the first row"
+    );
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin did most of the work"));
+}
+
+#[test]
+fn the_overview_line_asks_what_was_typed_there() {
+    let mut app = Harness::boot(true, None);
+    app.click("overview-ask");
+    app.type_text("How is Bitcoin doing?");
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin is €27,000.00"));
+}
+
+#[test]
+fn a_suggested_question_on_the_overview_asks_it() {
+    let mut app = Harness::boot(true, None);
+    assert!(app.exists("overview-ask-0"));
+    app.click("overview-ask-0");
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "Why is Crypto off its target?"
+    );
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Because prices moved and you did not."));
+}

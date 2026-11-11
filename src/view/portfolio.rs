@@ -16,7 +16,7 @@ use crate::{
     format, icons,
     state::{Confirm, Page, SWIPE_ACTIONS, SortBy, State, file_name, swipe_key},
     theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
-    view::{charts, guide, overview, ui},
+    view::{ask, charts, guide, overview, ui},
 };
 
 fn display_name(position: &PositionDto) -> String {
@@ -442,13 +442,14 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(if narrow { 16.0 } else { 24.0 })
         .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
+        .child(ask::overview_line(s, t, narrow))
         .child(hero(s, t, cx, !narrow))
-        .child(ui::entering(overview::agenda(s, t, narrow), 1))
+        .child(ui::entering(overview::agenda(s, t, narrow), 2))
         .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
             ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })
-                .child(ui::entering(allocation_card(s, t), 2))
-                .child(ui::entering(movers_card(s, t), 3)),
+                .child(ui::entering(allocation_card(s, t), 3))
+                .child(ui::entering(movers_card(s, t), 4)),
         )
 }
 

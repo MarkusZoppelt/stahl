@@ -263,6 +263,18 @@ pub fn entries(s: &State) -> Vec<Entry> {
         .palette
         .as_ref()
         .map_or(String::new(), |palette| palette.query.text.to_lowercase());
+    let typed = s
+        .palette
+        .as_ref()
+        .map(|palette| palette.query.text.trim().to_string())
+        .unwrap_or_default();
+    // Typing a command's own words still runs it: only a question becomes the first row.
+    let is_command = all.iter().any(|entry| {
+        entry
+            .label
+            .to_lowercase()
+            .starts_with(&typed.to_lowercase())
+    });
     let mut found: Vec<Entry> = all
         .into_iter()
         .filter(|entry| update::SELF_UPDATES || !matches!(entry.command, Command::CheckForUpdates))
@@ -320,6 +332,23 @@ pub fn entries(s: &State) -> Vec<Entry> {
                     figure: Some(answers::holding(s, position)),
                     class: None,
                 }),
+        );
+    }
+    // A question, or words that match nothing else, become the first row: Enter asks Counsel.
+    // A single word the portfolio answers with a figure keeps that figure first.
+    let is_question = typed.contains(' ') || typed.ends_with('?');
+    if typed.chars().count() >= 2 && !is_command && (is_question || found.is_empty()) {
+        found.insert(
+            0,
+            Entry {
+                label: format!("Ask counsel: {typed}"),
+                icon: &icons::SPARKLES,
+                keys: Vec::new(),
+                command: Command::Ask(typed),
+                group: "Counsel",
+                figure: None,
+                class: None,
+            },
         );
     }
     found
