@@ -91,6 +91,10 @@ impl crate::ask::Model for ScriptedModel {
     fn ask(&self, request: crate::ask::Request) -> crate::ask::Reply {
         crate::ask::Reply::Ready(scripted(&request.question))
     }
+
+    fn source(&self) -> crate::ask::Source {
+        crate::ask::Source::Scripted
+    }
 }
 
 /// The answer to `question`, as JSON Lines. Questions are matched on the words a person would

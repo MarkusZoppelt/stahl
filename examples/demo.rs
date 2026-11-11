@@ -649,6 +649,28 @@ fn main() {
                 s.model = std::sync::Arc::new(stahl::ask::Builtin);
                 s.ask_question("Should I buy a house?");
             }),
+            ("counsel-private", |s| {
+                ask_scripted(s, "Why is my allocation off?");
+                s.privacy = true;
+            }),
+            ("counsel-private-amounts", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.privacy = true;
+            }),
+            ("counsel-builtin", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("How much is in crypto?");
+            }),
+            ("counsel-builtin-light", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("How much is in crypto?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),
             ("update-installing", |s| {

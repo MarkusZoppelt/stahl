@@ -3668,3 +3668,38 @@ fn a_question_to_this_computer_needs_no_prompt() {
         "What changed this month?"
     );
 }
+
+#[test]
+fn without_a_model_the_app_answers_what_it_knows() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is €27,000.00"));
+    assert!(app.has_text("or 25.1% of the portfolio"));
+    assert!(
+        !app.has_text("needs a model"),
+        "a figure the app knows needs no model"
+    );
+    assert!(app.exists("ask-0-1-figure-0"), "the figures are drawn");
+}
+
+#[test]
+fn without_a_model_an_unknown_question_says_how_to_get_one() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Should I buy a house?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("needs a model"));
+    assert!(app.has_text("local one keeps everything on this computer"));
+    app.click("ask-0-1-go-0");
+    assert_eq!(app.rt.state.page, Page::Settings);
+}

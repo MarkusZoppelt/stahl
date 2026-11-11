@@ -2104,6 +2104,10 @@ impl State {
         }
         self.page = page;
         self.more = false;
+        if page == Page::Ask {
+            // The question is what the page is for: the input takes the keyboard.
+            self.ask.input.focused = true;
+        }
         self.chart_hover = None;
         self.chart_point = None;
         self.measure.clear();
@@ -2651,6 +2655,19 @@ impl State {
         };
         let source = self.ask_source();
         self.ask.source = source.clone();
+        // With no provider, the app answers what it can work out itself.
+        if self.model_is_builtin() {
+            let blocks = crate::ask::builtin(self, &request.question);
+            let text = blocks
+                .iter()
+                .map(crate::ask::line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let question = request.question.clone();
+            self.ask.input.replace_text("");
+            self.ask_ready_for(question, &text, cancel);
+            return;
+        }
         // A provider on this machine never leaves it. Any other host is asked about once.
         if let crate::ask::Source::Http { model, host } = source
             && !crate::ask::is_local_host(&host)
@@ -2687,6 +2704,12 @@ impl State {
         }
     }
 
+    /// Whether the app itself is answering, because no provider is set and the wired-in model
+    /// is the built-in one.
+    fn model_is_builtin(&self) -> bool {
+        self.backend.llm_now().is_none() && self.model.is_builtin()
+    }
+
     /// The model to ask: the provider from Settings if there is one, else the one wired in.
     fn ask_model(&self) -> Arc<dyn crate::ask::Model> {
         match self.backend.llm_now() {
@@ -2716,25 +2739,41 @@ impl State {
         wrap_lines(&serde_json::to_string_pretty(&body).unwrap_or_default(), 84)
     }
 
-    /// Ask the model `request`, and show the answer in a new turn.
-    fn ask_dispatch(
+    /// Start a turn with an answer already in hand.
+    fn ask_ready_for(
         &mut self,
-        request: crate::ask::Request,
+        question: String,
+        text: &str,
         cancel: tokio::sync::oneshot::Sender<()>,
     ) {
-        self.ask
-            .turns
-            .push(crate::ask::Turn::new(request.question.clone()));
+        self.ask.turns.push(crate::ask::Turn::new(question));
         self.ask.generation += 1;
         self.ask.thinking = true;
         self.ask.streaming = true;
         self.ask.partial = None;
         self.ask.lines = crate::ask::Lines::new();
         self.ask.cancel = Some(cancel);
+        self.ask_ready(text);
+    }
+
+    /// Ask the model `request`, and show the answer in a new turn.
+    fn ask_dispatch(
+        &mut self,
+        request: crate::ask::Request,
+        cancel: tokio::sync::oneshot::Sender<()>,
+    ) {
+        let question = request.question.clone();
         let model = self.ask_model();
         match model.ask(request) {
-            crate::ask::Reply::Ready(text) => self.ask_ready(&text),
+            crate::ask::Reply::Ready(text) => self.ask_ready_for(question, &text, cancel),
             crate::ask::Reply::Pieces(mut pieces) => {
+                self.ask.turns.push(crate::ask::Turn::new(question));
+                self.ask.generation += 1;
+                self.ask.thinking = true;
+                self.ask.streaming = true;
+                self.ask.partial = None;
+                self.ask.lines = crate::ask::Lines::new();
+                self.ask.cancel = Some(cancel);
                 let events = self.ask_events_tx.clone();
                 let waker = self.waker.clone();
                 self.backend.spawn(async move {

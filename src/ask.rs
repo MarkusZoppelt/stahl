@@ -10,7 +10,7 @@ use std::{collections::VecDeque, mem};
 use rune::TextEdit;
 use serde::{Deserialize, Serialize};
 
-use crate::{facts::Table, scenario};
+use crate::{facts::Table, scenario, state::Page};
 /// Which order a holdings block lists them in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -342,7 +342,13 @@ pub trait Model: Send + Sync {
 
     /// Where the answers come from, said quietly under the input.
     fn source(&self) -> Source {
-        Source::Builtin
+        Source::Scripted
+    }
+
+    /// Whether these are the app's own answers, which it works out itself rather than asking
+    /// a model.
+    fn is_builtin(&self) -> bool {
+        false
     }
 }
 
@@ -350,28 +356,223 @@ pub trait Model: Send + Sync {
 pub struct Builtin;
 
 impl Model for Builtin {
-    fn ask(&self, request: Request) -> Reply {
-        Reply::Ready(builtin(&request))
+    fn is_builtin(&self) -> bool {
+        true
+    }
+
+    /// The state answers a built-in question itself, with the figures it has; this is only the
+    /// last word if something asks the model directly.
+    fn ask(&self, _request: Request) -> Reply {
+        Reply::Ready(
+            [
+                line(&Block::Say {
+                    text: "That one needs a model. Add a model in Settings to ask anything; a \
+                           local one keeps everything on this computer."
+                        .to_string(),
+                }),
+                line(&Block::Go {
+                    steps: vec![step_for(Page::Settings, "Open Settings")],
+                }),
+            ]
+            .join("\n"),
+        )
     }
 }
 
-/// What the built-in model can answer: the questions the palette already recognises, and the
-/// agenda's items. Everything else gets one calm line and the way to Settings.
-pub fn builtin(_request: &Request) -> String {
-    let say = Block::Say {
-        text: "That one needs a model. This portfolio can answer what changed, where new money \
-               goes, and what a shock would leave. Add a model in Settings to ask anything; a \
-               local one keeps everything on this computer."
+/// What the app answers by itself, with no model: the figures the palette recognises, the
+/// agenda's items, and what changed since the last look. Everything here is computed.
+pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
+    let table = crate::facts::of(s);
+    let keywords = keywords(question);
+    let mut blocks = Vec::new();
+
+    // A figure the palette already answers: the total, today, a class, a holding.
+    let figure = keywords
+        .iter()
+        .find_map(|word| crate::view::answers::figures(s, word).into_iter().next());
+    if let Some(answer) = figure
+        && let Some(id) = figure_id(&answer.label)
+    {
+        blocks.push(Block::Say {
+            text: format!("{} is {{{id}}}.", answer.label),
+        });
+        blocks.push(Block::Figures {
+            ids: vec![id.to_string()],
+        });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Overview, "Open Overview")],
+        });
+        return blocks;
+    }
+    let classes: Vec<_> = keywords
+        .iter()
+        .find_map(|word| {
+            let found = crate::view::answers::classes(s, word);
+            (!found.is_empty()).then_some(found)
+        })
+        .unwrap_or_default();
+    if let [class] = classes.as_slice() {
+        let id = crate::facts::slug(&class.label);
+        let mut text = format!(
+            "{} is {{class.{id}.value}}, or {{class.{id}.share}} of the portfolio.",
+            class.label
+        );
+        let mut ids = vec![format!("class.{id}.value"), format!("class.{id}.share")];
+        if table.get(&format!("class.{id}.today")).is_some() {
+            text.push_str(&format!(" Today it moved {{class.{id}.today}}."));
+            ids.push(format!("class.{id}.today"));
+        }
+        if table.get(&format!("class.{id}.target")).is_some() {
+            text.push_str(&format!(" Your target is {{class.{id}.target}}."));
+            ids.push(format!("class.{id}.target"));
+        }
+        blocks.push(Block::Say { text });
+        blocks.push(Block::Figures { ids });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Allocation, "Open Allocation")],
+        });
+        return blocks;
+    }
+    if let Some(position) = keywords.iter().find_map(|word| {
+        s.positions
+            .iter()
+            .filter(|position| crate::view::portfolio::matches_search(position, word))
+            .min_by_key(|position| position.value.total_cmp(&position.value))
+    }) && let Some(id) = s
+        .positions
+        .iter()
+        .find(|each| each.id == position.id)
+        .map(crate::facts::holding_id)
+    {
+        let name = position
+            .name
+            .clone()
+            .or_else(|| position.ticker.clone())
+            .unwrap_or_else(|| "It".to_string());
+        let mut text = format!("{name} is {{holding.{id}.value}}.");
+        let mut ids = vec![format!("holding.{id}.value")];
+        if table.get(&format!("holding.{id}.share")).is_some() {
+            text.push_str(&format!(
+                " That is {{holding.{id}.share}} of the portfolio."
+            ));
+            ids.push(format!("holding.{id}.share"));
+        }
+        if table.get(&format!("holding.{id}.today")).is_some() {
+            text.push_str(&format!(" Today it moved {{holding.{id}.today}}."));
+            ids.push(format!("holding.{id}.today"));
+        }
+        blocks.push(Block::Say { text });
+        blocks.push(Block::Figures { ids });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Holdings, "Open Holdings")],
+        });
+        return blocks;
+    }
+
+    // What changed since the last look, in the app's own figures.
+    let asks_change = keywords
+        .iter()
+        .any(|word| ["changed", "change", "since", "today", "moved"].contains(&word.as_str()));
+    if asks_change && s.change.is_some() {
+        blocks.push(Block::Say {
+            text: "Since {since.date}, the total has moved by {since.change}.".to_string(),
+        });
+        blocks.push(Block::Figures {
+            ids: ["since.change", "since.percent", "total", "today.change"]
+                .into_iter()
+                .filter(|id| table.get(id).is_some())
+                .map(str::to_string)
+                .collect(),
+        });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Overview, "Open Overview")],
+        });
+        return blocks;
+    }
+
+    // An item on the agenda, if the question is about one.
+    if let Some(item) = s
+        .agenda()
+        .into_iter()
+        .max_by_key(|item| mentions(&keywords, &item.title))
+        .filter(|item| mentions(&keywords, &item.title) > 0)
+    {
+        let mut text = item.title.clone();
+        if let Some(detail) = &item.detail {
+            text.push(' ');
+            text.push_str(detail);
+        }
+        blocks.push(Block::Say { text });
+        blocks.push(Block::Go {
+            steps: vec![Step {
+                label: item.action.label().to_string(),
+                page: match item.action {
+                    crate::agenda::Action::Open(page) => {
+                        Some(page.label().to_lowercase().replace(' ', "-"))
+                    }
+                    crate::agenda::Action::Holding(_) => Some("holdings".to_string()),
+                    crate::agenda::Action::Refresh => Some("data-health".to_string()),
+                },
+                ask: None,
+            }],
+        });
+        return blocks;
+    }
+
+    // Nothing this portfolio can work out on its own.
+    blocks.push(Block::Say {
+        text: "That one needs a model. This portfolio can answer what it holds, how it moved, \
+               and what needs a look. Add a model in Settings to ask anything; a local one keeps \
+               everything on this computer."
             .to_string(),
-    };
-    let go = Block::Go {
-        steps: vec![Step {
-            label: "Open Settings".to_string(),
-            page: Some("settings".to_string()),
-            ask: None,
-        }],
-    };
-    [line(&say), line(&go)].join("\n")
+    });
+    blocks.push(Block::Go {
+        steps: vec![step_for(Page::Settings, "Open Settings")],
+    });
+    blocks
+}
+
+/// The words of a question that carry meaning: no "what", "is" or "the".
+fn keywords(question: &str) -> Vec<String> {
+    const STOP: [&str; 30] = [
+        "what", "how", "why", "when", "where", "which", "who", "is", "are", "was", "were", "the",
+        "a", "an", "of", "in", "on", "at", "to", "for", "my", "me", "do", "does", "did", "should",
+        "could", "would", "about", "there",
+    ];
+    question
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.chars().count() >= 3 && !STOP.contains(&word.as_str()))
+        .collect()
+}
+
+/// How many of the question's meaningful words appear in `title`.
+fn mentions(keywords: &[String], title: &str) -> usize {
+    let title = title.to_lowercase();
+    keywords
+        .iter()
+        .filter(|word| word.chars().count() >= 4 && title.contains(word.as_str()))
+        .count()
+}
+
+fn step_for(page: Page, label: &str) -> Step {
+    Step {
+        label: label.to_string(),
+        page: Some(page.label().to_lowercase().replace(' ', "-")),
+        ask: None,
+    }
+}
+
+/// The fact id behind a palette figure.
+fn figure_id(label: &str) -> Option<&'static str> {
+    Some(match label {
+        "Total value" => "total",
+        "Today's change" => "today.change",
+        "Unrealized PnL" => "unrealized.pnl",
+        "Cash" => "cash.value",
+        "Securities" => "securities.value",
+        _ => return None,
+    })
 }
 
 /// A block as one JSON line.
@@ -741,8 +942,7 @@ impl Source {
     /// The one line that says where questions go.
     pub fn label(&self) -> String {
         match self {
-            Source::Builtin => "Answered on this computer".to_string(),
-            Source::Scripted => "Answered on this computer".to_string(),
+            Source::Builtin | Source::Scripted => "Answered on this computer".to_string(),
             Source::Http { model, host } => {
                 if is_local_host(host) {
                     format!("Answers from {model}, on this computer")
@@ -1261,5 +1461,129 @@ mod provider_tests {
         assert_eq!(body["messages"][1]["content"], "Earlier?");
         assert_eq!(body["messages"][2]["content"], "An answer.");
         assert_eq!(body["messages"][3]["content"], "What changed?");
+    }
+}
+
+#[cfg(test)]
+mod builtin_tests {
+    use super::*;
+    use crate::{demo, state::State};
+
+    fn state() -> (tokio::runtime::Runtime, tempfile::TempDir, State) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("portfolio");
+        demo::seed_workspace(&workspace);
+        let mut state = State::new(
+            demo::backend(dir.path(), Some(&workspace), runtime.handle().clone()),
+            None,
+        );
+        state.startup();
+        state.settle();
+        (runtime, dir, state)
+    }
+
+    fn words(blocks: &[Block]) -> String {
+        blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Say { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_figure_the_palette_knows_is_answered_with_its_own_id() {
+        let (_runtime, _dir, state) = state();
+        let blocks = builtin(&state, "what is the total?");
+        assert!(words(&blocks).contains("{total}"));
+        assert!(matches!(
+            blocks.get(1),
+            Some(Block::Figures { ids }) if ids == &["total".to_string()]
+        ));
+        let blocks = builtin(&state, "how is today going?");
+        assert!(words(&blocks).contains("{today.change}"));
+    }
+
+    #[test]
+    fn a_class_and_a_holding_are_answered_in_their_own_figures() {
+        let (_runtime, _dir, state) = state();
+        let blocks = builtin(&state, "how much is in crypto?");
+        let text = words(&blocks);
+        assert!(text.contains("{class.crypto.value}"), "{text}");
+        assert!(text.contains("{class.crypto.share}"), "{text}");
+        assert!(text.contains("{class.crypto.target}"), "{text}");
+
+        let blocks = builtin(&state, "how is bitcoin doing?");
+        let text = words(&blocks);
+        assert!(text.contains("{holding.pos_btc.value}"), "{text}");
+        assert!(text.contains("{holding.pos_btc.today}"), "{text}");
+    }
+
+    #[test]
+    fn what_changed_is_answered_from_the_statement_s_own_figures() {
+        let (_runtime, _dir, state) = state();
+        let blocks = builtin(&state, "what changed since Friday?");
+        let text = words(&blocks);
+        assert!(text.contains("{since.date}"), "{text}");
+        assert!(text.contains("{since.change}"), "{text}");
+        assert!(matches!(
+            blocks.get(1),
+            Some(Block::Figures { ids }) if ids.iter().any(|id| id == "since.change")
+        ));
+    }
+
+    #[test]
+    fn an_agenda_item_answers_with_its_own_action() {
+        let (_runtime, _dir, state) = state();
+        let blocks = builtin(&state, "what about the tolerance?");
+        let text = words(&blocks);
+        assert!(text.contains("outside their tolerance"), "{text}");
+        assert!(matches!(
+            blocks.get(1),
+            Some(Block::Go { steps }) if steps[0].label == "Rebalance"
+        ));
+    }
+
+    #[test]
+    fn anything_else_asks_for_a_model_and_offers_settings() {
+        let (_runtime, _dir, state) = state();
+        let blocks = builtin(&state, "should I buy a house?");
+        let text = words(&blocks);
+        assert!(text.contains("needs a model"), "{text}");
+        assert!(
+            text.contains("local one keeps everything on this computer"),
+            "{text}"
+        );
+        assert!(matches!(
+            blocks.get(1),
+            Some(Block::Go { steps }) if steps[0].page.as_deref() == Some("settings")
+        ));
+    }
+
+    #[test]
+    fn every_placeholder_a_built_in_answer_writes_exists_in_the_table() {
+        let (_runtime, _dir, state) = state();
+        let table = crate::facts::of(&state);
+        for question in [
+            "what is the total?",
+            "how much is in crypto?",
+            "how is bitcoin doing?",
+            "what changed since Friday?",
+            "what about the tolerance?",
+        ] {
+            for id in builtin(&state, question)
+                .iter()
+                .filter_map(|block| match block {
+                    Block::Say { text } => Some(text),
+                    _ => None,
+                })
+                .flat_map(|text| named(text))
+            {
+                assert!(table.get(&id).is_some(), "{question}: {id} is not a fact");
+            }
+        }
     }
 }
