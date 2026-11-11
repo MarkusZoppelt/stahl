@@ -30,6 +30,7 @@ use portfolio_rs::{
         snapshots::{self, Snapshot as HistoryPoint},
     },
     policy::{self, Policy},
+    position::parse_purchase_date,
     review::Review,
     services::atomic_write,
     simulate::RebalanceSimulation,
@@ -44,7 +45,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Error as JsonError, from_value, to_value};
 use tokio::{runtime::Handle, sync::RwLock};
 
-use crate::statement::{Change, Contribution, Seen};
+use crate::{
+    records::{self, Record},
+    statement::{Change, Contribution, Seen},
+};
 
 pub type BackendResult<T> = Result<T, String>;
 
@@ -60,11 +64,20 @@ const HISTORY_ID: &str = "main";
 /// Beside a portfolio's history: the days its owner looked at it.
 const SEEN_FILE: &str = "seen.json";
 
+/// Beside a portfolio's history: the records its owner has been shown.
+const RECORDS_SEEN_FILE: &str = "records-seen.json";
+
 #[derive(Serialize, Deserialize)]
 struct SeenFile {
     last: String,
     #[serde(default)]
     before: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct RecordsSeenFile {
+    #[serde(default)]
+    seen: Vec<String>,
 }
 
 fn read_seen(text: &str) -> Option<Seen> {
@@ -540,6 +553,107 @@ impl History {
 pub struct HistoryValue {
     pub date: String,
     pub value: f64,
+}
+
+/// What the records room finds: the plates, newest first, and the ids already shown.
+#[derive(Clone, Debug, Default)]
+pub struct RecordsView {
+    pub plates: Vec<Record>,
+    pub seen: Vec<String>,
+}
+
+/// The stored valuations as the records room reads them, with the money that moved into or out
+/// of the portfolio on each day.
+fn record_days(points: &[HistoryPoint], transactions: &[Transaction]) -> Vec<records::Day> {
+    let mut points: Vec<&HistoryPoint> = points.iter().collect();
+    points.sort_by(|a, b| a.date.cmp(&b.date));
+    points.dedup_by(|a, b| a.date == b.date);
+    let mut days = Vec::new();
+    for (index, point) in points.iter().enumerate() {
+        let Some(date) = snapshots::strict_date(&point.date) else {
+            continue;
+        };
+        // Unknown flows are never read as "nothing moved": a NaN compares false everywhere, so
+        // the day is left out of any record that needs a quiet day.
+        let flow = index
+            .checked_sub(1)
+            .and_then(|before| performance::position_effects(points[before], point, transactions))
+            .map_or(f64::NAN, |effects| {
+                performance::total(&effects).net_contributions
+            });
+        let mut classes: Vec<(String, f64)> = Vec::new();
+        for position in &point.positions {
+            let Some(value) = position.value_base.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            match classes
+                .iter_mut()
+                .find(|(class, _)| *class == position.asset_class)
+            {
+                Some((_, total)) => *total += value,
+                None => classes.push((position.asset_class.clone(), value)),
+            }
+        }
+        days.push(records::Day {
+            date,
+            total: point.total_base,
+            classes,
+            flow,
+        });
+    }
+    days
+}
+
+/// The holdings today, with their purchases and the prices the snapshots recorded for them.
+fn record_holdings(positions: &[PositionDto], points: &[HistoryPoint]) -> Vec<records::Holding> {
+    positions
+        .iter()
+        .filter_map(|position| {
+            let id = position.position_id.clone()?;
+            let name = position.name.clone().or_else(|| position.ticker.clone())?;
+            let mut purchases: Vec<records::Purchase> = position
+                .purchases
+                .iter()
+                .filter_map(|purchase| {
+                    let date = purchase.date.as_deref().and_then(parse_purchase_date)?;
+                    Some(records::Purchase {
+                        date: date.date_naive(),
+                        quantity: purchase.quantity,
+                        price: purchase.price,
+                    })
+                })
+                .collect();
+            purchases.sort_by_key(|purchase| purchase.date);
+            let mut prices: Vec<(chrono::NaiveDate, f64)> = Vec::new();
+            let mut currency = None;
+            for point in points {
+                let Some(snapshot) = point
+                    .positions
+                    .iter()
+                    .find(|snapshot| snapshot.position_id == id)
+                else {
+                    continue;
+                };
+                let (Some(date), Some(price)) =
+                    (snapshots::strict_date(&point.date), snapshot.price)
+                else {
+                    continue;
+                };
+                if price.is_finite() && price > 0.0 {
+                    prices.push((date, price));
+                    currency = snapshot.price_currency.clone().or(currency);
+                }
+            }
+            Some(records::Holding {
+                id,
+                name,
+                currency,
+                purchases,
+                prices,
+                average_cost: position.average_cost,
+            })
+        })
+        .collect()
 }
 
 /// The parts of a [`PortfolioContext`] the Briefing page shows. Its fields are
@@ -1095,6 +1209,107 @@ impl Backend {
                 .first()
                 .and_then(|point| snapshots::strict_date(&point.date)),
         }))
+    }
+
+    // --- The records room ---
+
+    /// Whether the open portfolio's values must not be written to disk in plaintext.
+    async fn encrypted(&self) -> bool {
+        self.state
+            .file_path()
+            .await
+            .is_none_or(|path| path.ends_with(".gpg"))
+    }
+
+    /// The wall, newest first, and the ids of the plates the owner has already been shown.
+    ///
+    /// An encrypted portfolio has no records: its ids would say which round numbers it passed,
+    /// and the file they are kept in is not encrypted. Nothing is written for one either.
+    pub async fn records(&self) -> BackendResult<RecordsView> {
+        if self.encrypted().await {
+            return Ok(RecordsView::default());
+        }
+        Ok(RecordsView {
+            plates: self.plates().await?,
+            seen: self.seen_records().await,
+        })
+    }
+
+    /// Every record this portfolio's history honestly supports.
+    async fn plates(&self) -> BackendResult<Vec<Record>> {
+        let Some(path) = self.history_path().await else {
+            return Ok(Vec::new());
+        };
+        let portfolio = self.state.portfolio().await;
+        if portfolio.positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let base = self.state.currency().await;
+        let today = self.today_point(&portfolio).await;
+        let (mut points, _skipped) = snapshots::read(&path);
+        points.retain(|point| {
+            point.complete && point.base_currency == today.base_currency && point.date < today.date
+        });
+        if today.complete {
+            points.push(today);
+        }
+        let transactions = analytics::transactions(&portfolio, &base, None);
+        let days = record_days(&points, &transactions);
+        let positions = self.state.get_positions().await;
+        let holdings = record_holdings(&positions, &points);
+        let policy = self.state.policy().await;
+        let allocations = policy
+            .as_ref()
+            .map_or(&[][..], |policy| policy.allocations.as_slice());
+        Ok(records::find(&records::Facts {
+            days: &days,
+            holdings: &holdings,
+            allocations,
+            currency: &base,
+        }))
+    }
+
+    /// Where the plates the owner has been shown are kept: beside the history, like the days
+    /// looked at. Ids only, which carry a date and a kind and no amounts.
+    async fn records_seen_path(&self) -> Option<PathBuf> {
+        Some(self.history_path().await?.parent()?.join(RECORDS_SEEN_FILE))
+    }
+
+    async fn seen_records(&self) -> Vec<String> {
+        let Some(path) = self.records_seen_path().await else {
+            return Vec::new();
+        };
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<RecordsSeenFile>(&text).ok())
+            .map(|file| file.seen)
+            .unwrap_or_default()
+    }
+
+    /// Remember that these plates have been shown, so each one's arrival plays once and not again.
+    pub async fn mark_records_seen(&self, ids: Vec<String>) -> BackendResult<()> {
+        if ids.is_empty() || self.encrypted().await {
+            return Ok(());
+        }
+        let Some(path) = self.records_seen_path().await else {
+            return Ok(());
+        };
+        let mut seen = self.seen_records().await;
+        let mut added = false;
+        for id in ids {
+            if !seen.contains(&id) {
+                seen.push(id);
+                added = true;
+            }
+        }
+        if !added {
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(report)?;
+        }
+        let text = serde_json::to_string(&RecordsSeenFile { seen }).unwrap_or_default() + "\n";
+        atomic_write::write_atomic_private(&path, text.as_bytes()).map_err(report)
     }
 
     pub async fn add_position(&self, request: CreatePositionRequest) -> BackendResult<()> {
@@ -1904,6 +2119,60 @@ mod tests {
             backend.record_today().await.unwrap();
         });
         assert!(!dir.path().join("main").exists());
+    }
+
+    #[test]
+    fn the_records_room_finds_the_walls_plates_and_remembers_them() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("portfolio");
+        demo::seed_workspace(&root);
+        let backend = demo::backend(dir.path(), Some(&root), runtime.handle().clone());
+        let seen = root.join("portfolio/history/main").join(RECORDS_SEEN_FILE);
+        fs::remove_file(&seen).ok();
+        let today = Local::now().date_naive();
+
+        runtime.block_on(async {
+            backend.startup(None).await.unwrap();
+            let view = backend.records().await.unwrap();
+            let ids: Vec<&str> = view.plates.iter().map(|plate| plate.id.as_str()).collect();
+            println!("{} plates: {ids:?}", view.plates.len());
+            for plate in &view.plates {
+                println!(
+                    "{} | {} | {} | {}",
+                    plate.date,
+                    plate.title(),
+                    plate.figure_text(false, "EUR").unwrap_or_default(),
+                    plate.sentence(false, "EUR")
+                );
+            }
+            assert!(view.seen.is_empty());
+            assert!(
+                view.plates
+                    .iter()
+                    .any(|plate| plate.id.ends_with(":begins")),
+                "the demo's first valuation"
+            );
+            assert!(
+                view.plates
+                    .iter()
+                    .any(|plate| plate.id.ends_with(":best-day")),
+                "the demo moved on some day"
+            );
+            assert!(view.plates.iter().any(|plate| plate.date == today));
+
+            // Only the ids of what was shown are written, beside the history.
+            let newest = view.plates[0].id.clone();
+            backend
+                .mark_records_seen(vec![newest.clone()])
+                .await
+                .unwrap();
+            let written = fs::read_to_string(&seen).unwrap();
+            assert!(written.contains(&newest), "{written}");
+            assert!(!written.contains('€'), "{written}");
+            let again = backend.records().await.unwrap();
+            assert_eq!(again.seen, [newest]);
+        });
     }
 
     #[test]

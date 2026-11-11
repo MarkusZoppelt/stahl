@@ -21,6 +21,9 @@ const CENT: f64 = 0.005;
 const NO_MONEY: f64 = 0.5;
 /// A run shorter than this is not worth a plate.
 const SHORTEST_RUN: i64 = 2;
+/// A high that was beaten the next day says nothing about the portfolio. One that stood for
+/// this long, or still stands, is a record worth engraving.
+const STANDING_DAYS: i64 = 30;
 /// The most years of history a plate can celebrate. Fifty is a guess at "longer than anyone".
 const LONGEST: i32 = 50;
 
@@ -97,8 +100,6 @@ impl Money {
 pub enum Figure {
     /// A figure of the portfolio's own: a total, a change.
     Money(Money),
-    /// A price in a holding's own currency, where the cents are part of the price.
-    Price(Money),
     /// Something that isn't money: a run of days, a multiple, a number of units.
     Text(String),
 }
@@ -248,14 +249,6 @@ impl Record {
                     whole(money.amount, code)
                 }
             }
-            Figure::Price(money) => {
-                let code = money.currency.as_deref().unwrap_or(portfolio);
-                if hidden {
-                    format::HIDDEN.to_string()
-                } else {
-                    format::currency(money.amount, code)
-                }
-            }
             Figure::Text(text) => text.clone(),
         })
     }
@@ -341,11 +334,19 @@ impl Record {
                 words.day(*from, self.date),
                 words.day(self.date, self.date),
             ),
-            Kind::FirstBought { quantity, .. } => format!(
-                "The first {}, bought on {}.",
-                units(*quantity),
-                self.date.format("%-d %B %Y")
-            ),
+            Kind::FirstBought {
+                price, currency, ..
+            } => {
+                let day = self.date.format("%-d %B %Y");
+                let code = currency.as_deref().unwrap_or(portfolio);
+                match price.filter(|_| !hidden) {
+                    Some(price) => format!(
+                        "First bought on {day}, at {} each.",
+                        format::currency(price, code)
+                    ),
+                    None => format!("First bought on {day}."),
+                }
+            }
             Kind::Doubled { .. } => {
                 "More than twice what you paid for it, measured against the average purchase \
                  price."
@@ -504,8 +505,16 @@ fn begins(days: &[&Day], records: &mut Vec<Record>) {
 fn highs(days: &[&Day], records: &mut Vec<Record>) {
     let mut high = days[0].total;
     let mut high_date = days[0].date;
-    for day in &days[1..] {
-        if day.total > high + CENT {
+    for (index, day) in days.iter().enumerate().skip(1) {
+        if day.total <= high + CENT {
+            continue;
+        }
+        // A high that a later day beat within the month was a step on the way up, not a record.
+        let stands = days[index + 1..]
+            .iter()
+            .find(|later| later.total > day.total + CENT)
+            .is_none_or(|beaten| (beaten.date - day.date).num_days() >= STANDING_DAYS);
+        if stands {
             records.push(Record {
                 id: format!("{}:high", date_key(day.date)),
                 kind: Kind::High {
@@ -516,9 +525,9 @@ fn highs(days: &[&Day], records: &mut Vec<Record>) {
                 figure: Some(Figure::Money(Money::here(day.total))),
                 percent: None,
             });
-            high = day.total;
-            high_date = day.date;
         }
+        high = day.total;
+        high_date = day.date;
     }
 }
 
@@ -771,12 +780,7 @@ fn first_bought(holdings: &[Holding], records: &mut Vec<Record>) {
                 currency: holding.currency.clone(),
             },
             date: first.date,
-            figure: first.price.map(|price| {
-                Figure::Price(Money {
-                    amount: price,
-                    currency: holding.currency.clone(),
-                })
-            }),
+            figure: Some(Figure::Text(units(first.quantity))),
             percent: None,
         });
     }
@@ -933,19 +937,24 @@ mod tests {
             quiet("2026-03-03", 101_000.0),
             quiet("2026-03-04", 100_500.0),
             quiet("2026-03-05", 102_000.0),
+            quiet("2026-03-30", 102_500.0),
         ];
         let records = find(&days);
         let highs = of_kind(&records, "A high");
-        assert_eq!(highs.len(), 2, "{:?}", ids(&records));
-        assert_eq!(highs[0].date, day("2026-03-05"));
-        assert_eq!(highs[1].date, day("2026-03-03"));
         assert_eq!(
-            highs[1].sentence(false, "EUR"),
-            "The highest value on record, past the €100,000 of 1 March."
+            highs.len(),
+            1,
+            "a high beaten the next day is a step, not a record: {:?}",
+            ids(&records)
+        );
+        assert_eq!(highs[0].date, day("2026-03-30"));
+        assert_eq!(
+            highs[0].sentence(false, "EUR"),
+            "The highest value on record, past the €102,000 of 5 March."
         );
         assert_eq!(
-            highs[1].sentence(true, "EUR"),
-            "The highest value on record, past the one of 1 March."
+            highs[0].sentence(true, "EUR"),
+            "The highest value on record, past the one of 5 March."
         );
     }
 
@@ -1203,17 +1212,14 @@ mod tests {
         assert_eq!(bought[0].title(), "S&P 500");
         assert_eq!(
             bought[0].sentence(false, "EUR"),
-            "The first 80, bought on 10 January 2024."
+            "First bought on 10 January 2024, at $410.00 each."
         );
         assert_eq!(
-            bought[0].figure_text(false, "EUR").as_deref(),
-            Some("$410.00"),
-            "in the holding's own currency"
+            bought[0].sentence(true, "EUR"),
+            "First bought on 10 January 2024.",
+            "the price is hidden with the other amounts"
         );
-        assert_eq!(
-            bought[0].figure_text(true, "EUR").as_deref(),
-            Some(format::HIDDEN)
-        );
+        assert_eq!(bought[0].figure_text(false, "EUR").as_deref(), Some("80"));
     }
 
     #[test]
