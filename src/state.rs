@@ -681,6 +681,10 @@ pub struct State {
     /// picture. The compositor sets it on the first frame it renders: false in tests, which never
     /// draw, and on iOS, which keeps the picture.
     pub shaders: bool,
+    /// Something is being composed for the owner: the sidebar's door turns its tumblers slowly
+    /// and breathes until this goes false, and then settles as it does after a refresh. Another
+    /// part of the app sets it; it is false by default.
+    pub door_busy: bool,
     /// The view has been built since `shaders` turned true.
     shader_view: bool,
     /// The opening has played for the portfolio now open: it never replays on a refresh or a page
@@ -940,6 +944,7 @@ impl State {
             price_updates: 0,
             door_arrivals: 0,
             shaders: false,
+            door_busy: false,
             shader_view: false,
             opening_seen: false,
             opening: None,

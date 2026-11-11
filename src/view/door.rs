@@ -96,9 +96,9 @@ fn body(s: &State, size: f32, place: &str) -> El {
         // The welcome screen's door is the large door; the mark has its own light and its own
         // tumblers.
         if place == "welcome" {
-            crate::fx::door(size, dial_turns(s))
+            crate::fx::door(size, dial_turns(s), s.door_busy)
         } else {
-            crate::fx::mark(size, dial_turns(s))
+            crate::fx::mark(size, dial_turns(s), s.door_busy)
         }
     } else {
         let dial = size * DIAL;

@@ -251,7 +251,18 @@ pub fn price_flash(s: &State, id: usize, radius: f32, t: &Theme) -> Option<El> {
         })
 }
 
-/// One soft light from above, on the wall behind a page.
+/// The room's one light on the wall behind a page. A compositor draws it live: it follows the
+/// pointer, rests above the middle of the window, and takes the day's colour. Without one (tests,
+/// iOS) it is [`wash`], the still light the app has always had.
+pub fn light(s: &State, t: &Theme, radius: f32) -> El {
+    if s.shaders {
+        crate::fx::room(radius)
+    } else {
+        wash(t, radius)
+    }
+}
+
+/// One soft light from above, on the wall behind a page, for a window without a compositor.
 /// `radius` follows whatever it fills: the rounded main pane, or a whole window.
 pub fn wash(t: &Theme, radius: f32) -> El {
     let light = if t.dark {

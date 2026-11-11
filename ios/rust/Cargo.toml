@@ -11,6 +11,7 @@ crate-type = ["staticlib"]
 [dependencies]
 portfolio_rs = "0.10.1"
 rune = { git = "https://github.com/anomalyco/rune", rev = "2bdfae16568782a56cb93818944d05b93546bce5" }
+rune-fx = { git = "https://github.com/anomalyco/rune", rev = "2bdfae16568782a56cb93818944d05b93546bce5" }
 stahl = { path = "../.." }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 # `stahl`'s compositor builds its shader door with Rune's own wgpu, at the same version.

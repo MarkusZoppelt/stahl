@@ -104,7 +104,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     let t = Theme::new(s.is_dark());
     let mut layer = Vec::new();
     let body = if s.starting {
-        splash(&t)
+        splash(s, &t)
     } else if s.folder_prompt.is_some() {
         // Not the shell: the previous portfolio is still in memory, and must not look loaded.
         folder_prompt(s, &t)
@@ -136,13 +136,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     root(body, layer)
 }
 
-fn splash(t: &Theme) -> El {
+fn splash(s: &State, t: &Theme) -> El {
     col()
         .w_full()
         .h_full()
         .center()
         .gap(16.0)
-        .child(ui::wash(t, 0.0))
+        .child(ui::light(s, t, 0.0))
         .child(ui::orbiting_mark(72.0, t))
         .child(ui::muted("Loading your portfolio…", t))
 }
@@ -205,7 +205,7 @@ fn welcome(s: &State, t: &Theme) -> El {
         .center()
         .gap(10.0)
         .padding(if compact { 16.0 } else { 24.0 })
-        .child(ui::wash(t, 0.0))
+        .child(ui::light(s, t, 0.0))
         .child(
             door::welcome(s, t, if compact { 112.0 } else { 168.0 }).mb(14.0),
         )
@@ -323,7 +323,7 @@ fn folder_prompt(s: &State, t: &Theme) -> El {
         .center()
         .gap(12.0)
         .padding(24.0)
-        .child(ui::wash(t, 0.0))
+        .child(ui::light(s, t, 0.0))
         .child(
             text("This folder isn't a workspace")
                 .font(PAGE_TITLE)
@@ -746,7 +746,7 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .child(ui::wash(t, 12.0))
+        .child(ui::light(s, t, 12.0))
         .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
