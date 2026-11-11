@@ -64,27 +64,15 @@ pub fn describe(count: usize) -> String {
     }
 }
 
-/// The living door at `size`. `place` keeps the dial's key apart where two doors are on screen.
+/// The magic of the living door at `size`: either the shader's slot, or the picture with its
+/// turned dial for a window without a compositor (tests, which never draw, and iOS).
+/// `place` keeps the dial's key apart where two doors are on screen.
 pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
     let count = if s.has_portfolio() { attention(s) } else { 0 };
-    let dial = size * DIAL;
-    let inset = (size - dial) / 2.0;
     let mut door = el()
         .key(format!("door-{place}"))
         .size(size, size)
-        .child(ui::door(size))
-        .child(
-            // The dial: the same picture, clipped to the dial's disc, so at rest it is invisible.
-            el().key(format!("door-dial-{place}"))
-                .absolute(inset, inset)
-                .size(dial, dial)
-                .radius(dial / 2.0)
-                .clip_rounded(dial / 2.0)
-                .a11y_hidden()
-                .rotate(dial_angle(dial_turns(s)))
-                .rotate_motion(DIAL_TURN)
-                .child(ui::door(size).absolute(-inset, -inset)),
-        );
+        .child(body(s, size, place));
     if count > 0 {
         // One mark on the dial at twelve o'clock, where a combination is read.
         let color = if attention_is_critical(s) {
@@ -109,28 +97,38 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
         .label(format!("Stahl Capital. {}", describe(count)))
 }
 
+/// What the door is drawn with: the shader, or the picture and its turned dial.
+fn body(s: &State, size: f32, place: &str) -> El {
+    if s.shaders {
+        // The welcome screen's door, and the one flying from it, are the large door; the mark has
+        // its own light and its own tumblers.
+        if place == "welcome" || place == "flying" {
+            crate::fx::door(size, dial_turns(s))
+        } else {
+            crate::fx::mark(size, dial_turns(s))
+        }
+    } else {
+        let dial = size * DIAL;
+        let inset = (size - dial) / 2.0;
+        el().size(size, size).child(ui::door(size)).child(
+            // The dial: the same picture, clipped to the dial's disc, so at rest it is
+            // invisible.
+            el().key(format!("door-dial-{place}"))
+                .absolute(inset, inset)
+                .size(dial, dial)
+                .radius(dial / 2.0)
+                .clip_rounded(dial / 2.0)
+                .a11y_hidden()
+                .rotate(dial_angle(dial_turns(s)))
+                .rotate_motion(DIAL_TURN)
+                .child(ui::door(size).absolute(-inset, -inset)),
+        )
+    }
+}
+
 /// The large door on the welcome screen. It says where it is, so that opening a portfolio can fly
 /// it from here to the mark.
 pub fn welcome(s: &State, t: &Theme, size: f32) -> El {
-    if s.shaders {
-        // The compositor paints the steel here, at this size: the same door the landing page
-        // draws, and the picture's rings, radii and light.
-        return el()
-            .key("door-welcome")
-            .size(size, size)
-            .child(crate::fx::door(size))
-            .role("img")
-            .label(format!(
-                "Stahl Capital. {}",
-                describe(if s.has_portfolio() { attention(s) } else { 0 })
-            ))
-            .transition(Transition::none())
-            .on_layout(|s: &mut State, rect| {
-                if s.welcome_door != Some(rect) {
-                    s.welcome_door = Some(rect);
-                }
-            });
-    }
     // It leaves at once: the flying door takes its place in the same frame.
     vault(s, t, size, "welcome")
         .transition(Transition::none())

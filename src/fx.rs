@@ -9,7 +9,10 @@
 //! with the origin at the top left; no flip is needed. Its colours are sRGB; the output is
 //! premultiplied, encoded for whichever target the pass draws into (`EffectSite::srgb_blend`).
 
-use std::collections::HashMap;
+use std::{
+    collections::{HashMap, HashSet},
+    f32::consts::TAU,
+};
 
 use crate::state::State;
 use rune::{
@@ -19,8 +22,12 @@ use rune::{
     render::EffectSite,
 };
 
-/// The effect slot that draws the door.
+/// The large door: the welcome screen's, and the one that opens a portfolio.
 pub const DOOR: u32 = 1;
+/// The small mark: the sidebar's, the phone's top bar.
+pub const MARK: u32 = 2;
+/// The door behind a page pulled past its top on a phone.
+pub const PULL: u32 = 3;
 
 const UNIFORM_SIZE: usize = 64;
 const MAX_SLOTS: usize = 8;
@@ -28,16 +35,137 @@ const MAX_SLOTS: usize = 8;
 /// The door's resting light: the page's default, up and to the left.
 const LIGHT: [f32; 2] = [-0.55, -0.65];
 
+/// How heavy the tumblers are: a turn settles in about a second, with a small give.
+const SPRING: f32 = 70.0;
+const DAMPING: f32 = 10.0;
+
+/// The light follows a pointer within two radii of the door, as the page's does.
+const LIGHT_REACH: f32 = 2.0;
+/// The light eases 6% a frame at 60, as on the page.
+const LIGHT_EASE: f32 = 0.06;
+
 /// A slot of `size` points that the compositor paints the door into. It draws nothing itself:
-/// the effect keeps the slot's place, rect, clip and opacity.
-pub fn door(size: f32) -> El {
-    el().size(size, size).effect(DOOR).a11y_hidden()
+/// the effect keeps the slot's place, rect, clip and opacity. `turns` is how far the tumblers
+/// have been turned; the compositor eases the real spin towards it.
+fn slot(size: f32, mark: u32, turns: f32) -> El {
+    el().size(size, size)
+        .effect(mark)
+        .effect_data([turns, 0.0, 0.0, 0.0])
+        .a11y_hidden()
 }
 
-/// The compositor: Rune draws the frame, and this paints the door at each `DOOR` slot.
+/// The large door, at `size`.
+pub fn door(size: f32, turns: u64) -> El {
+    slot(size, DOOR, turns as f32)
+}
+
+/// The small mark, at `size`.
+pub fn mark(size: f32, turns: u64) -> El {
+    slot(size, MARK, turns as f32)
+}
+
+/// The door behind a pull, at `size`. It never turns.
+pub fn pull(size: f32) -> El {
+    slot(size, PULL, 0.0)
+}
+
+/// What every door needs from the frame it is drawn in.
+#[derive(Clone, Copy)]
+struct FrameFacts {
+    /// The runtime's clock, so easing is deterministic headless.
+    t: f64,
+    reduced: bool,
+    pointer: Option<(f32, f32)>,
+}
+
+/// One door's live state: where its light is, where it is heading, and how far its tumblers
+/// have turned. The compositor keeps this, so a moving light never rebuilds the view.
+struct Door {
+    light: [f32; 2],
+    target: [f32; 2],
+    /// Turns, eased; the shader wants radians.
+    spin: f32,
+    spin_target: f32,
+    speed: f32,
+    /// The last turn count the view asked for.
+    turns: f32,
+    /// The clock when this door last stepped, so a frame that draws it twice advances it once.
+    t: f64,
+}
+
+impl Door {
+    /// A door seen for the first time starts its tumblers at rest and turns them to `turns`, as
+    /// a freshly built dial did, so the arrival and a long session both show one turn.
+    fn new(turns: f32, t: f64) -> Door {
+        Door {
+            light: LIGHT,
+            target: LIGHT,
+            spin: 0.0,
+            spin_target: turns,
+            speed: 0.0,
+            turns,
+            t,
+        }
+    }
+
+    fn step(&mut self, frame: FrameFacts, scale: f32, center: [f32; 2], radius: f32, turns: f32) {
+        if frame.t <= self.t {
+            return;
+        }
+        let dt = ((frame.t - self.t) as f32).min(0.05);
+        self.t = frame.t;
+        self.target = match frame.pointer {
+            Some((x, y)) => {
+                let reach = radius.max(1.0);
+                [
+                    ((x * scale - center[0]) / reach).clamp(-LIGHT_REACH, LIGHT_REACH),
+                    ((y * scale - center[1]) / reach).clamp(-LIGHT_REACH, LIGHT_REACH),
+                ]
+            }
+            None => LIGHT,
+        };
+        if turns != self.turns {
+            self.turns = turns;
+            self.spin_target = turns;
+        }
+        if frame.reduced {
+            self.light = self.target;
+            self.spin = self.spin_target;
+            self.speed = 0.0;
+            return;
+        }
+        // 6% a frame at 60, whatever the frame rate.
+        let k = 1.0 - (1.0 - LIGHT_EASE).powf(dt * 60.0);
+        self.light[0] += (self.target[0] - self.light[0]) * k;
+        self.light[1] += (self.target[1] - self.light[1]) * k;
+        // A heavy, slightly sprung settle, in fixed steps so a long frame can't blow it up.
+        let mut left = dt;
+        while left > 0.0 {
+            let h = left.min(1.0 / 240.0);
+            let pull = -SPRING * (self.spin - self.spin_target) - DAMPING * self.speed;
+            self.speed += pull * h;
+            self.spin += self.speed * h;
+            left -= h;
+        }
+        if (self.spin - self.spin_target).abs() < 1e-4 && self.speed.abs() < 1e-2 {
+            self.spin = self.spin_target;
+            self.speed = 0.0;
+        }
+    }
+
+    fn moving(&self) -> bool {
+        (self.light[0] - self.target[0]).abs() > 5e-4
+            || (self.light[1] - self.target[1]).abs() > 5e-4
+            || (self.spin - self.spin_target).abs() > 5e-4
+            || self.speed.abs() > 1e-2
+    }
+}
+
+/// The compositor: Rune draws the frame, and this paints the door at each door slot.
 #[derive(Default)]
 pub struct Gfx {
     gpu: Option<Gpu>,
+    doors: HashMap<u32, Door>,
     /// The frame that first found the compositor, whose view still shows the picture: draw one
     /// more so the door appears without waiting for the owner to touch something.
     wake: bool,
@@ -186,24 +314,16 @@ impl Slot {
 
 /// The slot's rect and radius in window device pixels. The door fills the mark as the PNG does:
 /// its rim sits 1/512 of the box in from the edge.
-fn geometry(site: &EffectSite<'_>) -> Slot {
+fn geometry(site: &EffectSite<'_>) -> ([f32; 2], f32) {
     let [x, y, w, h] = site.instance.rect;
     let side = w.min(h);
-    Slot {
-        center: [x + w / 2.0, y + h / 2.0],
-        radius: side * (0.5 - 1.0 / 512.0),
-        split: 0.0,
-        light: LIGHT,
-        spin: 0.0,
-        gain: 1.0,
-        origin: site.origin,
-        encode: if site.srgb_blend { 1.0 } else { 0.0 },
-    }
+    ([x + w / 2.0, y + h / 2.0], side * (0.5 - 1.0 / 512.0))
 }
 
 impl Compositor<State> for Gfx {
     fn animating(&self) -> bool {
-        self.wake
+        // Only while a light or a tumbler is still moving, so a window at rest draws none.
+        self.wake || self.doors.values().any(Door::moving)
     }
 
     fn render(&mut self, f: &mut Frame<'_, State>) {
@@ -218,22 +338,49 @@ impl Compositor<State> for Gfx {
         // shader door, and `poll` commits it; this keeps the display link on until that frame.
         self.wake = !f.rt.state.shaders;
         f.rt.state.shaders = true;
+        let (t, reduced, pointer) = (f.rt.t, f.rt.reduced_motion, f.rt.pointer());
+        let frame = FrameFacts {
+            t,
+            reduced,
+            pointer,
+        };
+        let mut seen: HashSet<u32> = HashSet::new();
         let mut slot = 0usize;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with(f.encoder, f.target, clear, &mut |pass, site| {
-            if site.mark != DOOR {
+            if !matches!(site.mark, DOOR | MARK | PULL) {
                 return;
             }
-            let at = geometry(site);
-            if slot < MAX_SLOTS {
-                let offset = slot as u64 * gpu.stride as u64;
-                queue.write_buffer(&gpu.uniforms, offset, &at.bytes());
-                slot += 1;
-                pass.set_pipeline(gpu.pipeline(device, site.format));
-                pass.set_bind_group(0, &gpu.bind, &[(slot as u32 - 1) * gpu.stride]);
-                pass.draw(0..3, 0..1);
+            let (center, radius) = geometry(site);
+            let at = {
+                let door = self
+                    .doors
+                    .entry(site.mark)
+                    .or_insert_with(|| Door::new(site.data[0], t));
+                door.step(frame, site.scale, center, radius, site.data[0]);
+                seen.insert(site.mark);
+                Slot {
+                    center,
+                    radius,
+                    split: 0.0,
+                    light: door.light,
+                    spin: door.spin * TAU,
+                    gain: 1.0,
+                    origin: site.origin,
+                    encode: if site.srgb_blend { 1.0 } else { 0.0 },
+                }
+            };
+            if slot >= MAX_SLOTS {
+                return;
             }
+            let offset = slot as u64 * gpu.stride as u64;
+            queue.write_buffer(&gpu.uniforms, offset, &at.bytes());
+            slot += 1;
+            pass.set_pipeline(gpu.pipeline(device, site.format));
+            pass.set_bind_group(0, &gpu.bind, &[(slot as u32 - 1) * gpu.stride]);
+            pass.draw(0..3, 0..1);
         });
+        self.doors.retain(|mark, _| seen.contains(mark));
     }
 }
 
@@ -283,7 +430,10 @@ fn glsl_mod(a: f32, b: f32) -> f32 { return a - b * floor(a / b); }
 fn half_door(world: vec2f, side: f32) -> vec4f {
     let p = world - vec2f(side * u.split, 0.0);
     let px = 1.0 / u.radius;
-    let inside = smoothstep(-px, px, p.x * side - px * 0.75);
+    // The cut between the halves is a hairline of the whole door's width. On a mark a few tens of
+    // pixels across it would be a black pixel, so it closes up there.
+    let cut_keep = clamp(u.radius / 200.0, 0.0, 1.0);
+    let inside = smoothstep(-px, px, p.x * side - px * 0.75 * cut_keep);
     let r = length(p);
     let outer = 1.0 - smoothstep(EDGE[RINGS] - px, EDGE[RINGS] + px, r);
     let alpha = inside * outer;
@@ -306,14 +456,22 @@ fn half_door(world: vec2f, side: f32) -> vec4f {
 
     // Lathe marks: finer than a pixel is averaged away so zooming in never shimmers.
     let detail = clamp(u.radius * 0.9, 120.0, 1400.0);
-    let lines = noise(r * detail + seed) * 0.6 + noise(r * detail * 0.31 + seed) * 0.4;
+    // A mark is only tens of pixels across, and its lathe marks are finer than a pixel there:
+    // average them into plain steel, as the picture's mipmaps do.
+    let grain = smoothstep(50.0, 140.0, u.radius);
+    let lines = mix(
+        0.5,
+        noise(r * detail + seed) * 0.6 + noise(r * detail * 0.31 + seed) * 0.4,
+        grain,
+    );
     let blotch = noise(turned * 3.0 + seed) * 0.5 + noise(turned * 11.0 + seed * 2.0) * 0.5;
 
-    // The rim of each ring catches light like a chamfer.
+    // The rim of each ring catches light like a chamfer, and fades as it goes under a pixel.
     let width = 0.016;
     let in_dist = r - a;
     let out_dist = b - r;
-    let chamfer = smoothstep(width, 0.0, out_dist) - smoothstep(width, 0.0, in_dist);
+    let chamfer = (smoothstep(width, 0.0, out_dist) - smoothstep(width, 0.0, in_dist))
+        * clamp(width / (px * 1.5), 0.0, 1.0);
     let normal = normalize(vec3f(radial * chamfer * 0.9, 1.0));
 
     let to_light = normalize(vec3f(u.light - p, 1.3));
@@ -334,9 +492,10 @@ fn half_door(world: vec2f, side: f32) -> vec4f {
         + steel * fan * strength * diffuse * select(0.72, 1.0, side < 0.0);
     c += steel * max(chamfer * dot(radial, normalize(u.light - p)), 0.0) * 0.5 * u.gain;
 
-    // The groove between rings.
-    let groove = smoothstep(0.0, 0.007, min(in_dist, out_dist));
-    c *= mix(0.16, 1.0, groove);
+    // The groove between rings: one pixel wide on a small mark, so it softens and then goes.
+    let groove_w = max(0.007, px);
+    let groove = smoothstep(0.0, groove_w, min(in_dist, out_dist));
+    c *= mix(1.0, mix(0.16, 1.0, groove), clamp(0.007 / (px * 1.5), 0.0, 1.0));
 
     // The dial: graduations cut into the fourth ring, turning with it.
     if (ring == 3) {
@@ -345,7 +504,14 @@ fn half_door(world: vec2f, side: f32) -> vec4f {
         let tick = abs(fract(cell) - 0.5) * 2.0;
         let major = glsl_mod(floor(cell), 6.0) < 0.5;
         let reach = select(0.026, 0.05, major);
-        let cut = smoothstep(0.9, 0.96, tick) * step(b - 0.018 - reach, r) * step(r, b - 0.018);
+        // Pixels per unit of `tick`, so a graduation narrower than a pixel averages away.
+        let tick_px = 144.0 * px / (6.2831853 * max(r, px));
+        let aa = clamp(tick_px, 0.0, 0.5);
+        let present = clamp(0.06 / tick_px, 0.0, 1.0);
+        let cut = smoothstep(0.9 - aa, 0.96 + aa, tick)
+            * step(b - 0.018 - reach, r) * step(r, b - 0.018)
+            * present
+            * clamp(reach / (px * 2.0), 0.0, 1.0);
         c = mix(c, c * 0.34, cut);
     }
 
@@ -358,19 +524,34 @@ fn half_door(world: vec2f, side: f32) -> vec4f {
         let mid = (a + b) * 0.5;
         let local = vec2f(r * cos(cell_angle) - mid, r * sin(cell_angle));
         d = length(local) / 0.024;
-        if (d < 1.0) {
-            let dome = sqrt(1.0 - d * d);
+        // A bolt is a pixel and a half across on a mark: give it coverage, not an edge.
+        let soft = clamp(px / 0.024, 0.0, 0.5);
+        if (d < 1.0 + soft) {
+            let dome = sqrt(max(1.0 - d * d, 0.0));
             let bolt_normal = normalize(vec3f(local / 0.024, dome + 0.2));
             let bolt_light = pow(max(dot(bolt_normal, halfway), 0.0), 26.0);
-            c = base * 0.5 + base * 0.7 * max(dot(bolt_normal, to_light), 0.0) + steel * bolt_light * 0.9;
+            let lit = base * 0.5 + base * 0.7 * max(dot(bolt_normal, to_light), 0.0)
+                + steel * bolt_light * 0.9;
+            // A bolt a pixel across is a hint, not a hole.
+            let presence = clamp(0.016 / px, 0.0, 1.0);
+            c = mix(c, mix(c, lit, presence), smoothstep(1.0 + soft, 1.0 - soft, d));
         }
-        c *= mix(0.55, 1.0, smoothstep(0.92, 1.12, d));
+        let ring_keep = clamp(0.0048 / px, 0.0, 1.0);
+        c *= mix(
+            1.0,
+            mix(0.55, 1.0, smoothstep(0.92, 1.12, d)),
+            ring_keep,
+        );
     }
 
-    // The cut faces of the two halves.
+    // The cut faces of the two halves, a hairline that softens on a small mark.
     let face_dist = abs(p.x);
     c += steel * smoothstep(0.012, 0.0, face_dist) * 0.14 * smoothstep(0.0, 0.02, u.split);
-    c *= mix(0.25, 1.0, smoothstep(0.0, 0.0035, face_dist));
+    c *= mix(
+        1.0,
+        mix(0.25, 1.0, smoothstep(0.0, max(0.0035, px), face_dist)),
+        clamp(0.0035 / (px * 1.5), 0.0, 1.0),
+    );
 
     // A last guard: one bad pixel in the hub is the first thing anyone would see.
     if (!(c.r >= 0.0 && c.g >= 0.0 && c.b >= 0.0)) { c = base; }
@@ -439,5 +620,71 @@ mod tests {
             numbers,
             [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]
         );
+    }
+
+    fn facts(t: f64) -> FrameFacts {
+        FrameFacts {
+            t,
+            reduced: false,
+            pointer: None,
+        }
+    }
+
+    #[test]
+    fn a_door_at_rest_does_not_move() {
+        let mut door = Door::new(0.0, 0.0);
+        for k in 0..60 {
+            door.step(facts(k as f64 / 60.0), 2.0, [50.0, 50.0], 25.0, 0.0);
+        }
+        assert!(!door.moving());
+    }
+
+    #[test]
+    fn the_light_follows_the_pointer_and_rests_up_and_left_without_one() {
+        let mut door = Door::new(0.0, 0.0);
+        let pointer = FrameFacts {
+            pointer: Some((500.0, 500.0)),
+            ..facts(1.0 / 60.0)
+        };
+        // Far past the reach, the light stops two radii out.
+        door.step(pointer, 1.0, [50.0, 50.0], 25.0, 0.0);
+        assert_eq!(door.target, [2.0, 2.0]);
+        assert!(door.moving());
+        for k in 2..240 {
+            let at = FrameFacts {
+                pointer: Some((500.0, 500.0)),
+                ..facts(k as f64 / 60.0)
+            };
+            door.step(at, 1.0, [50.0, 50.0], 25.0, 0.0);
+        }
+        assert!((door.light[0] - 2.0).abs() < 0.01 && (door.light[1] - 2.0).abs() < 0.01);
+        // The pointer leaves: it goes back to the page's resting light.
+        door.step(facts(5.0), 1.0, [50.0, 50.0], 25.0, 0.0);
+        assert_eq!(door.target, LIGHT);
+    }
+
+    #[test]
+    fn a_new_door_turns_its_tumblers_once_and_settles() {
+        let mut door = Door::new(2.0, 0.0);
+        assert!(door.moving(), "it starts from rest with two turns to go");
+        for k in 1..=180 {
+            door.step(facts(k as f64 / 60.0), 2.0, [50.0, 50.0], 25.0, 2.0);
+        }
+        assert!((door.spin - 2.0).abs() < 0.01, "it turned: {}", door.spin);
+        assert!(!door.moving(), "and came to rest");
+    }
+
+    #[test]
+    fn reduced_motion_lands_the_door_at_once() {
+        let mut door = Door::new(1.0, 0.0);
+        let frame = FrameFacts {
+            t: 1.0,
+            reduced: true,
+            pointer: Some((500.0, 500.0)),
+        };
+        door.step(frame, 1.0, [50.0, 50.0], 25.0, 3.0);
+        assert_eq!(door.spin, 3.0);
+        assert_eq!(door.light, [2.0, 2.0]);
+        assert!(!door.moving());
     }
 }
