@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod answers;
+pub mod ask;
 mod charts;
 mod compact;
 pub mod door;
@@ -34,6 +35,7 @@ mod updates;
 
 pub fn page_icon(page: Page) -> &'static Icon {
     match page {
+        Page::Ask => &icons::SPARKLES,
         Page::Overview => &icons::LAYOUT_DASHBOARD,
         Page::Holdings => &icons::CHART_COLUMN,
         Page::Allocation => &icons::CHART_PIE,
@@ -57,6 +59,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     if event.key == Key::Escape {
         if s.measure.span.take().is_some() {
             s.measure.clear();
+            return true;
+        }
+        if s.ask_stop() {
             return true;
         }
         return s.palette.take().is_some()
@@ -412,9 +417,13 @@ fn sidebar(s: &State, t: &Theme) -> El {
                         .truncate(),
                 ),
         );
-    let mut bar = Sidebar::new().label("Sections").header(header).section(
-        SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
-    );
+    let mut bar = Sidebar::new()
+        .label("Sections")
+        .header(header)
+        .child(nav_row(s, Page::Ask, t))
+        .section(
+            SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
+        );
     bar = if s.is_workspace() {
         bar.section(SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))))
     } else {
@@ -630,6 +639,7 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     match s.page {
+        Page::Ask => ask::page(s, t, cx),
         Page::Overview => portfolio::overview(s, t, cx),
         Page::Holdings => match selected {
             Some(position) if !pane_fits => portfolio::details_page(s, position, t),
@@ -648,19 +658,7 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
 }
 
 /// Every page in the order the sidebar lists them.
-const PAGE_ORDER: [Page; 11] = [
-    Page::Overview,
-    Page::Holdings,
-    Page::Allocation,
-    Page::Performance,
-    Page::Review,
-    Page::Rebalance,
-    Page::Policy,
-    Page::Documents,
-    Page::Briefing,
-    Page::Health,
-    Page::Settings,
-];
+const PAGE_ORDER: [Page; 12] = Page::ALL;
 
 /// Which way the owner went to reach this page: down the sidebar is forward.
 fn travel(s: &State) -> ui::Travel {
@@ -732,15 +730,19 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     let pane_fits = pane_fits(s, cx);
-    let scroller = page_column(
-        s,
-        t,
-        format!("page-{}", s.page.key()),
-        page_heading(s, t),
-        Some(guide::about(s.page)),
-        page_content(s, t, cx, pane_fits),
-        32.0,
-    );
+    let scroller = if s.page == Page::Ask {
+        ask::page(s, t, cx)
+    } else {
+        page_column(
+            s,
+            t,
+            format!("page-{}", s.page.key()),
+            page_heading(s, t),
+            Some(guide::about(s.page)),
+            page_content(s, t, cx, pane_fits),
+            32.0,
+        )
+    };
     let main = col()
         .key("main-frame")
         .w_full()
@@ -773,14 +775,10 @@ mod tests {
 
     #[test]
     fn every_page_has_a_place_in_the_order() {
-        for page in Page::PORTFOLIO
-            .into_iter()
-            .chain(Page::PLAN)
-            .chain(Page::INSIGHTS)
-            .chain([Page::Settings])
-        {
+        for page in Page::ALL {
             assert!(PAGE_ORDER.contains(&page), "{page:?}");
         }
+        assert_eq!(PAGE_ORDER.len(), Page::ALL.len(), "no page twice");
     }
 
     #[test]

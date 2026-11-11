@@ -10,7 +10,9 @@ use crate::{
     icons,
     state::{Page, State},
     theme::{PAGE_TITLE, Theme},
-    view::{door, freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui},
+    view::{
+        ask, door, freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui,
+    },
 };
 
 /// Side margin of a page on a phone.
@@ -42,15 +44,19 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         // Overview says what the page is for in its own sentence. On a phone, repeating it
         // in a caption pushes what to do under the tab bar.
         let about = (s.page != Page::Overview).then(|| guide::about(s.page));
-        page_column(
-            s,
-            t,
-            format!("page-{}", s.page.key()),
-            heading,
-            about,
-            page_content(s, t, cx, false),
-            MARGIN,
-        )
+        if s.page == Page::Ask {
+            ask::page(s, t, cx)
+        } else {
+            page_column(
+                s,
+                t,
+                format!("page-{}", s.page.key()),
+                heading,
+                about,
+                page_content(s, t, cx, false),
+                MARGIN,
+            )
+        }
     };
     col()
         .key("window")
@@ -306,6 +312,7 @@ fn more_list(s: &State, t: &Theme) -> El {
     col()
         .w_full()
         .gap(24.0)
+        .child(section("Counsel", vec![page_row(Page::Ask, t)], t))
         .child(section("Portfolio", vec![page_row(Page::Allocation, t)], t))
         .child(section("Plan", plan, t))
         .child(section(
@@ -337,10 +344,11 @@ mod tests {
         let in_more = [Page::Allocation, Page::Settings]
             .into_iter()
             .chain(Page::PLAN)
-            .chain(Page::INSIGHTS);
+            .chain(Page::INSIGHTS)
+            .chain([Page::Ask]);
         let mut reachable: Vec<Page> = Page::TABS.into_iter().chain(in_more).collect();
         reachable.sort_by_key(|page| page.key());
         reachable.dedup();
-        assert_eq!(reachable.len(), 11, "{reachable:?}");
+        assert_eq!(reachable.len(), Page::ALL.len(), "{reachable:?}");
     }
 }

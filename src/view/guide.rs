@@ -32,6 +32,7 @@ pub const FRESHNESS: &str = "How current these prices are. Live: just looked up.
 /// What a page is for, in a sentence.
 pub fn about(page: Page) -> &'static str {
     match page {
+        Page::Ask => "Ask in your own words. The answer is made of your own figures and screens.",
         Page::Overview => {
             "What changed since you last looked, where you stand, and what to look at."
         }

@@ -118,6 +118,7 @@ const TOAST_FOR: Duration = Duration::from_millis(2600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
+    Ask,
     Overview,
     Holdings,
     Allocation,
@@ -132,6 +133,21 @@ pub enum Page {
 }
 
 impl Page {
+    /// Every page, in the order the sidebar lists them.
+    pub const ALL: [Page; 12] = [
+        Page::Ask,
+        Page::Overview,
+        Page::Holdings,
+        Page::Allocation,
+        Page::Performance,
+        Page::Review,
+        Page::Rebalance,
+        Page::Policy,
+        Page::Documents,
+        Page::Briefing,
+        Page::Health,
+        Page::Settings,
+    ];
     pub const PORTFOLIO: [Page; 4] = [
         Page::Overview,
         Page::Holdings,
@@ -145,6 +161,7 @@ impl Page {
 
     pub fn label(self) -> &'static str {
         match self {
+            Page::Ask => "Counsel",
             Page::Overview => "Overview",
             Page::Holdings => "Holdings",
             Page::Allocation => "Allocation",
@@ -161,6 +178,7 @@ impl Page {
 
     pub fn key(self) -> &'static str {
         match self {
+            Page::Ask => "nav-ask",
             Page::Overview => "nav-overview",
             Page::Holdings => "nav-holdings",
             Page::Allocation => "nav-allocation",
@@ -182,6 +200,7 @@ impl Page {
     /// Its digit with the main modifier, for the pages that have one.
     pub fn shortcut(self) -> Option<char> {
         Some(match self {
+            Page::Ask => return None,
             Page::Overview => '1',
             Page::Holdings => '2',
             Page::Allocation => '3',
@@ -203,6 +222,21 @@ impl Page {
             .chain(Self::INSIGHTS)
             .chain([Page::Settings])
             .find(|page| page.shortcut() == Some(key))
+    }
+
+    /// A page by the name a block or a prompt uses: "rebalance", "Data Health".
+    pub fn from_name(name: &str) -> Option<Page> {
+        let name = name.trim().to_lowercase().replace([' ', '_'], "-");
+        Self::ALL
+            .into_iter()
+            .find(|page| page.label().to_lowercase().replace(' ', "-") == name)
+            .or(match name.as_str() {
+                "health" | "data-health" => Some(Page::Health),
+                "docs" => Some(Page::Documents),
+                "settings" | "preferences" => Some(Page::Settings),
+                "ask" | "counsel" => Some(Page::Ask),
+                _ => None,
+            })
     }
 }
 
@@ -781,6 +815,8 @@ pub struct State {
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
+    /// The session's Ask conversation, and the model answering it.
+    pub ask: crate::ask::Conversation,
 
     // Since the last look.
     /// The portfolio this session's look was noted for, so reopening it doesn't count again.
@@ -1021,6 +1057,7 @@ impl State {
                 error: None,
             },
             has_api_key: false,
+            ask: crate::ask::Conversation::new(),
             updates: Updates {
                 updater: Updater::disabled(),
                 available: None,
@@ -2030,6 +2067,11 @@ impl State {
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
             Page::Documents => {}
+            Page::Ask => {
+                // A chart block and an allocation block read what the Overview reads.
+                self.load_history();
+                self.load_review();
+            }
         }
     }
 
@@ -2478,6 +2520,96 @@ impl State {
         }
         // Not loaded yet: open the page, which has the button once it is.
         self.navigate(Page::Briefing);
+    }
+
+    // --- Ask ---
+
+    /// An answer is on its way: true from sending until it finishes, fails or is stopped.
+    pub fn thinking(&self) -> bool {
+        self.ask.thinking
+    }
+
+    /// Ask `question` as if it had been typed.
+    pub fn ask_question(&mut self, question: impl Into<String>) {
+        let question = question.into();
+        self.ask.input.replace_text(&question);
+        self.ask_send();
+    }
+
+    /// Send what is in the input. Nothing happens for an empty question, or while an answer is
+    /// still arriving: one question at a time.
+    pub fn ask_send(&mut self) {
+        if self.ask.thinking {
+            return;
+        }
+        let question = self.ask.input.text.trim().to_string();
+        if question.is_empty() {
+            return;
+        }
+        self.ask.input.replace_text("");
+        self.ask.turns.push(crate::ask::Turn::new(question));
+        self.ask.thinking = true;
+        self.ask.streaming = true;
+        // Nothing answers yet; the model comes next. The turn is closed so the page stays honest
+        // about what it can do.
+        if let Some(turn) = self.ask.current_mut() {
+            turn.phase = crate::ask::Phase::Done;
+        }
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+    }
+
+    /// Stop the answer in flight. True when there was one to stop.
+    pub fn ask_stop(&mut self) -> bool {
+        if !self.ask.thinking {
+            return false;
+        }
+        if let Some(cancel) = &self.ask.cancel {
+            cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.ask.cancel = None;
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+        self.ask.queued.clear();
+        self.ask.partial = None;
+        if let Some(turn) = self.ask.current_mut() {
+            turn.phase = crate::ask::Phase::Stopped;
+        }
+        true
+    }
+
+    /// Ask the last question again, after a failure or a stop.
+    pub fn ask_retry(&mut self) {
+        let Some(last) = self.ask.turns.last() else {
+            return;
+        };
+        if !last.finished() {
+            return;
+        }
+        let question = last.question.clone();
+        self.ask.turns.pop();
+        self.ask.input.replace_text(&question);
+        self.ask_send();
+    }
+
+    /// The history a `chart` block asks for: the page's own when the period matches, else the one
+    /// loaded for the answer.
+    pub fn ask_history(&self, period: Option<&str>) -> Option<&History> {
+        let period = period.map_or(Period::Month, Period::from_name);
+        if self.period == period {
+            return self.history.as_ref();
+        }
+        self.ask
+            .chart
+            .as_ref()
+            .filter(|(loaded, _)| *loaded == period)
+            .map(|(_, history)| history)
+    }
+
+    /// The period a `chart` block draws, in words.
+    pub fn ask_chart_name(&self, period: Option<&str>) -> String {
+        let period = period.map_or(Period::Month, Period::from_name);
+        format!("Your value, {}.", period.phrase())
     }
 
     // --- Updates ---

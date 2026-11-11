@@ -489,6 +489,28 @@ impl Period {
         }
     }
 
+    /// A period as a block or a prompt names it, defaulting to the month the Overview charts.
+    pub fn from_name(name: &str) -> Period {
+        match name.trim().to_lowercase().as_str() {
+            "week" | "1w" | "seven days" => Period::Week,
+            "ytd" | "year to date" => Period::Ytd,
+            "year" | "1y" | "twelve months" => Period::Year,
+            "all" | "everything" => Period::All,
+            _ => Period::Month,
+        }
+    }
+
+    /// The period's name as a sentence would have it.
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Period::Week => "the past week",
+            Period::Month => "the past month",
+            Period::Ytd => "this year",
+            Period::Year => "the past year",
+            Period::All => "all of it",
+        }
+    }
+
     /// The first day of the period, or `None` for all of history.
     fn start(self, today: NaiveDate) -> Option<NaiveDate> {
         match self {

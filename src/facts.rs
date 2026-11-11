@@ -81,6 +81,8 @@ pub struct Fact {
     pub id: String,
     /// What the figure is, for a chip's tooltip and for the model's instructions.
     pub label: String,
+    /// The same, short enough to sit over a figure: "Total", "Crypto share".
+    pub short: String,
     pub value: Value,
     /// The asset class it belongs to, so a chip can wear its colour.
     pub class: Option<String>,
@@ -160,10 +162,11 @@ fn share_of(value: f64, total: f64) -> Option<f64> {
     (total.abs() >= 0.005).then(|| value / total * 100.0)
 }
 
-fn fact(id: String, label: String, value: Value) -> Fact {
+fn fact(id: String, label: String, short: String, value: Value) -> Fact {
     Fact {
         id,
         label,
+        short,
         value,
         class: None,
     }
@@ -172,8 +175,8 @@ fn fact(id: String, label: String, value: Value) -> Fact {
 /// Every figure the app can vouch for, in a fixed order.
 pub fn build(input: &Input) -> Table {
     let mut table = Table::default();
-    let mut push = |id: &str, label: String, value: Value| {
-        table.insert(fact(id.to_string(), label, value));
+    let mut push = |id: &str, label: String, short: &str, value: Value| {
+        table.insert(fact(id.to_string(), label, short.to_string(), value));
     };
 
     if let Some(summary) = input.summary {
@@ -181,42 +184,50 @@ pub fn build(input: &Input) -> Table {
         push(
             "total",
             "The portfolio's total value".to_string(),
+            "Total",
             Value::Money(total),
         );
         push(
             "today.change",
             "What the portfolio moved today".to_string(),
+            "Today",
             Value::SignedMoney(summary.day_change),
         );
         push(
             "today.percent",
             "Today's move, in percent".to_string(),
+            "Today",
             Value::SignedPercent(summary.day_change_percent),
         );
         push(
             "unrealized.pnl",
             "Unrealized gain or loss".to_string(),
+            "Unrealized",
             Value::SignedMoney(summary.total_pnl),
         );
         push(
             "unrealized.percent",
             "Unrealized gain or loss, in percent".to_string(),
+            "Unrealized",
             Value::SignedPercent(summary.pnl_percent),
         );
         push(
             "cash.value",
             "What is held in cash".to_string(),
+            "Cash",
             Value::Money(summary.cash_value),
         );
         push(
             "securities.value",
             "What is held in securities".to_string(),
+            "Securities",
             Value::Money(summary.securities_value),
         );
         if let Some(share) = share_of(summary.cash_value, total) {
             push(
                 "cash.share",
                 "Cash's share of the portfolio".to_string(),
+                "Cash share",
                 Value::Percent(share),
             );
         }
@@ -224,6 +235,7 @@ pub fn build(input: &Input) -> Table {
             push(
                 "securities.share",
                 "Securities' share of the portfolio".to_string(),
+                "Securities share",
                 Value::Percent(share),
             );
         }
@@ -233,28 +245,33 @@ pub fn build(input: &Input) -> Table {
         push(
             "since.change",
             "What the portfolio changed by since the last look".to_string(),
+            "Since you last looked",
             Value::SignedMoney(change.total()),
         );
         if let Some(share) = share_of(change.total(), change.start) {
             push(
                 "since.percent",
                 "The change since the last look, in percent".to_string(),
+                "Since you last looked",
                 Value::SignedPercent(share),
             );
         }
         push(
             "since.market",
             "How much of that change was the market".to_string(),
+            "From the market",
             Value::SignedMoney(change.market()),
         );
         push(
             "since.added",
             "Money added since the last look, or taken out when negative".to_string(),
+            "Money in or out",
             Value::SignedMoney(change.added),
         );
         push(
             "since.date",
             "The day the change is measured from".to_string(),
+            "Since",
             Value::Date(change.from),
         );
     }
@@ -262,17 +279,20 @@ pub fn build(input: &Input) -> Table {
     push(
         "count.positions",
         "How many holdings the portfolio has".to_string(),
+        "Holdings",
         Value::Count(input.positions.len()),
     );
     push(
         "count.classes",
         "How many asset classes it has".to_string(),
+        "Classes",
         Value::Count(input.allocation.len()),
     );
     if let Some(name) = input.policy_name.filter(|name| !name.trim().is_empty()) {
         push(
             "policy.name",
             "The name of the policy".to_string(),
+            "Policy",
             Value::Name(name.to_string()),
         );
     }
@@ -287,10 +307,11 @@ pub fn build(input: &Input) -> Table {
                 .iter()
                 .find(|each| each.asset_class.eq_ignore_ascii_case(class))
         });
-        let mut add = |suffix: &str, label: String, value: Value| {
+        let mut add = |suffix: &str, label: String, short: &str, value: Value| {
             table.insert(Fact {
                 id: format!("class.{id}.{suffix}"),
                 label,
+                short: short.to_string(),
                 value,
                 class: Some(class.clone()),
             });
@@ -298,28 +319,33 @@ pub fn build(input: &Input) -> Table {
         add(
             "value",
             format!("What {class} is worth"),
+            class,
             Value::Money(item.value),
         );
         add(
             "share",
             format!("{class}'s share of the portfolio"),
+            &format!("{class} share"),
             Value::Percent(item.percent),
         );
         if let Some(review) = review {
             add(
                 "target",
                 format!("{class}'s policy target share"),
+                &format!("{class} target"),
                 Value::Percent(review.target_percent),
             );
             add(
                 "drift",
                 format!("How far {class} is from its target"),
+                &format!("{class} drift"),
                 Value::Points(review.drift_percent),
             );
             if let Some(tolerance) = review.tolerance_percent {
                 add(
                     "tolerance",
                     format!("How far {class} may drift before it needs attention"),
+                    &format!("{class} band"),
                     Value::Points(tolerance),
                 );
             }
@@ -333,6 +359,7 @@ pub fn build(input: &Input) -> Table {
             add(
                 "today",
                 format!("How {class} moved today, in percent"),
+                &format!("{class} today"),
                 Value::SignedPercent(today),
             );
         }
@@ -345,10 +372,11 @@ pub fn build(input: &Input) -> Table {
             .clone()
             .or_else(|| position.ticker.clone())
             .unwrap_or_else(|| "A holding".to_string());
-        let mut add = |suffix: &str, label: String, value: Value| {
+        let mut add = |suffix: &str, label: String, short: &str, value: Value| {
             table.insert(Fact {
                 id: format!("holding.{id}.{suffix}"),
                 label,
+                short: short.to_string(),
                 value,
                 class: Some(position.asset_class.clone()),
             });
@@ -356,17 +384,20 @@ pub fn build(input: &Input) -> Table {
         add(
             "name",
             format!("The name of the holding {name}"),
+            &name,
             Value::Name(name.clone()),
         );
         add(
             "value",
             format!("What {name} is worth"),
+            &name,
             Value::Money(position.value),
         );
         if let Some(share) = share_of(position.value, total) {
             add(
                 "share",
                 format!("{name}'s share of the portfolio"),
+                &format!("{name} share"),
                 Value::Percent(share),
             );
         }
@@ -374,6 +405,7 @@ pub fn build(input: &Input) -> Table {
             add(
                 "today",
                 format!("How {name} moved today, in percent"),
+                &format!("{name} today"),
                 Value::SignedPercent(today),
             );
         }
@@ -381,6 +413,7 @@ pub fn build(input: &Input) -> Table {
             add(
                 "pnl",
                 format!("{name}'s unrealized gain or loss"),
+                &format!("{name} gain"),
                 Value::SignedMoney(pnl),
             );
         }

@@ -87,7 +87,7 @@ pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .child(closing(s, t, &plan))
 }
 
-fn load_classes(s: &State) -> Vec<Class> {
+pub(crate) fn load_classes(s: &State) -> Vec<Class> {
     let mut out = Vec::new();
     if let Some(review) = s.review.data.as_ref() {
         for item in &review.allocations {

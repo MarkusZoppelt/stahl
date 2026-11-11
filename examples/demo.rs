@@ -129,6 +129,46 @@ fn main() {
             bundle: "/Applications/Stahl Capital.app".into(),
         }
     }
+    /// A hand-written answer, to look at every block without a model.
+    fn ask_answer(s: &mut State, question: &str, lines: &str) {
+        scene(s, Page::Ask);
+        let mut turn = stahl::ask::Turn::new(question);
+        turn.blocks = stahl::ask::Lines::new().push(lines).into_iter().collect();
+        turn.phase = stahl::ask::Phase::Done;
+        s.ask.turns.push(turn);
+    }
+    const ASK_CHANGE: &str = concat!(
+        r#"{"block":"say","text":"Since {since.date}, your total moved {since.change}. Most of it was Bitcoin, which is {class.crypto.share} of the portfolio against a target of {class.crypto.target}."}"#,
+        "\n",
+        r#"{"block":"figures","ids":["total","since.change","class.crypto.share","cash.value"]}"#,
+        "\n",
+        r#"{"block":"chart","period":"month"}"#,
+        "\n",
+        r#"{"block":"say","text":"That is 3.2% of your money in one holding."}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"}]}"#,
+        "\n",
+    );
+    const ASK_ALLOCATION: &str = concat!(
+        r#"{"block":"say","text":"Crypto grew to {class.crypto.share} of the portfolio while stocks fell to {class.stocks.share}. That is why four of five classes sit outside their bands."}"#,
+        "\n",
+        r#"{"block":"allocation"}"#,
+        "\n",
+        r#"{"block":"holdings","sort":"today"}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Where should new money go?","ask":"Where should new money go?"}]}"#,
+        "\n",
+    );
+    const ASK_PLAN: &str = concat!(
+        r#"{"block":"say","text":"A halving in crypto is the kind of day worth planning for. Here is what it would leave, and what a move toward your targets would ask of you."}"#,
+        "\n",
+        r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
+        "\n",
+        r#"{"block":"plan","fraction":0.6}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"}]}"#,
+        "\n",
+    );
     let result = app::run_with_scenes(
         backend,
         env::args().skip(1).collect(),
@@ -470,6 +510,50 @@ fn main() {
                 if let Some(palette) = &mut s.palette {
                     palette.query.replace_text("stocks");
                 }
+            }),
+            // Ask: a question answered with the app's own screens.
+            ("ask", |s| scene(s, Page::Ask)),
+            ("ask-light", |s| {
+                scene(s, Page::Ask);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-answer", |s| {
+                ask_answer(s, "What changed this month?", ASK_CHANGE)
+            }),
+            ("ask-answer-light", |s| {
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-blocks", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION)
+            }),
+            ("ask-blocks-light", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-plan", |s| {
+                ask_answer(s, "What if crypto halves?", ASK_PLAN)
+            }),
+            ("ask-plan-light", |s| {
+                ask_answer(s, "What if crypto halves?", ASK_PLAN);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-ask", |s| phone(s, Page::Ask)),
+            ("phone-ask-answer", |s| {
+                s.compact = true;
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+            }),
+            ("phone-ask-blocks", |s| {
+                s.compact = true;
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+            }),
+            ("phone-ask-plan", |s| {
+                s.compact = true;
+                ask_answer(s, "What if crypto halves?", ASK_PLAN);
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),
