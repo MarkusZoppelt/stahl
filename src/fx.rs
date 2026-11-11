@@ -758,6 +758,11 @@ impl Compositor<State> for Gfx {
             || self.opening
             || self.light.as_ref().is_some_and(Light::moving)
             || self.doors.values().any(Door::moving)
+            // A surface's glow is still easing in or out.
+            || self
+                .lifts
+                .values()
+                .any(|lift| *lift > 0.001 && *lift < 0.999)
     }
 
     fn render(&mut self, f: &mut Frame<'_, State>) {
@@ -935,6 +940,8 @@ impl Compositor<State> for Gfx {
                 *lift += ((if inside { 1.0 } else { 0.0 }) - *lift) * ease;
                 if *lift < 0.001 {
                     *lift = 0.0;
+                } else if *lift > 0.999 {
+                    *lift = 1.0;
                 }
                 let lift = *lift;
                 let radius = site
