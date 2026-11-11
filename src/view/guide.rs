@@ -36,7 +36,7 @@ pub fn about(page: Page) -> &'static str {
             "What changed since you last looked, where you stand, and what to look at."
         }
         Page::Holdings => {
-            "Everything you own, one row per position. Select a row for its cost and purchases."
+            "Everything you own, as a table or a map. Select one for its cost and purchases."
         }
         Page::Allocation => {
             "How your money splits across asset classes, and how that compares with your policy."
@@ -44,7 +44,7 @@ pub fn about(page: Page) -> &'static str {
         Page::Performance => "Your value over time, separating market moves from money you added.",
         Page::Review => "How your portfolio compares with your policy, and what to do about it.",
         Page::Rebalance => {
-            "What-if trades that would bring you back to your targets. Stahl never trades."
+            "Drag the boundaries, or say how much you have to invest. Stahl never trades."
         }
         Page::Policy => {
             "How you want your money split, and your limits. Review and Rebalance measure against it."

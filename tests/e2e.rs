@@ -197,7 +197,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Performance, "Time-weighted return"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full Rebalance to Targets"),
+        (Page::Rebalance, "Full rebalance"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -786,6 +786,63 @@ fn the_palette_filters_runs_commands_and_finds_holdings() {
     assert!(app.rt.state.palette.is_none());
 }
 
+fn palette_row(app: &Harness, key: &str) -> String {
+    app.rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .and_then(|element| element.label)
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_palette_answers_a_figure_and_opens_its_page() {
+    let mut app = Harness::boot(true, None);
+    app.command('k', false);
+    app.type_text("today");
+    assert_eq!(
+        palette_row(&app, "palette-0"),
+        "Today's change, +€280.00",
+        "the amount is in the row, before going anywhere"
+    );
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert_eq!(app.rt.state.page, Page::Overview);
+
+    // An asset class answers with its value, and Enter opens Allocation.
+    app.command('k', false);
+    app.type_text("gold");
+    assert_eq!(palette_row(&app, "palette-0"), "Gold, €5,000.00");
+    app.press(Key::Enter);
+    assert!(app.rt.state.palette.is_none());
+    assert_eq!(app.rt.state.page, Page::Allocation);
+
+    // A holding's row carries its value, and Enter opens that holding.
+    app.command('k', false);
+    app.type_text("spy");
+    assert_eq!(palette_row(&app, "palette-0"), "S&P 500, €40,000.00");
+    let spy = app
+        .rt
+        .state
+        .positions
+        .iter()
+        .find(|position| position.ticker.as_deref() == Some("SPY"))
+        .unwrap()
+        .id;
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Holdings);
+    assert_eq!(app.rt.state.selected, Some(spy));
+
+    app.command('h', true);
+    app.command('k', false);
+    app.type_text("total");
+    assert_eq!(
+        palette_row(&app, "palette-0"),
+        "Total value, ••••••",
+        "privacy hides the amount in the row"
+    );
+}
+
 #[test]
 fn a_generated_document_previews_without_writing_anything() {
     let mut app = Harness::boot(true, None);
@@ -924,7 +981,7 @@ fn the_guide_opens_from_anywhere_and_never_on_its_own() {
     assert!(!app.rt.state.guide, "not forced on a returning user");
     app.command('2', false);
     assert!(
-        app.has_text("one row per position"),
+        app.has_text("as a table or a map"),
         "the page says what it is"
     );
 
@@ -1015,6 +1072,68 @@ fn a_new_position_defaults_to_the_class_the_templates_use() {
     assert_eq!(
         app.rt.state.form.as_ref().unwrap().asset_class.text,
         "Stocks"
+    );
+}
+
+#[test]
+fn dragging_the_chart_measures_that_span_until_escape() {
+    let mut app = Harness::boot(true, None);
+    app.command('4', false);
+    app.settle();
+    let (x, y) = app.rt.find("performance-chart").unwrap();
+    app.rt.pointer_down(x - 120.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(x + 80.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(x + 80.0, y);
+    app.settle();
+    let span = app.rt.state.measure.span.expect("the drag is kept");
+    assert!(span.0 < span.1, "{span:?}");
+    assert!(app.has_text("days"), "the readout says how long");
+    app.press(Key::Escape);
+    assert!(app.rt.state.measure.span.is_none(), "escape dismisses it");
+
+    // Shift and the arrows measure too, once the chart has focus.
+    app.click("performance-chart");
+    app.rt.key(KeyEvent {
+        key: Key::Left,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    app.settle();
+    assert!(
+        app.rt.state.measure.span.is_some(),
+        "shift and an arrow measures"
+    );
+}
+
+#[test]
+fn a_phone_measures_on_the_rail_and_a_vertical_drag_still_scrolls() {
+    let mut app = Harness::phone();
+    app.click(Page::Performance.key());
+    app.tap("performance-chart");
+    let (x, y) = app.rt.find("performance-chart").unwrap();
+    // The chart itself is not a drag target, so a finger down the page still scrolls.
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x, y + 90.0, 0.08);
+    app.rt.touch(1, TouchPhase::Ended, x, y + 90.0, 0.12);
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.rt.state.measure.span.is_none(),
+        "a vertical drag on the chart is a scroll"
+    );
+
+    app.tap("chart-rail");
+    let (rx, ry) = app.rt.find("chart-rail").unwrap();
+    app.rt.touch(1, TouchPhase::Started, rx - 60.0, ry, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, rx + 60.0, ry, 0.08);
+    app.rt.touch(1, TouchPhase::Ended, rx + 60.0, ry, 0.12);
+    app.settle();
+    assert!(
+        app.rt.state.measure.span.is_some(),
+        "the rail measures without taking the page"
     );
 }
 
@@ -1311,6 +1430,7 @@ fn columns_of(app: &Harness) -> Vec<&'static str> {
         "sort-value",
         "sort-pnl",
         "sort-day",
+        "sort-impact",
     ]
     .into_iter()
     .filter(|key| app.exists(key))
@@ -1320,7 +1440,7 @@ fn columns_of(app: &Harness) -> Vec<&'static str> {
 #[test]
 fn the_table_drops_columns_rather_than_overlap_them() {
     let mut app = on_holdings();
-    assert_eq!(columns_of(&app).len(), 5, "a wide window has them all");
+    assert_eq!(columns_of(&app).len(), 6, "a wide window has them all");
 
     // The smallest window Stahl allows, with the pane open beside the table.
     narrowed_to(&mut app, 960.0, 640.0);
@@ -1334,6 +1454,66 @@ fn the_table_drops_columns_rather_than_overlap_them() {
     assert!(
         add[0] + add[2] <= pane[0],
         "the Add button stays clear of the pane"
+    );
+}
+
+#[test]
+fn of_today_weights_a_holding_by_how_much_of_the_portfolio_it_is() {
+    let mut app = on_holdings();
+    assert!(app.has_text("Of today"));
+    // S&P 500 is down 0.60% but is most of the book, so it moves the portfolio more than Gold,
+    // which is up 2.04% on a small slice. The figures are percentage points of yesterday.
+    assert!(app.has_text("-0.22%"), "S&P 500's share of the move");
+    assert!(app.has_text("+0.42%"), "Bitcoin's share of the move");
+    assert!(app.has_text("+0.09%"), "Gold's share of the move");
+
+    app.click("sort-impact");
+    let y = |id: usize| app.rt.find(&format!("holding-{id}")).unwrap().1;
+    assert!(
+        y(0) < y(3) && y(3) < y(1),
+        "Bitcoin, then Gold, then S&P 500"
+    );
+    app.click("holding-1");
+    assert!(app.has_text("Of today"), "the details name it too");
+}
+
+#[test]
+fn the_holdings_map_selects_like_a_row_and_arrows_cross_it() {
+    let mut app = on_holdings();
+    app.click("segment1");
+    assert!(app.rt.state.holdings_map);
+    assert!(app.exists("tile-1"), "a holding becomes a tile");
+    assert!(!app.exists("sort-name"), "the table is the other view");
+    assert!(app.has_text("Area is value"));
+
+    app.click("tile-1");
+    assert_eq!(app.rt.state.selected, Some(1));
+    assert!(app.exists("edit-position"), "a tile opens the same details");
+    app.press(Key::Right);
+    assert_ne!(
+        app.rt.state.selected,
+        Some(1),
+        "right leaves the tile on the left"
+    );
+
+    app.click("segment0");
+    assert!(!app.rt.state.holdings_map);
+    assert!(app.exists("holding-1"), "back to the row");
+}
+
+#[test]
+fn a_phone_can_open_the_holdings_map() {
+    let mut app = Harness::phone();
+    app.click(Page::Holdings.key());
+    app.tap("segment1");
+    app.click("segment1");
+    assert!(app.exists("tile-0"));
+    app.tap("tile-0");
+    app.click("tile-0");
+    assert_eq!(app.rt.state.selected, Some(0));
+    assert!(
+        app.exists("edit-position"),
+        "the details take the map's place"
     );
 }
 
@@ -2487,7 +2667,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Performance, "Time-weighted return"),
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full Rebalance to Targets"),
+        (Page::Rebalance, "Full rebalance"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -2713,4 +2893,360 @@ fn a_phone_can_lock_the_vault_and_ticks_along_the_chart() {
     app.rt.pointer_move(x + 100.0, y);
     app.rt.frame(1.0 / 60.0);
     assert!(first.is_some() && app.rt.state.chart_point > first);
+}
+
+fn element(app: &Harness, key: &str) -> rune::ElementInfo {
+    app.rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("no element {key}"))
+}
+
+#[test]
+fn the_door_flies_once_from_welcome_and_a_refresh_does_not_replay_it() {
+    let mut app = Harness::boot(true, None);
+    let dir = app
+        .rt
+        .state
+        .open
+        .workspace_dir
+        .clone()
+        .expect("the demo workspace");
+    app.rt.update(|state, _| state.reset());
+    app.settle();
+    assert!(app.exists("door-welcome"), "back on the welcome screen");
+    let from = element(&app, "door-welcome").rect;
+    assert!(
+        from[2] > 100.0,
+        "the welcome door is the large one: {from:?}"
+    );
+
+    let arrivals = app.rt.state.door_arrivals;
+    app.rt.update(|state, _| state.load_workspace(dir.clone()));
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.has_text("Total value"),
+        "the page is there while the door travels"
+    );
+    // One door, over everything: the mark's place waits empty while it travels.
+    let flying = element(&app, "door-flying");
+    assert!(
+        (flying.rect[0] - from[0]).abs() < 8.0 && (flying.rect[2] - from[2]).abs() < 8.0,
+        "it sets off from the welcome door: {from:?} -> {:?}",
+        flying.rect
+    );
+    assert!(!app.exists("door-sidebar"), "the mark waits for it");
+    for _ in 0..12 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let mid = element(&app, "door-flying").rect;
+    assert!(mid[0] < from[0] - 20.0, "it travels: {mid:?}");
+    assert!(mid[2] < from[2] - 10.0, "and shrinks as it goes: {mid:?}");
+
+    app.settle();
+    app.settle();
+    assert!(
+        !app.exists("door-flying"),
+        "landed, it hands over to the mark"
+    );
+    let landed = element(&app, "door-sidebar");
+    assert!(
+        landed.rect[2] < 40.0,
+        "the mark is in its place: {:?}",
+        landed.rect
+    );
+    assert_eq!(
+        app.rt.state.door_arrivals,
+        arrivals + 1,
+        "the dial turned once"
+    );
+
+    // A page change leaves it where it landed.
+    app.click(Page::Holdings.key());
+    app.rt.frame(1.0 / 60.0);
+    let stayed = element(&app, "door-sidebar");
+    assert!((stayed.rect[2] - landed.rect[2]).abs() < 1.0);
+    assert!(
+        !app.exists("door-flying"),
+        "a page change does not fly it again"
+    );
+
+    // A refresh turns the dial and does not send the door travelling.
+    let rest = element(&app, "door-dial-sidebar").rect;
+    let door_at = element(&app, "door-sidebar").rect;
+    let (x, y) = app.rt.find("refresh-prices").unwrap();
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let turning = element(&app, "door-dial-sidebar").rect;
+    assert!(turning[2] > rest[2] + 1.0, "the dial turns: {turning:?}");
+    let door_now = element(&app, "door-sidebar").rect;
+    assert!(
+        (door_now[2] - door_at[2]).abs() < 1.0 && !app.exists("door-flying"),
+        "the refresh does not fly the door again: {door_at:?} -> {door_now:?}"
+    );
+    assert_eq!(
+        app.rt.state.door_arrivals,
+        arrivals + 1,
+        "nor counts as an arrival"
+    );
+
+    // Closing and opening another portfolio flies once more.
+    app.rt.update(|state, _| state.reset());
+    app.settle();
+    assert!(app.exists("door-welcome"));
+    app.rt.update(|state, _| state.load_workspace(dir));
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.exists("door-flying"), "a new portfolio flies again");
+}
+
+#[test]
+fn launched_into_a_portfolio_the_dial_turns_once_and_marks_what_needs_attention() {
+    use portfolio_rs::mcp::dto::{Category, Finding, Severity};
+
+    let mut app = Harness::boot(true, None);
+    // Launched straight into a portfolio: no welcome door, so nothing travelled; the dial turned.
+    assert!(!app.exists("door-flying"));
+    assert_eq!(app.rt.state.door_arrivals, 1);
+    app.click(Page::Holdings.key());
+    assert_eq!(app.rt.state.page, Page::Holdings);
+
+    let door = element(&app, "door-sidebar");
+    assert_eq!(
+        door.label.as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
+    );
+    assert!(!app.exists("door-attention-sidebar"));
+
+    // A refresh turns the dial once, and it comes to rest where it started.
+    let rest = element(&app, "door-dial-sidebar").rect;
+    let updates = app.rt.state.price_updates;
+    let (x, y) = app.rt.find("refresh-prices").unwrap();
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    app.rt.frame(1.0 / 60.0);
+    assert_eq!(app.rt.state.price_updates, updates + 1);
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    // Turned, its upright bounds are wider than the dial.
+    let turning = element(&app, "door-dial-sidebar").rect;
+    assert!(turning[2] > rest[2] + 1.0, "the dial turns: {turning:?}");
+    app.settle();
+    app.settle();
+    let settled = element(&app, "door-dial-sidebar").rect;
+    for (a, b) in settled.iter().zip(rest) {
+        assert!((a - b).abs() < 0.01, "and rests where it was: {settled:?}");
+    }
+
+    app.rt.update(|state, _| {
+        state.findings.push(Finding {
+            code: "cash_below_minimum_amount".into(),
+            severity: Severity::Warning,
+            category: Category::Policy,
+            message: "Cash is below the minimum your policy sets".into(),
+            position_id: None,
+            asset_class: None,
+            detail: None,
+        })
+    });
+    app.settle();
+    assert!(app.exists("door-attention-sidebar"));
+    assert_eq!(
+        element(&app, "door-sidebar").label.as_deref(),
+        Some("Stahl Capital. 1 thing needs attention")
+    );
+}
+
+#[test]
+fn moving_between_pages_knows_which_way_and_a_refresh_flashes_what_moved() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Review.key());
+    assert_eq!(app.rt.state.previous_page, Page::Overview);
+    app.click(Page::Allocation.key());
+    assert_eq!(app.rt.state.previous_page, Page::Review);
+
+    // The demo's quotes are fixed, so a refresh moves nothing and nothing flashes.
+    app.click("refresh-prices");
+    assert!(app.rt.state.price_moves.is_empty());
+    let flashes = |app: &Harness| {
+        app.rt
+            .elements()
+            .into_iter()
+            .filter(|element| {
+                element
+                    .key
+                    .as_deref()
+                    .is_some_and(|key| key.contains("-flash-"))
+            })
+            .count()
+    };
+    assert_eq!(flashes(&app), 0);
+
+    // When one does move, its asset class washes once in its colour.
+    let id = app.rt.state.positions[0].id;
+    app.rt.update(move |state, _| {
+        state.price_moves = vec![(id, 0.01)];
+        state.price_updates += 1;
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(flashes(&app) > 0, "what moved flashes");
+}
+
+#[test]
+fn a_rebalance_boundary_moves_by_drag_and_by_key() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    assert!(app.has_text("Stahl never trades."));
+    let handle = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-handle-0"))
+        .expect("the first boundary");
+    assert_eq!(handle.role, "slider");
+    assert!(
+        handle
+            .label
+            .as_deref()
+            .is_some_and(|label| label.contains("Stocks") && label.contains("Bonds")),
+        "the handle names the classes it separates"
+    );
+
+    let bar = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-bar"))
+        .expect("the bar");
+    let [x, y, w, h] = bar.rect;
+    let mid = y + h / 2.0;
+    // Crypto | Cash sits at 72% of the demo book; its mark, every class before it on
+    // target, is at 80%. Grab it and pull it most of the way there: the magnet does the rest.
+    let from = x + w * 0.72;
+    app.rt.pointer_move(from, mid);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(from, mid);
+    app.rt.frame(1.0 / 60.0);
+    let skipped = app.rt.live_only_events();
+    let mut to = from;
+    for _ in 0..12 {
+        to += w * 0.0062;
+        app.rt.pointer_move(to, mid);
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(
+        app.rt.live_only_events() > skipped,
+        "a drag must not rebuild the view on every move"
+    );
+    app.rt.pointer_up(to, mid);
+    app.settle();
+    let state = &app.rt.state.rebalance;
+    assert!(
+        state.origin == stahl::state::RebalanceOrigin::Custom,
+        "letting go keeps the split"
+    );
+    let total: f64 = state.values.iter().sum();
+    let before: f64 = state.values[..4].iter().sum();
+    assert!(
+        (before / total - 0.8).abs() < 1e-9,
+        "the boundary snapped onto its mark, at {}",
+        before / total
+    );
+    assert!(
+        (total - 107_400.0).abs() < 0.01 && state.values.iter().all(|value| *value >= 0.0),
+        "the total stays and nothing goes negative"
+    );
+    assert!(app.has_text("Increase") && app.has_text("Reduce"));
+
+    // The keyboard: Left moves a boundary half a point, Return puts it back on its mark.
+    app.rt.update(|_, tx| tx.focus("rebalance-handle-3", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Left);
+    app.press(Key::Left);
+    let moved: f64 = app.rt.state.rebalance.values[..4].iter().sum();
+    assert!(
+        (moved / total - 0.79).abs() < 1e-9,
+        "two steps left is a point"
+    );
+    app.press(Key::Enter);
+    let back: f64 = app.rt.state.rebalance.values[..4].iter().sum();
+    assert!(
+        (back / total - 0.8).abs() < 1e-9,
+        "Return snaps to the mark"
+    );
+}
+
+#[test]
+fn a_preset_moves_the_bar_and_is_what_gets_copied() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    app.click("rebalance-presets/segment1");
+    assert_eq!(
+        app.rt.state.rebalance.origin,
+        stahl::state::RebalanceOrigin::Full
+    );
+    assert!(app.has_text("Full Rebalance to Targets"));
+    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
+    assert!(markdown.contains("## Full Rebalance to Targets"));
+    assert!(markdown.contains("| Stocks | Increase |"));
+    assert!(markdown.contains("Stahl never trades."));
+    // Every boundary sits on its mark, so every handle shows it.
+    for index in 0..4 {
+        let handle = app
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(&format!("rebalance-handle-{index}")))
+            .expect("a handle");
+        assert!(handle.label.is_some());
+    }
+
+    app.click("rebalance-presets/segment0");
+    assert!(app.has_text("As it is"));
+    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
+    assert!(markdown.contains("No trades."));
+}
+
+#[test]
+fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    app.tap("rebalance-amount");
+    app.click("rebalance-amount");
+    app.type_text("2000");
+    assert_eq!(
+        app.rt.state.rebalance.origin,
+        stahl::state::RebalanceOrigin::Flow(2000.0)
+    );
+    assert!(app.has_text("Buying only"), "new money is placed by buying");
+    assert!(app.has_text("Where new money goes"));
+
+    app.command('a', false);
+    app.press(Key::Backspace);
+    app.type_text("1.000");
+    assert!(
+        app.has_text("could mean"),
+        "an ambiguous amount is refused, not guessed"
+    );
+
+    app.command('a', false);
+    app.press(Key::Backspace);
+    app.type_text("-500000");
+    assert!(app.has_text("That's more than the portfolio."));
 }

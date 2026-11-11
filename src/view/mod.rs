@@ -17,14 +17,18 @@ use crate::{
     theme::{PAGE_TITLE, STATEMENT, STATEMENT_COMPACT, Theme, WORDMARK},
 };
 
+mod answers;
 mod charts;
 mod compact;
+pub mod door;
 pub mod guide;
 mod insights;
 mod overlays;
 mod overview;
 mod plan;
 mod portfolio;
+pub mod rebalance;
+mod treemap;
 pub mod ui;
 mod updates;
 
@@ -51,6 +55,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        if s.measure.span.take().is_some() {
+            s.measure.clear();
+            return true;
+        }
         return s.palette.take().is_some()
             || s.form.take().is_some()
             || s.new_workspace.take().is_some()
@@ -102,11 +110,12 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         folder_prompt(s, &t)
     } else if s.open.parse_error.is_some() {
         overlays::parse_failure(s, &t)
-    } else if !s.has_portfolio() {
+    } else if !s.has_portfolio() || s.hold_welcome_until.is_some_and(|at| s.now < at) {
         welcome(s, &t)
     } else {
         shell(s, &t, cx, &mut layer)
     };
+    layer.extend(door::flight(s, &t));
     overlays::build(s, &t, &mut layer);
 
     let body = body
@@ -177,7 +186,7 @@ fn welcome(s: &State, t: &Theme) -> El {
             .focusable(true)
             .grow(1.0)
             .hover(k.c.hover)
-            .press_scale(0.98);
+            .press_scale(ui::PRESS_CARD);
         // A column of cards on a phone, each a row; side by side on a desktop, each a column.
         let card = if compact {
             card.padding(14.0)
@@ -187,6 +196,9 @@ fn welcome(s: &State, t: &Theme) -> El {
         };
         ui::entering(card, index)
     };
+    // The door is a sibling of the rest, not a child of a fading column: a fade on its parent
+    // would be copied into the flight and the door would vanish on the way. The rest is gone
+    // at once, so it doesn't sit on the page.
     col()
         .w_full()
         .h_full()
@@ -194,8 +206,16 @@ fn welcome(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .padding(if compact { 16.0 } else { 24.0 })
         .child(ui::wash(t, 0.0))
-        .child(ui::door(if compact { 112.0 } else { 168.0 }).mb(14.0))
         .child(
+            door::welcome(s, t, if compact { 112.0 } else { 168.0 }).mb(14.0),
+        )
+        .child(
+            col()
+                .w_full()
+                .items_center()
+                .gap(10.0)
+                .transition(Transition::none())
+                .child(
             text("Stahl Capital has one client.")
                 .font(if compact { STATEMENT_COMPACT } else { STATEMENT })
                 .color(k.c.text_base)
@@ -277,6 +297,7 @@ fn welcome(s: &State, t: &Theme) -> El {
             s.error
                 .as_ref()
                 .map(|error| ui::danger(error.clone(), t).mt(16.0).max_w(880.0)),
+        ),
         )
 }
 
@@ -379,7 +400,7 @@ fn sidebar(s: &State, t: &Theme) -> El {
         .gap(10.0)
         .px(8.0)
         .pb(8.0)
-        .child(ui::door(28.0))
+        .child(door::mark(s, t, 28.0, "sidebar").help(door::describe(door::attention(s))))
         .child(
             col()
                 .shrink()
@@ -511,7 +532,7 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
                 .build(k)
                 .key("save")
                 .mr(6.0)
-                .transition(Transition::scale(0.9).combined(Transition::opacity()))
+                .transition(ui::appear())
         }))
         .child(
             tool(&icons::CIRCLE_HELP, "Guide", t)
@@ -626,6 +647,31 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
     }
 }
 
+/// Every page in the order the sidebar lists them.
+const PAGE_ORDER: [Page; 11] = [
+    Page::Overview,
+    Page::Holdings,
+    Page::Allocation,
+    Page::Performance,
+    Page::Review,
+    Page::Rebalance,
+    Page::Policy,
+    Page::Documents,
+    Page::Briefing,
+    Page::Health,
+    Page::Settings,
+];
+
+/// Which way the owner went to reach this page: down the sidebar is forward.
+fn travel(s: &State) -> ui::Travel {
+    let at = |page: Page| PAGE_ORDER.iter().position(|each| *each == page);
+    if at(s.page) >= at(s.previous_page) {
+        ui::Travel::Forward
+    } else {
+        ui::Travel::Back
+    }
+}
+
 /// The scrolling page: any error, its heading, what it's for, then `content`. `key` names it, so a
 /// new page replaces the old one with a transition. `margin` is its side margin.
 fn page_column(
@@ -646,6 +692,12 @@ fn page_column(
         .min_h(0.0)
         .scroll(ScrollSpec {
             stick_bottom: false,
+        })
+        // Empty page, not a control: a click here dismisses a measured span on the chart.
+        .on_press(|s: &mut State| {
+            if s.measure.span.is_some() {
+                s.measure.clear();
+            }
         });
     // On a phone, a pull past the page's top shows the door, and letting go refreshes.
     let scroller = match s.compact.then(|| s.pull.clone()) {
@@ -662,11 +714,7 @@ fn page_column(
                 .pt(20.0)
                 .pb(40.0)
                 .gap(24.0)
-                .transition(
-                    Transition::offset(0.0, 8.0)
-                        .combined(Transition::blur(3.0))
-                        .combined(Transition::opacity()),
-                )
+                .transition(ui::page_arrive(travel(s), s.compact))
                 .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
                 .child(heading)
                 .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
@@ -722,6 +770,18 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_page_has_a_place_in_the_order() {
+        for page in Page::PORTFOLIO
+            .into_iter()
+            .chain(Page::PLAN)
+            .chain(Page::INSIGHTS)
+            .chain([Page::Settings])
+        {
+            assert!(PAGE_ORDER.contains(&page), "{page:?}");
+        }
+    }
 
     #[test]
     fn freshness_never_calls_doubtful_prices_live() {
