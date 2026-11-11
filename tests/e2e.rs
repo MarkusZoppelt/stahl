@@ -3252,6 +3252,35 @@ fn a_row_moves_by_pointer_and_by_key_and_cash_takes_the_difference() {
         "five points down: {values:?}"
     );
 
+    // Dragged to within a point of its tick, the thumb lands on it.
+    let track = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-track-0"))
+        .expect("the Stocks track")
+        .rect;
+    // The demo's tracks run from 0 to 70%. Stop four tenths of a point short of Stocks' 50%
+    // target: the thumb should take the last step itself.
+    let at = stahl::view::rebalance::values(&app.rt.state)[0] / 107_400.0 * 100.0;
+    let to_tick = ((49.6 - at) / 70.0 * f64::from(track[2])) as f32;
+    let (tx, ty) = app.rt.find("rebalance-thumb-0").unwrap();
+    app.rt.pointer_move(tx, ty);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(tx, ty);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=8 {
+        app.rt.pointer_move(tx + to_tick * step as f32 / 8.0, ty);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(tx + to_tick, ty);
+    app.settle();
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!(
+        (values[0] - 53_700.0).abs() < 1.0,
+        "a thumb near its target lands on it: {values:?}"
+    );
+
     // Reset goes back to the slider.
     app.click("rebalance-reset");
     assert_eq!(
