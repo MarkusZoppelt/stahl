@@ -900,7 +900,7 @@ impl Compositor<State> for Gfx {
             let at = if site.mark == ROOM {
                 seen.insert(ROOM);
                 // A refresh's pulse, while it runs, in the same pass as the room's light.
-                let progress = if site.data[3] > 0.5 {
+                let progress = if site.data[3] > 0.5 && !reduced {
                     let start = t - (clock - site.data[0] as f64);
                     ((t - start) / PULSE_LIFE) as f32
                 } else {
@@ -993,7 +993,8 @@ impl Compositor<State> for Gfx {
                         if dark { 1.0 } else { 0.0 },
                         0.0,
                         site.data[0],
-                        site.data[1],
+                        // Reduced motion gets the still frame: no run of light.
+                        if reduced { 0.0 } else { site.data[1] },
                     ],
                     scale: site.scale,
                 };
