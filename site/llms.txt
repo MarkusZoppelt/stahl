@@ -6,12 +6,12 @@ Stahl Capital is software, not a bank, a broker or an adviser. The page's privat
 
 ## What it does
 
-- Overview: total value, today's change and value over time
-- Holdings: a sortable, searchable table with cost basis and purchases
+- Overview: what changed since you last looked, the total value, and what to look at
+- Holdings: a sortable, searchable table or a map, with cost basis and purchases
 - Allocation: today's split against your policy's targets
 - Performance: time-weighted return, separating market moves from money you added
 - Review, in a workspace: drift, constraint checks, data quality and suggested actions
-- Rebalance, in a workspace: what-if scenarios. It never trades.
+- Rebalance, in a workspace: a what-if plan you drag, or where new money should go. It never trades.
 - Policy, in a workspace: a machine-readable investment policy
 - Documents, in a workspace: weekly reports and decision records
 - Briefing: a summary with Copy as Markdown, to hand to an AI assistant
