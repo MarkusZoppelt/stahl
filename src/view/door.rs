@@ -183,7 +183,14 @@ pub fn welcome(s: &State, t: &Theme, size: f32) -> El {
 
 /// The mark's place: in the sidebar's header, or the phone's top bar.
 pub fn mark(s: &State, t: &Theme, size: f32, place: &str) -> El {
-    vault(s, t, size, place).transition(Transition::none())
+    vault(s, t, size, place)
+        .transition(Transition::none())
+        .on_layout(|s: &mut State, rect| {
+            // A refresh's pulse of light leaves from here.
+            if s.door_mark != Some(rect) {
+                s.door_mark = Some(rect);
+            }
+        })
 }
 
 /// The door opening onto a portfolio: one full-window slot over the page, which the compositor

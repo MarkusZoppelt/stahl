@@ -307,13 +307,22 @@ fn today_sentence(words: &Words, opening: &str, change: &Move) -> Option<String>
     ))
 }
 
-/// A record the change set, in one plain sentence, or nothing.
-fn record(words: &Words, change: &Change, today: NaiveDate) -> Option<String> {
-    let high = change.previous_high?;
+/// Whether the change set a record today: the same test the sentence uses. Light runs along the
+/// total once when this is true and the owner has not seen it that day.
+pub fn is_record(change: &Change, today: NaiveDate) -> bool {
+    let Some(high) = change.previous_high else {
+        return false;
+    };
     let long_enough = change
         .history_from
         .is_some_and(|from| (today - from).num_days() >= RECORD_AFTER_DAYS);
-    if change.total() <= 0.0 || change.end <= high || !long_enough {
+    change.total() > 0.0 && change.end > high && long_enough
+}
+
+/// A record the change set, in one plain sentence, or nothing.
+fn record(words: &Words, change: &Change, today: NaiveDate) -> Option<String> {
+    let high = change.previous_high?;
+    if !is_record(change, today) {
         return None;
     }
     if let Some(round) = round_crossed(high, change.end)

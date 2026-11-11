@@ -25,8 +25,9 @@ use rune::{
     El, Transition,
     compose::{Compositor, Frame},
     el,
-    render::EffectSite,
+    render::{EffectPhase, EffectSite, KIND_EFFECT},
 };
+use rune_fx::{Fx, FxFrame, FxLayer, FxOptions, FxRenderer, FxSlot, LensParams, Shape, rgb};
 
 /// The large door: the welcome screen's, and the one that opens a portfolio.
 pub const DOOR: u32 = 1;
@@ -42,6 +43,13 @@ pub const ROOM: u32 = 5;
 pub const SHEEN: u32 = 6;
 /// The faint glow on the edge of a pressable surface nearest the pointer.
 pub const LIFT: u32 = 7;
+/// A floating panel's glass.
+pub const GLASS: u32 = 8;
+
+/// How long the refresh's pulse takes to cross the page.
+pub const PULSE_LIFE: f64 = 0.95;
+/// How long light runs along the total for a new record.
+pub const FLOURISH: f64 = 1.3;
 
 /// The uniform every slot of the door and room shaders writes, in bytes: the door's own
 /// 48-byte struct and the room's larger one share one buffer and one stride.
@@ -105,36 +113,54 @@ pub fn pull(size: f32) -> El {
 }
 
 /// The room's light on the wall, filling its parent. `radius` is the parent's corner radius, so
-/// the light is cut to the same rounded pane as the page it falls on.
-pub fn room(radius: f32) -> El {
+/// the light is cut to the same rounded pane as the page it falls on. `pulse` is
+/// `[started, x, y, 1]` while a refresh's pulse crosses the page, or zeros.
+pub fn room(radius: f32, pulse: [f32; 4]) -> El {
     el().absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .radius(radius)
         .effect(ROOM)
+        .effect_data(pulse)
         .a11y_hidden()
         .transition(Transition::none())
 }
 
 /// The steel sheen over a figure: a soft band of light whose place follows the room's light.
-/// `strength` is how much of the effect to show.
-pub fn sheen(strength: f32) -> El {
+/// `strength` is how much of the effect to show; `run` is 0 when still, or 0 to 1 while a new
+/// record sends one line of light along the metal.
+pub fn sheen(strength: f32, run: f32) -> El {
     el().absolute(0.0, 0.0)
         .w_full()
         .h_full()
         .effect(SHEEN)
         .effect_backdrop(true)
-        .effect_data([strength, 0.0, 0.0, 0.0])
+        .effect_data([strength, run, 0.0, 0.0])
         .a11y_hidden()
         .transition(Transition::none())
 }
 
 /// A pressable surface's edge catching the light: a faint glow on the side nearest the pointer.
-pub fn lift() -> El {
+/// `radius` is the surface's corner radius, so the glow follows a rounded edge.
+pub fn lift(radius: f32) -> El {
     el().absolute(0.0, 0.0)
         .w_full()
         .h_full()
+        .radius(radius)
         .effect(LIFT)
+        .a11y_hidden()
+        .transition(Transition::none())
+}
+
+/// The glass a floating panel is made of: a lens over what lies behind it, frosted and lit at
+/// the rim facing the room's light. The panel's own content is drawn over it by the caller.
+pub fn glass() -> El {
+    el().absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(12.0)
+        .effect(GLASS)
+        .effect_backdrop(true)
         .a11y_hidden()
         .transition(Transition::none())
 }
@@ -402,6 +428,11 @@ pub struct Gfx {
     doors: HashMap<u32, Door>,
     /// The one light in the room. Every door is lit from it.
     light: Option<Light>,
+    /// Rune's effect layers (glass, glows, one-shots), on the same compositor as the door.
+    fx: Option<(rune::compose::DeviceKey, FxRenderer)>,
+    /// How far each pressable surface has lifted toward the pointer, by slot, so the glow eases
+    /// in and out instead of popping.
+    lifts: HashMap<u32, f32>,
     /// The frame that first found the compositor, whose view still shows the picture: draw one
     /// more so the door appears without waiting for the owner to touch something.
     wake: bool,
@@ -769,13 +800,89 @@ impl Compositor<State> for Gfx {
         };
         let (tint, strength) = (light.tint, light.strength);
         let dark = frame.dark;
+        // Every floating panel's glass is one rune-fx lens, lit from the room's light.
+        let mut layers: Vec<FxLayer> = Vec::new();
+        let mut placements: Vec<FxSlot> = Vec::new();
+        let mut layer_at: HashMap<u32, usize> = HashMap::new();
+        for (n, i) in f.rt.instances.iter().enumerate() {
+            if i.params[1] != KIND_EFFECT {
+                continue;
+            }
+            if f.rt.marks.get(n).copied().unwrap_or(0) != GLASS {
+                continue;
+            }
+            let k = i.params[3];
+            let [x, y, w, h] = i.rect.map(|v| v / k);
+            let radius = i.radii.iter().fold(0.0f32, |a, v| a.max(v.abs())) / k;
+            let centre = [x + w / 2.0, y + h / 2.0];
+            let angle = (light.at[1] - centre[1]).atan2(light.at[0] - centre[0]);
+            // A small panel gets a small bevel: a 46-point readout must not be mostly rim.
+            let side = w.min(h);
+            let params = LensParams {
+                bevel: (side * 0.18).clamp(6.0, 16.0),
+                depth: (side * 0.24).clamp(8.0, 20.0),
+                dispersion: 0.10,
+                magnification: 1.02,
+                presence: 1.0,
+                frost: 0.8,
+                // The panel's own shadow is Rune's; the lens only lights its edge.
+                shadow: 0.0,
+                rim: 1.3,
+                light_angle: angle,
+                tint: if dark { rgb(0x000000) } else { rgb(0xffffff) },
+                tint_amount: 0.0,
+                ..Default::default()
+            };
+            layer_at.insert(n as u32, layers.len());
+            layers.push(
+                Fx::lens(params)
+                    .on(Shape::rounded(x, y, w, h, radius))
+                    .at(t as f32),
+            );
+            placements.push(FxSlot::default().scale(k).clip(i.clip, i.fade));
+        }
+        if self.fx.as_ref().is_none_or(|(made, _)| *made != key) {
+            let mut fx = FxRenderer::new(device, f.format, FxOptions { dither: true });
+            fx.add_format(device, wgpu::TextureFormat::Rgba16Float);
+            self.fx = Some((key, fx));
+        }
+        let fx = &mut self.fx.as_mut().expect("just made").1;
+        fx.set_srgb_blend(f.srgb_blend());
+        if !layers.is_empty() {
+            fx.prepare_with_slots(
+                device,
+                queue,
+                &FxFrame {
+                    viewport: [f.size.0, f.size.1],
+                    scale: 1.0,
+                    layers: &layers,
+                    backdrop: None,
+                    sources: &[],
+                },
+                &placements,
+            );
+        }
         let mut seen: HashSet<u32> = HashSet::new();
+        let mut lift_seen: HashSet<u32> = HashSet::new();
         let mut opening = false;
         let mut slot = 0usize;
         let clock = f.rt.clock;
+        let dt = f.dt.max(1.0 / 240.0) as f32;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, site| {
-            use rune::render::EffectPhase;
+            if let Some(&index) = layer_at.get(&site.index) {
+                match phase {
+                    EffectPhase::Backdrop(encoder) => {
+                        if let Some(backdrop) = site.backdrop {
+                            fx.blur_backdrop(device, queue, encoder, backdrop, index);
+                        }
+                    }
+                    EffectPhase::Draw(pass) => {
+                        fx.draw_layer_in(pass, site.format, site.origin, index);
+                    }
+                }
+                return;
+            }
             let EffectPhase::Draw(pass) = phase else {
                 return;
             };
@@ -787,12 +894,19 @@ impl Compositor<State> for Gfx {
             };
             let at = if site.mark == ROOM {
                 seen.insert(ROOM);
+                // A refresh's pulse, while it runs, in the same pass as the room's light.
+                let progress = if site.data[3] > 0.5 {
+                    let start = t - (clock - site.data[0] as f64);
+                    ((t - start) / PULSE_LIFE) as f32
+                } else {
+                    2.0
+                };
                 Slot {
-                    center: [0.0, 0.0],
+                    center: [site.data[1], site.data[2]],
                     radius: 0.0,
                     split: 0.0,
                     light: light.at,
-                    spin: 0.0,
+                    spin: progress,
                     gain: strength,
                     origin: site.origin,
                     encode,
@@ -805,10 +919,34 @@ impl Compositor<State> for Gfx {
                 }
             } else if site.mark == LIFT {
                 seen.insert(LIFT);
+                lift_seen.insert(site.index);
+                // The glow eases in as the pointer arrives and out as it leaves.
+                let [rx, ry, rw, rh] = site.instance.rect;
+                let inside = pointer.is_some_and(|(x, y)| {
+                    let (x, y) = (x * site.scale, y * site.scale);
+                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+                });
+                let ease = if reduced {
+                    1.0
+                } else {
+                    1.0 - 0.82f32.powf(dt * 60.0)
+                };
+                let lift = self.lifts.entry(site.index).or_insert(0.0);
+                *lift += ((if inside { 1.0 } else { 0.0 }) - *lift) * ease;
+                if *lift < 0.001 {
+                    *lift = 0.0;
+                }
+                let lift = *lift;
+                let radius = site
+                    .instance
+                    .radii
+                    .iter()
+                    .fold(0.0f32, |a, v| a.max(v.abs()))
+                    / site.scale.max(1e-3);
                 let pointer = pointer.map(|(x, y)| [x, y]).unwrap_or([f32::MIN, f32::MIN]);
                 Slot {
                     center: [0.0, 0.0],
-                    radius: 0.0,
+                    radius,
                     split: 0.0,
                     light: pointer,
                     spin: 0.0,
@@ -819,7 +957,7 @@ impl Compositor<State> for Gfx {
                     window,
                     rect,
                     color: [0.84, 0.91, 0.97, 0.0],
-                    flags: [if dark { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+                    flags: [if dark { 1.0 } else { 0.0 }, lift, 0.0, 0.0],
                     scale: site.scale,
                 }
             } else if site.mark == SHEEN {
@@ -923,6 +1061,7 @@ impl Compositor<State> for Gfx {
                 }
             } else if matches!(site.mark, DOOR | MARK | PULL) {
                 let (center, radius) = geometry(site);
+                let busy = site.data[1] > 0.5;
                 let door = self
                     .doors
                     .entry(site.mark)
@@ -931,10 +1070,16 @@ impl Compositor<State> for Gfx {
                     t,
                     reduced,
                     site.data[0],
-                    site.data[1] > 0.5,
+                    busy,
                     site.data[2],
                     site.data[3] > 0.5,
                 );
+                // While something is being thought about, the light on the steel breathes.
+                let breath = if busy && !reduced {
+                    1.0 + 0.13 * (t as f32 * 1.7).sin()
+                } else {
+                    1.0
+                };
                 seen.insert(site.mark);
                 let light_at = [light.at[0] * site.scale, light.at[1] * site.scale];
                 Slot {
@@ -943,7 +1088,7 @@ impl Compositor<State> for Gfx {
                     split: 0.0,
                     light: light_direction(light_at, center, radius),
                     spin: door.spin * TAU,
-                    gain: 1.0,
+                    gain: breath,
                     origin: site.origin,
                     encode,
                     mode: 0.0,
@@ -976,6 +1121,7 @@ impl Compositor<State> for Gfx {
             self.opening_start = None;
         }
         self.doors.retain(|mark, _| seen.contains(mark));
+        self.lifts.retain(|index, _| lift_seen.contains(index));
     }
 }
 
@@ -1269,18 +1415,30 @@ fn room(p: vec2f) -> vec4f {
         lit = (0.34 + 0.14 * m) * fall;
         shade = 0.020 * smoothstep(0.8, 1.8, r);
     }
+    // A refresh's pulse: one soft ring leaving the door and crossing the wall, once.
+    var ring = 0.0;
+    let age = u.spin;
+    if (age >= 0.0 && age < 1.0) {
+        let d = length(p - u.center);
+        let front = age * (win.x + win.y) * 0.62;
+        let width = 80.0 + 70.0 * age;
+        let fade = (1.0 - age) * (1.0 - age);
+        ring = exp(-pow((d - front) / width, 2.0)) * fade * select(0.10, 0.075, dark);
+    }
     // A static half-LSB dither: soft gradients must not band on an 8-bit target.
     let grain = (hash2(floor(p * u.scale)) - 0.5) / 255.0;
-    let alpha = clamp(lit + shade + grain, 0.0, 1.0);
+    let alpha = clamp(lit + shade + ring + grain, 0.0, 1.0);
     // On paper the day's colour is a hint: the light is warm white with a trace of it.
     let tint = select(mix(u.color.rgb, vec3f(1.0, 0.995, 0.98), 0.80), u.color.rgb, dark);
-    let rgb = tint * lit;
+    let rgb = tint * lit + vec3f(0.86, 0.93, 1.0) * ring;
     if (alpha <= 0.0001) { return vec4f(0.0); }
     return encode_out(rgb / alpha, alpha);
 }
 
 // A pressable surface lifting toward the pointer: the edge nearest it catches a little light.
 fn lift(p: vec2f) -> vec4f {
+    let hover = u.flags.y;
+    if (hover <= 0.001) { return vec4f(0.0); }
     let r = u.rect;
     let half = r.zw * 0.5;
     let centre = r.xy + half;
@@ -1294,7 +1452,20 @@ fn lift(p: vec2f) -> vec4f {
     let facing = select(0.0, clamp(dot(reach, toward), 0.0, 1.0), away > 1.0);
     let glow = exp(min(sd, 0.0) / 9.0) * (0.30 + 0.70 * facing * facing);
     let dark = u.flags.x > 0.5;
-    let alpha = glow * select(0.10, 0.055, dark);
+    let alpha = glow * select(0.16, 0.11, dark) * hover;
+    return encode_out(u.color.rgb, alpha);
+}
+
+// A refresh's pulse of light: one soft ring leaving the door and crossing the page, once.
+fn pulse(p: vec2f) -> vec4f {
+    let age = clamp(u.spin, 0.0, 1.0);
+    let d = length(p - u.light);
+    let front = age * (u.window.x + u.window.y) * 0.62;
+    let width = 80.0 + 70.0 * age;
+    let ring = exp(-pow((d - front) / width, 2.0));
+    let fade = (1.0 - age) * (1.0 - age);
+    let alpha = ring * fade * select(0.10, 0.085, u.flags.x > 0.5);
+    if (alpha <= 0.0005) { return vec4f(0.0); }
     return encode_out(u.color.rgb, alpha);
 }
 
@@ -1308,6 +1479,9 @@ fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let frag = pos.xy + u.origin;
     let p = frag / u.scale;
+    if (u.mode > 3.5) {
+        return pulse(p);
+    }
     if (u.mode > 2.0) {
         return lift(p);
     }
@@ -1381,14 +1555,27 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let band = exp(-pow((across - centre) / 0.24, 2.0));
 
     let strength = clamp(u.flags.z, 0.0, 1.0);
+    // A new record: one line of light runs along the metal, once.
+    let run = u.flags.w;
+    var extra_dim = 0.0;
+    var extra_light = 0.0;
+    if (run > 0.0 && run < 1.0) {
+        let envelope = sin(run * 3.14159265);
+        let sweep = exp(-pow((across - (run * 1.6 - 0.3)) / 0.14, 2.0)) * envelope;
+        extra_dim = 0.15 * (1.0 - sweep) * envelope;
+        extra_light = 0.45 * sweep;
+    }
     if (dark) {
         // White digits have nowhere brighter to go: the rest of the steel dims a little, so the
         // band reads as the lit part.
-        return encode_out(vec3f(0.0), ink * (1.0 - band) * 0.10 * strength);
+        return encode_out(
+            vec3f(0.0),
+            ink * ((1.0 - band) * 0.10 * strength + extra_dim),
+        );
     }
     // Ink on paper lightens toward steel where the light runs across it.
-    let alpha = ink * band * 0.22 * strength;
-    return encode_out(u.color.rgb, alpha);
+    let alpha = ink * band * 0.22 * strength + ink * extra_light;
+    return encode_out(u.color.rgb, min(alpha, 0.9));
 }
 "#;
 

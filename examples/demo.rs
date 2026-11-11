@@ -102,6 +102,7 @@ fn main() {
         .flatten()
         .collect();
         s.price_updates += 1;
+        s.pulse_started = Some(s.now);
     }
     /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
     fn phone(s: &mut State, page: Page) {
@@ -161,6 +162,34 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            // The door thinking: the tumblers turn slowly and the steel breathes, as it does
+            // while an answer is being composed.
+            ("door-thinking", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                s.door_busy = true;
+            }),
+            // A new record: light runs along the total once. The demo's statement is a record.
+            ("record", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+            }),
+            // The value chart drawing itself in, with the light running along its head.
+            ("performance-draw", |s| {
+                scene(s, Page::Performance);
+                s.skip_opening();
+            }),
+            // A chart readout, as hovering the line leaves it: the smallest floating panel.
+            ("readout", |s| {
+                scene(s, Page::Performance);
+                s.chart_hover = Some(520.0);
+            }),
+            ("readout-light", |s| {
+                scene(s, Page::Performance);
+                s.chart_hover = Some(520.0);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("performance-span", |s| {
                 scene(s, Page::Performance);
                 s.measure.span = Some((2, 14));
@@ -217,6 +246,29 @@ fn main() {
             ("settings", |s| scene(s, Page::Settings)),
             ("palette", |s| {
                 scene(s, Page::Overview);
+                s.open_palette();
+            }),
+            // The palette's glass over the busiest pages: a treemap of colour and a chart.
+            ("palette-map", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+                s.open_palette();
+            }),
+            ("palette-map-light", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.open_palette();
+            }),
+            ("palette-chart", |s| {
+                scene(s, Page::Performance);
+                s.open_palette();
+            }),
+            ("palette-chart-light", |s| {
+                scene(s, Page::Performance);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
                 s.open_palette();
             }),
             ("add-position", |s| {
@@ -427,6 +479,12 @@ fn main() {
             // A refresh that moves two prices: what moved flashes once in its colour.
             ("price-moves", |s| {
                 scene(s, Page::Allocation);
+                moved_prices(s);
+            }),
+            // The pulse a refresh sends from the door, without the opening over it.
+            ("pulse", |s| {
+                scene(s, Page::Allocation);
+                s.skip_opening();
                 moved_prices(s);
             }),
             ("phone-price-moves", |s| {
