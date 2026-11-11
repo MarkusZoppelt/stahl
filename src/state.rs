@@ -479,78 +479,89 @@ pub struct SettingsForm {
     pub error: Option<String>,
 }
 
-/// How many classes the rebalance bar prepares live values for.
+/// How many classes the rebalance rows prepare live values for.
 const REBALANCE_SLOTS: usize = 12;
 
-/// What produced the split the bar is showing.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RebalanceOrigin {
-    /// The portfolio as it is.
-    Today,
+/// What the plan on the Rebalance page follows.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RebalancePlan {
+    /// Every class part of the way from what it holds toward its target, at
+    /// [`RebalancePage::fraction`].
+    Blend,
+    /// Set by hand, one class against cash. `names` says which classes `values` belong to,
+    /// so a portfolio that changed under the plan isn't read against the wrong classes.
+    Adjusted {
+        names: Vec<String>,
+        values: Vec<f64>,
+    },
     /// New money, or a withdrawal, placed by buying or selling only.
     Flow(f64),
-    /// Every class at its policy target.
-    Full,
-    /// Halfway back, and only for classes outside their band.
-    Conservative,
-    /// A boundary the owner dragged or stepped.
-    Custom,
 }
 
-/// The allocation being dragged on the Rebalance page. Live values move the bar without
-/// rebuilding the view; the view must not read `press`, `held`, `drag_values`, `step` or
-/// `painted`.
+/// The plan being played with on the Rebalance page. Live values move the rows and the bars
+/// without rebuilding the view; the view must not read `press`, `step` or `painted`.
 pub struct RebalancePage {
-    /// Class names `values` belong to. A mismatch means the portfolio changed under a drag.
-    pub names: Vec<String>,
-    pub values: Vec<f64>,
-    pub origin: RebalanceOrigin,
+    pub plan: RebalancePlan,
+    /// Where the blend slider sits, 0 to 1. Kept while a row is adjusted by hand, so Reset
+    /// comes back to it.
+    pub fraction: f64,
     /// New money, or a withdrawal. Parsed with [`parse_number`].
     pub amount: TextEdit,
     pub amount_error: Option<String>,
-    /// A boundary is held. The bar follows the pointer on a quicker spring.
+    /// A pointer is on the slider or a row's thumb. Everything follows it on a quicker spring.
     pub dragging: bool,
-    /// The bar has been measured, so its segments can follow live rects.
+    /// The controls have been measured, so their thumbs can follow live values.
     pub placed: bool,
+    /// The widths of the slider, one row's track, and the plot bar, in points.
+    pub rail_width: f32,
+    pub rail_height: f32,
+    pub track_width: f32,
     pub bar_width: f32,
-    pub boundary: Option<usize>,
-    pub press: Vec<f64>,
-    pub held: Option<f64>,
-    pub drag_values: Vec<f64>,
-    /// The quarter point the dragged class last committed at, so a drag rebuilds the
-    /// view only when the figures under the bar would change.
+    /// The plan's values when a drag started, and the share it started at for a row.
+    pub press_values: Vec<f64>,
+    pub press_at: f64,
+    /// The row the pointer took, if it took one.
+    pub row: Option<usize>,
+    /// The grain the figures last committed at, so a drag rebuilds the view only when what
+    /// it shows would change.
     pub step: i64,
-    /// What the bar last drew, so a change from anywhere else glides it there.
+    /// What the controls last drew, so a change from anywhere else glides them there.
     pub painted: u64,
-    /// Each class's bar, its in-band lane under it, and the boundary after it.
-    pub rects: Vec<Live<[f32; 4]>>,
-    pub lanes: Vec<Live<[f32; 4]>>,
-    pub offsets: Vec<Live<[f32; 2]>>,
+    /// The slider's filled part and its thumb.
+    pub rail_fill: Live<[f32; 4]>,
+    pub rail_thumb: Live<[f32; 4]>,
+    /// Each row's thumb, today's slice of the plot and the plan's.
+    pub thumbs: Vec<Live<[f32; 2]>>,
+    pub ghosts: Vec<Live<[f32; 4]>>,
+    pub bars: Vec<Live<[f32; 4]>>,
 }
 
 impl RebalancePage {
     fn new() -> Self {
         let rects = || (0..REBALANCE_SLOTS).map(|_| Live::new([0.0; 4])).collect();
         Self {
-            names: Vec::new(),
-            values: Vec::new(),
-            origin: RebalanceOrigin::Today,
+            plan: RebalancePlan::Blend,
+            fraction: 0.0,
             amount: TextEdit::new(""),
             amount_error: None,
             dragging: false,
             placed: false,
+            rail_width: 0.0,
+            rail_height: 0.0,
+            track_width: 0.0,
             bar_width: 0.0,
-            boundary: None,
-            press: Vec::new(),
-            held: None,
-            drag_values: Vec::new(),
+            press_values: Vec::new(),
+            press_at: 0.0,
+            row: None,
             step: 0,
             painted: 0,
-            rects: rects(),
-            lanes: rects(),
-            offsets: (0..REBALANCE_SLOTS)
+            rail_fill: Live::new([0.0; 4]),
+            rail_thumb: Live::new([0.0; 4]),
+            thumbs: (0..REBALANCE_SLOTS)
                 .map(|_| Live::new([0.0, 0.0]))
                 .collect(),
+            ghosts: rects(),
+            bars: rects(),
         }
     }
 }
@@ -2066,9 +2077,10 @@ impl State {
         );
     }
 
-    /// Prices again, and the bar goes back to the portfolio as it is.
+    /// Prices again, and the plan goes back to the portfolio as it is.
     pub fn refresh_rebalance(&mut self) {
-        self.rebalance.origin = RebalanceOrigin::Today;
+        self.rebalance.plan = RebalancePlan::Blend;
+        self.rebalance.fraction = 0.0;
         self.rebalance.amount.replace_text("");
         self.rebalance.amount_error = None;
         self.load_simulation();

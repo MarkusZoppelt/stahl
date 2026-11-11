@@ -15,7 +15,7 @@ use portfolio_rs::{
 };
 use stahl::{
     app, demo,
-    state::{Confirm, FolderPrompt, Page, PendingOpen, RebalanceOrigin, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
     statement::Since,
     update::Installation,
 };
@@ -178,19 +178,28 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
-            ("rebalance-dragged", |s| {
+            ("rebalance-partway", |s| {
                 scene(s, Page::Rebalance);
-                // Ten points out of Crypto, into Cash.
-                stahl::view::rebalance::nudge(s, 3, -20);
+                stahl::view::rebalance::set_blend(s, 0.6);
             }),
-            ("rebalance-full", |s| {
+            ("rebalance-partway-light", |s| {
                 scene(s, Page::Rebalance);
-                s.rebalance.origin = RebalanceOrigin::Full;
+                stahl::view::rebalance::set_blend(s, 0.6);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("rebalance-target", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 1.0);
+            }),
+            ("rebalance-adjusted", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 0.6);
+                stahl::view::rebalance::set_share(s, 0, 55.0);
             }),
             ("rebalance-invest", |s| {
                 scene(s, Page::Rebalance);
-                s.rebalance.amount.replace_text("2000");
-                s.rebalance.origin = RebalanceOrigin::Flow(2000.0);
+                stahl::view::rebalance::set_amount(s, 2000.0);
             }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {

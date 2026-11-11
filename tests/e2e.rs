@@ -197,7 +197,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Performance, "Time-weighted return"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full rebalance"),
+        (Page::Rebalance, "I have this much to invest"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -2667,7 +2667,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Performance, "Time-weighted return"),
         (Page::Allocation, "The outer ring shows your policy targets"),
         (Page::Review, "Allocation vs target"),
-        (Page::Rebalance, "Full rebalance"),
+        (Page::Rebalance, "I have this much to invest"),
         (Page::Policy, "Balanced Growth"),
         (Page::Documents, "Weekly report"),
         (Page::Briefing, "Cash buffer"),
@@ -3113,118 +3113,159 @@ fn moving_between_pages_knows_which_way_and_a_refresh_flashes_what_moved() {
 }
 
 #[test]
-fn a_rebalance_boundary_moves_by_drag_and_by_key() {
+fn the_rebalance_slider_moves_the_plan_and_the_total_stays() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Rebalance.key());
     assert!(app.has_text("Stahl never trades."));
-    let handle = app
+    assert!(app.has_text("Nothing changes yet"));
+    let rail = app
         .rt
         .elements()
         .into_iter()
-        .find(|element| element.key.as_deref() == Some("rebalance-handle-0"))
-        .expect("the first boundary");
-    assert_eq!(handle.role, "slider");
-    assert!(
-        handle
-            .label
-            .as_deref()
-            .is_some_and(|label| label.contains("Stocks") && label.contains("Bonds")),
-        "the handle names the classes it separates"
-    );
-
-    let bar = app
-        .rt
-        .elements()
-        .into_iter()
-        .find(|element| element.key.as_deref() == Some("rebalance-bar"))
-        .expect("the bar");
-    let [x, y, w, h] = bar.rect;
+        .find(|element| element.key.as_deref() == Some("rebalance-rail"))
+        .expect("the slider");
+    assert_eq!(rail.role, "slider");
+    assert_eq!(rail.label.as_deref(), Some("How far to rebalance"));
+    let [x, y, w, h] = rail.rect;
     let mid = y + h / 2.0;
-    // Crypto | Cash sits at 72% of the demo book; its mark, every class before it on
-    // target, is at 80%. Grab it and pull it most of the way there: the magnet does the rest.
-    let from = x + w * 0.72;
-    app.rt.pointer_move(from, mid);
+    // Drag the slider all the way to the right: every class goes to its target.
+    app.rt.pointer_move(x + 2.0, mid);
     app.rt.frame(1.0 / 60.0);
-    app.rt.pointer_down(from, mid);
+    app.rt.pointer_down(x + 2.0, mid);
     app.rt.frame(1.0 / 60.0);
     let skipped = app.rt.live_only_events();
-    let mut to = from;
-    for _ in 0..12 {
-        to += w * 0.0062;
-        app.rt.pointer_move(to, mid);
+    // Small moves: the thumbs follow, and the view only runs when a figure would change.
+    let mut at = x + 2.0;
+    for _ in 0..30 {
+        at += 3.0;
+        app.rt.pointer_move(at, mid);
         app.rt.frame(1.0 / 60.0);
     }
     assert!(
         app.rt.live_only_events() > skipped,
         "a drag must not rebuild the view on every move"
     );
-    app.rt.pointer_up(to, mid);
+    for _ in 0..12 {
+        at += w * 0.08;
+        app.rt.pointer_move(at, mid);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x + w + 40.0, mid);
     app.settle();
-    let state = &app.rt.state.rebalance;
-    assert!(
-        state.origin == stahl::state::RebalanceOrigin::Custom,
-        "letting go keeps the split"
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend,
+        "letting go keeps the blend"
     );
-    let total: f64 = state.values.iter().sum();
-    let before: f64 = state.values[..4].iter().sum();
-    assert!(
-        (before / total - 0.8).abs() < 1e-9,
-        "the boundary snapped onto its mark, at {}",
-        before / total
-    );
-    assert!(
-        (total - 107_400.0).abs() < 0.01 && state.values.iter().all(|value| *value >= 0.0),
-        "the total stays and nothing goes negative"
-    );
-    assert!(app.has_text("Increase") && app.has_text("Reduce"));
+    assert!((app.rt.state.rebalance.fraction - 1.0).abs() < 0.02);
+    assert!(app.has_text("On target"));
+    assert!(app.has_text("Buy €13,700.00"), "Stocks goes to 50%");
+    assert!(app.has_text("Sell €16,260.00"), "Crypto comes down to 10%");
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!((values.iter().sum::<f64>() - 107_400.0).abs() < 0.01);
+    assert!(values.iter().all(|value| *value >= -1e-9));
 
-    // The keyboard: Left moves a boundary half a point, Return puts it back on its mark.
-    app.rt.update(|_, tx| tx.focus("rebalance-handle-3", true));
+    // The keyboard: a point an arrow, five on Page keys, the ends on Home and End.
+    app.rt.update(|_, tx| tx.focus("rebalance-rail", true));
     app.rt.frame(1.0 / 60.0);
-    app.press(Key::Left);
-    app.press(Key::Left);
-    let moved: f64 = app.rt.state.rebalance.values[..4].iter().sum();
-    assert!(
-        (moved / total - 0.79).abs() < 1e-9,
-        "two steps left is a point"
-    );
-    app.press(Key::Enter);
-    let back: f64 = app.rt.state.rebalance.values[..4].iter().sum();
-    assert!(
-        (back / total - 0.8).abs() < 1e-9,
-        "Return snaps to the mark"
-    );
+    app.press(Key::Home);
+    assert!(app.rt.state.rebalance.fraction < 1e-9);
+    assert!(app.has_text("Nothing changes yet"));
+    app.press(Key::Right);
+    assert!((app.rt.state.rebalance.fraction - 0.01).abs() < 1e-9);
+    app.press(Key::PageUp);
+    assert!((app.rt.state.rebalance.fraction - 0.06).abs() < 1e-9);
+    app.press(Key::End);
+    assert!((app.rt.state.rebalance.fraction - 1.0).abs() < 1e-9);
 }
 
 #[test]
-fn a_preset_moves_the_bar_and_is_what_gets_copied() {
+fn a_row_moves_by_pointer_and_by_key_and_cash_takes_the_difference() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Rebalance.key());
-    app.click("rebalance-presets/segment1");
+    let thumb = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("rebalance-thumb-0"))
+        .expect("the Stocks thumb");
+    assert_eq!(thumb.role, "slider");
     assert_eq!(
-        app.rt.state.rebalance.origin,
-        stahl::state::RebalanceOrigin::Full
+        thumb.label.as_deref(),
+        Some("Stocks after rebalancing"),
+        "the thumb names what it sets"
     );
-    assert!(app.has_text("Full Rebalance to Targets"));
-    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
-    assert!(markdown.contains("## Full Rebalance to Targets"));
-    assert!(markdown.contains("| Stocks | Increase |"));
-    assert!(markdown.contains("Stahl never trades."));
-    // Every boundary sits on its mark, so every handle shows it.
-    for index in 0..4 {
-        let handle = app
-            .rt
-            .elements()
-            .into_iter()
-            .find(|element| element.key.as_deref() == Some(&format!("rebalance-handle-{index}")))
-            .expect("a handle");
-        assert!(handle.label.is_some());
+    let [x, y, w, h] = thumb.rect;
+    assert!(h >= 44.0, "a finger needs 44 points: {h}");
+    let (mid, start) = (y + h / 2.0, x + w / 2.0);
+    app.rt.pointer_move(start, mid);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(start, mid);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=8 {
+        app.rt.pointer_move(start + step as f32 * 14.0, mid);
+        app.rt.frame(1.0 / 60.0);
     }
+    app.rt.pointer_up(start + 112.0, mid);
+    app.settle();
+    assert!(matches!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Adjusted { .. }
+    ));
+    assert!(app.has_text("Adjusted by hand"));
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!((values.iter().sum::<f64>() - 107_400.0).abs() < 0.01);
+    assert!(
+        values[0] > 40_000.0 && values[4] < 30_000.0,
+        "Stocks grew out of cash: {values:?}"
+    );
 
-    app.click("rebalance-presets/segment0");
-    assert!(app.has_text("As it is"));
-    let markdown = stahl::view::rebalance::markdown(&app.rt.state);
-    assert!(markdown.contains("No trades."));
+    // Return puts the row on its target tick.
+    app.rt.update(|_, tx| tx.focus("rebalance-thumb-0", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Enter);
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!(
+        (values[0] - 53_700.0).abs() < 1.0,
+        "Stocks on 50%: {values:?}"
+    );
+
+    // An arrow is a point of the portfolio, Page Up five.
+    app.press(Key::Left);
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!(
+        (values[0] - 52_626.0).abs() < 3.0,
+        "a point down: {values:?}"
+    );
+    app.press(Key::PageDown);
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!(
+        (values[0] - 47_256.0).abs() < 3.0,
+        "five points down: {values:?}"
+    );
+
+    // Reset goes back to the slider.
+    app.click("rebalance-reset");
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend
+    );
+    assert!(app.has_text("Nothing changes yet"));
+}
+
+#[test]
+fn a_row_cannot_spend_more_cash_than_there_is() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Rebalance.key());
+    stahl::view::rebalance::set_share(&mut app.rt.state, 0, 90.0);
+    app.settle();
+    let values = stahl::view::rebalance::values(&app.rt.state);
+    assert!(
+        values.iter().all(|value| *value >= -1e-9),
+        "nothing goes negative: {values:?}"
+    );
+    assert!((values.iter().sum::<f64>() - 107_400.0).abs() < 0.01);
+    assert!(values[4] < 0.01, "cash ran out: {values:?}");
 }
 
 #[test]
@@ -3235,11 +3276,12 @@ fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
     app.click("rebalance-amount");
     app.type_text("2000");
     assert_eq!(
-        app.rt.state.rebalance.origin,
-        stahl::state::RebalanceOrigin::Flow(2000.0)
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Flow(2000.0)
     );
-    assert!(app.has_text("Buying only"), "new money is placed by buying");
-    assert!(app.has_text("Where new money goes"));
+    assert!(app.has_text("Invest €2,000.00 by buying only"));
+    assert!(app.has_text("Buy €2,000.00"), "the rows say where it goes");
+    assert!(app.exists("rebalance-clear"), "there is a way back");
 
     app.command('a', false);
     app.press(Key::Backspace);
@@ -3253,4 +3295,20 @@ fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
     app.press(Key::Backspace);
     app.type_text("-500000");
     assert!(app.has_text("That's more than the portfolio."));
+
+    app.command('a', false);
+    app.press(Key::Backspace);
+    app.type_text("-500");
+    assert!(
+        app.has_text("Sell €500.00"),
+        "a withdrawal sells only: {}",
+        stahl::view::rebalance::markdown(&app.rt.state)
+    );
+
+    app.click("rebalance-clear");
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend
+    );
+    assert!(app.has_text("Nothing changes yet"));
 }
