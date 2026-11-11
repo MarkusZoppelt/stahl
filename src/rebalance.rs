@@ -140,8 +140,7 @@ fn total_of(classes: &[Class]) -> f64 {
 }
 
 /// No class goes below this. Cash, in particular, cannot go below zero.
-pub fn floor_of(class: &Class) -> f64 {
-    let _ = class.cash;
+pub fn floor_of(_class: &Class) -> f64 {
     0.0
 }
 
@@ -185,8 +184,31 @@ pub fn inside_band(class: &Class, value: f64, total: f64) -> Option<bool> {
     Some((share - target).abs() <= band + 1e-6)
 }
 
-/// Left-class values at which either adjacent class would sit on its target, if that
-/// point is reachable without taking the other below its floor.
+/// Where each boundary sits when every class is on target, as a fraction of the bar.
+///
+/// Boundary `i` follows class `i`. Targets are scaled by their sum, as [`full`] scales
+/// them, and a class with no target ends up at zero, so these are exactly the boundaries
+/// a full rebalance lands on. `None` when no class has a target.
+pub fn target_boundaries(classes: &[Class]) -> Option<Vec<f64>> {
+    let sum: f64 = classes.iter().filter_map(|class| class.target).sum();
+    if sum <= 0.0 {
+        return None;
+    }
+    let mut at = 0.0;
+    Some(
+        classes
+            .iter()
+            .take(classes.len().saturating_sub(1))
+            .map(|class| {
+                at += class.target.unwrap_or(0.0).max(0.0) / sum;
+                at.min(1.0)
+            })
+            .collect(),
+    )
+}
+
+/// The left-class value that puts boundary `index` on its marked target, if moving this
+/// boundary alone can reach it.
 pub fn snap_points(classes: &[Class], values: &[f64], index: usize, total: f64) -> Vec<f64> {
     let Some(right) = index
         .checked_add(1)
@@ -197,23 +219,24 @@ pub fn snap_points(classes: &[Class], values: &[f64], index: usize, total: f64) 
     if total <= 0.0 {
         return Vec::new();
     }
+    let Some(at) = target_boundaries(classes).and_then(|marks| marks.get(index).copied()) else {
+        return Vec::new();
+    };
+    let before: f64 = values[..index]
+        .iter()
+        .copied()
+        .map(finite)
+        .map(|value| value.max(0.0))
+        .sum();
     let pair = finite(values[index]).max(0.0) + finite(values[right]).max(0.0);
-    let floor_l = floor_of(&classes[index]);
-    let floor_r = floor_of(&classes[right]);
-    let mut points = Vec::new();
-    if let Some(target) = classes[index].target {
-        let at = target / 100.0 * total;
-        if (floor_l..=pair - floor_r).contains(&at) {
-            points.push(at);
-        }
+    let want = at * total - before;
+    let (floor_l, floor_r) = (floor_of(&classes[index]), floor_of(&classes[right]));
+    // A hair of slack, so a boundary already on its mark counts as reachable.
+    if want >= floor_l - 1e-9 && want <= pair - floor_r + 1e-9 {
+        vec![want.clamp(floor_l, pair - floor_r)]
+    } else {
+        Vec::new()
     }
-    if let Some(target) = classes[right].target {
-        let at = pair - target / 100.0 * total;
-        if (floor_l..=pair - floor_r).contains(&at) {
-            points.push(at);
-        }
-    }
-    points
 }
 
 /// The nearer snap point, when `want` is within `engage_share` of one.
@@ -594,10 +617,9 @@ mod tests {
     }
 
     #[test]
-    fn a_boundary_snaps_to_the_nearer_reachable_target_and_holds() {
+    fn a_boundary_snaps_to_its_marked_target_and_holds() {
         let classes = drifted();
         let start = [80.0, 20.0];
-        // Stocks' target is 50, Bonds' is 50, so both snap points are 50.
         let near = drag(&classes, &start, 0, 52.0, 0.03, None, 0.05);
         values_approx(&near.values, &[50.0, 50.0]);
         assert_eq!(near.held, Some(50.0));
@@ -611,14 +633,49 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_target_is_not_a_snap_point() {
-        // Bonds holds 5, so Stocks cannot reach its target of 50 by moving this boundary.
+    fn the_marks_are_where_a_full_rebalance_lands() {
+        let classes = book();
+        let marks = target_boundaries(&classes).unwrap();
+        values_approx(&marks, &[0.5, 0.65, 0.7, 0.8]);
+        let plan = full(&classes);
+        let mut at = 0.0;
+        for (index, mark) in marks.iter().enumerate() {
+            at += plan.values[index] / plan.total;
+            approx(at, *mark);
+        }
+        assert_eq!(target_boundaries(&[Class::new("Art", 1.0)]), None);
+    }
+
+    #[test]
+    fn a_snap_point_puts_the_boundary_on_its_mark_or_is_unreachable() {
         let classes = book();
         let start: Vec<f64> = classes.iter().map(Class::held).collect();
-        let points = snap_points(&classes, &start, 0, 100.0);
-        assert!(points.iter().all(|point| (*point - 50.0).abs() > 1.0));
-        // Bonds can reach its own target of 15: Stocks would be 40 + 5 - 15 = 30.
-        assert!(points.iter().any(|point| (*point - 30.0).abs() < 1e-6));
+        // Boundary 3 (Crypto | Cash) marks 80. Before it: 40 + 5 + 5 = 50, so Crypto 30.
+        values_approx(&snap_points(&classes, &start, 3, 100.0), &[30.0]);
+        // Boundary 0 marks 50, but Stocks and Bonds share only 45, so it can't get there.
+        assert!(snap_points(&classes, &start, 0, 100.0).is_empty());
+    }
+
+    #[test]
+    fn new_money_never_sells_and_a_withdrawal_never_buys_at_any_amount() {
+        let classes = book();
+        for step in 1..=60 {
+            let amount = f64::from(step) * 7.5;
+            let plan = place(&classes, amount).unwrap();
+            approx(plan.values.iter().sum(), 100.0 + amount);
+            for (class, value) in classes.iter().zip(&plan.values) {
+                assert!(
+                    *value >= class.value - 1e-9,
+                    "{} sold at {amount}",
+                    class.name
+                );
+            }
+            let out = place(&classes, -amount.min(99.0)).unwrap();
+            approx(out.values.iter().sum(), 100.0 - amount.min(99.0));
+            for (class, value) in classes.iter().zip(&out.values) {
+                assert!(*value <= class.value + 1e-9 && *value >= 0.0);
+            }
+        }
     }
 
     #[test]
