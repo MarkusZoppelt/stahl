@@ -8,6 +8,7 @@ pub mod format;
 pub mod fx;
 pub mod icons;
 pub mod rebalance;
+pub mod records;
 pub mod state;
 pub mod statement;
 pub mod theme;
