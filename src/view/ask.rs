@@ -137,38 +137,42 @@ pub fn overview_line(s: &State, t: &Theme, narrow: bool) -> El {
     )
 }
 
-/// What Counsel says before anything has been asked.
+/// What Counsel says before anything has been asked: the door, in words, and the questions this
+/// portfolio makes worth asking.
 fn empty(s: &State, t: &Theme) -> El {
     let k = &t.kit;
-    let questions = suggestions(s);
+    let questions = questions(s);
     col()
         .key("ask-empty")
         .w_full()
-        .gap(16.0)
-        .pt(if s.compact { 8.0 } else { 24.0 })
+        .max_w(680.0)
+        .gap(if s.compact { 20.0 } else { 28.0 })
+        .pt(if s.compact { 8.0 } else { 32.0 })
         .child(
-            text("What would you like to know?")
-                .font(if s.compact { LEDE_COMPACT } else { LEDE })
-                .color(k.c.text_base)
-                .wrap(),
-        )
-        .child(
-            text(
-                "Ask in your own words. The answer is built from your own figures and screens, \
-                 and every number in it is one Stahl computed.",
-            )
-            .font(k.ty.ui)
-            .color(k.c.text_muted)
-            .wrap()
-            .max_w(560.0),
+            col()
+                .gap(10.0)
+                .child(
+                    text("The door is open, and the light is on.")
+                        .font(if s.compact { LEDE_COMPACT } else { LEDE })
+                        .color(k.c.text_base)
+                        .wrap(),
+                )
+                .child(
+                    text(
+                        "Ask anything about your portfolio. Every figure in the answer is one \
+                         Stahl computed.",
+                    )
+                    .font(k.ty.ui)
+                    .color(k.c.text_muted)
+                    .wrap()
+                    .max_w(520.0),
+                ),
         )
         .children((!questions.is_empty()).then(|| {
             col()
                 .key("ask-empty-suggestions")
                 .w_full()
-                .max_w(560.0)
-                .gap(8.0)
-                .pt(4.0)
+                .child(ui::rule(t))
                 .children(
                     questions
                         .into_iter()
@@ -178,35 +182,76 @@ fn empty(s: &State, t: &Theme) -> El {
         }))
 }
 
-/// A question worth asking, as a row you can press.
+/// The questions an empty page offers: what the portfolio raises, and what a what-if would show.
+/// Every one is answerable from the app's own figures, with no model.
+pub fn questions(s: &State) -> Vec<String> {
+    let mut out = suggestions(s);
+    if let Some(class) = what_if_class(s) {
+        out.push(format!("What if {class} falls 20%?"));
+    }
+    if s.summary
+        .as_ref()
+        .is_some_and(|summary| summary.cash_value.abs() >= 0.005)
+    {
+        out.push("How much cash do I hold?".to_string());
+    }
+    out.dedup();
+    out.truncate(6);
+    out
+}
+
+/// The class worth pushing in a what-if: the one furthest from its target, or the largest when
+/// the policy doesn't say.
+fn what_if_class(s: &State) -> Option<String> {
+    let drifted = s.review.data.as_ref().and_then(|review| {
+        review
+            .allocations
+            .iter()
+            .max_by(|a, b| a.drift_percent.abs().total_cmp(&b.drift_percent.abs()))
+            .map(|class| class.asset_class.clone())
+    });
+    drifted.or_else(|| {
+        s.allocation
+            .iter()
+            .max_by(|a, b| a.value.total_cmp(&b.value))
+            .map(|class| class.asset_class.clone())
+    })
+}
+
+/// A question worth asking, as a line in a ledger: a rule under it, and room around it.
 fn suggestion(question: String, index: usize, t: &Theme) -> El {
     let k = &t.kit;
     let shown = question.clone();
     ui::entering(
-        row()
-            .center_y()
-            .key(format!("ask-suggestion-{index}"))
-            .role("button")
-            .label(question.clone())
-            .focusable(true)
+        col()
             .w_full()
-            .gap(10.0)
-            .px(12.0)
-            .py(9.0)
-            .radius(6.0)
-            .border(1.0, k.c.border_muted)
-            .hover(k.c.hover)
-            .press_scale(ui::PRESS_ROW)
-            .on_press(move |s: &mut State| s.ask_question(shown.clone()))
-            .child(icon(&icons::SPARKLES, 14.0).color(k.c.icon_muted))
             .child(
-                text(question)
-                    .font(k.ty.ui)
-                    .color(k.c.text_base)
-                    .grow(1.0)
-                    .truncate(),
+                row()
+                    .center_y()
+                    .key(format!("ask-suggestion-{index}"))
+                    .role("button")
+                    .label(question.clone())
+                    .focusable(true)
+                    .w_full()
+                    .gap(12.0)
+                    .px(10.0)
+                    .py(13.0)
+                    .radius(6.0)
+                    .hover(k.c.hover)
+                    .press_scale(ui::PRESS_ROW)
+                    .on_press(move |s: &mut State| s.ask_question(shown.clone()))
+                    .child(icon(&icons::SPARKLES, 14.0).color(k.c.text_faint))
+                    .child(
+                        text(question)
+                            .font(k.ty.ui)
+                            .color(k.c.text_base)
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .truncate(),
+                    )
+                    .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(k.c.text_faint)),
             )
-            .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(k.c.text_faint)),
+            .child(ui::rule(t)),
         index,
     )
 }

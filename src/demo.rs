@@ -97,6 +97,9 @@ impl crate::ask::Model for ScriptedModel {
     }
 }
 
+/// The asset classes the demo's portfolio holds, for a question that names one.
+const CLASSES: [&str; 5] = ["Stocks", "Bonds", "Gold", "Crypto", "Cash"];
+
 /// The answer to `question`, as JSON Lines. Questions are matched on the words a person would
 /// use; anything else gets the demo's own version of "I can't answer that".
 pub fn scripted(question: &str) -> String {
@@ -104,6 +107,18 @@ pub fn scripted(question: &str) -> String {
     let has = |words: &[&str]| words.iter().any(|word| question.contains(word));
     if has(&["half", "halve", "halves", "what if", "fall"]) && has(&["crypto", "bitcoin"]) {
         return SCRIPT_HALVES.to_string();
+    }
+    // Any other what-if: the shock is the question's, the rest is the app's, as with a model.
+    if let Some(shocks) = crate::scenario::asked(&question, CLASSES) {
+        let shock = crate::ask::line(&crate::ask::Block::Scenario { shocks });
+        return [
+            r#"{"block":"say","text":"Here is what that would leave, and what it would do to your plan."}"#
+                .to_string(),
+            shock,
+            r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"}]}"#.to_string(),
+        ]
+        .join("\n")
+            + "\n";
     }
     if has(&["2,000", "2000", "new money", "invest", "where should"]) {
         return SCRIPT_NEW_MONEY.to_string();

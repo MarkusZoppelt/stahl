@@ -3610,7 +3610,7 @@ fn counsel_answers_a_typed_question_with_blocks() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Ask.key());
     assert_eq!(app.rt.state.page, Page::Ask);
-    assert!(app.has_text("What would you like to know?"));
+    assert!(app.has_text("The door is open, and the light is on."));
 
     app.click("ask-input");
     app.type_text("What changed this month?");
@@ -3717,6 +3717,47 @@ fn a_loss_is_said_plainly_and_never_with_the_joke() {
         "the joke is only for a gain"
     );
     assert!(!app.has_text("you are up"));
+}
+
+#[test]
+fn an_empty_page_offers_questions_the_app_can_answer_without_a_model() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    let asked: Vec<String> = (0..6)
+        .filter(|index| app.exists(&format!("ask-suggestion-{index}")))
+        .filter_map(|index| {
+            app.rt
+                .elements()
+                .iter()
+                .find(|element| element.key.as_deref() == Some(&format!("ask-suggestion-{index}")))
+                .and_then(|element| element.label.clone())
+        })
+        .collect();
+    assert!(
+        (4..=6).contains(&asked.len()),
+        "four to six questions: {asked:?}"
+    );
+    assert!(
+        asked.iter().any(|question| question.starts_with("What if")),
+        "a what-if is one of them: {asked:?}"
+    );
+
+    // The what-if is answered by the app itself: the shock is the question's, the rest is the
+    // app's arithmetic.
+    let at = asked
+        .iter()
+        .position(|question| question.starts_with("What if"))
+        .expect("a what-if");
+    app.click(&format!("ask-suggestion-{at}"));
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("here is what it would leave"),
+        "the app answers a what-if with no model"
+    );
+    assert!(app.exists("ask-0-1-toggle"), "and the change can be played");
+    assert!(app.exists("ask-0-1-bar"));
 }
 
 #[test]

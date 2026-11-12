@@ -417,6 +417,35 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
     let keywords = keywords(question);
     let mut blocks = Vec::new();
 
+    // A what-if the question names itself. The shock is the question's; what follows from it is
+    // the app's own arithmetic, so this needs no model.
+    if let Some(shocks) = crate::scenario::asked(
+        question,
+        crate::view::rebalance::load_classes(s)
+            .iter()
+            .map(|class| class.name.as_str()),
+    ) {
+        let list = shocks
+            .iter()
+            .map(|shock| {
+                if shock.percent < 0.0 {
+                    format!("{} falls {:.0}%", shock.class, -shock.percent)
+                } else {
+                    format!("{} rises {:.0}%", shock.class, shock.percent)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        blocks.push(Block::Say {
+            text: format!("If {list}, here is what it would leave."),
+        });
+        blocks.push(Block::Scenario { shocks });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Rebalance, "Open Rebalance")],
+        });
+        return blocks;
+    }
+
     // A figure the palette already answers: the total, today, a class, a holding.
     let figure = keywords
         .iter()

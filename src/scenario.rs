@@ -96,6 +96,54 @@ impl Outcome {
     }
 }
 
+/// The shock a question asks for, if it asks for one: "what if crypto halves?", "if stocks fall
+/// 20%", "what if gold doubles". `None` when the question names no class the portfolio has, or no
+/// move. The shock is the question's; everything that follows from it is the app's.
+pub fn asked<'a>(question: &str, classes: impl IntoIterator<Item = &'a str>) -> Option<Vec<Shock>> {
+    let lower = question.to_lowercase();
+    let class = classes
+        .into_iter()
+        .find(|name| name.len() >= 3 && lower.contains(&name.to_lowercase()))?;
+    Some(vec![Shock::new(class, percent_in(&lower)?)])
+}
+
+/// How far a question says a class moves, in percent: "halves" is -50, "falls 20%" is -20,
+/// "rises 5%" is +5.
+fn percent_in(question: &str) -> Option<f64> {
+    if question.contains("halve") || question.contains("half") {
+        return Some(-50.0);
+    }
+    if question.contains("double") {
+        return Some(100.0);
+    }
+    let words: Vec<&str> = question
+        .split(|character: char| !character.is_alphanumeric() && character != '.')
+        .filter(|word| !word.is_empty())
+        .collect();
+    let at = words.iter().position(|word| {
+        word.chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+    })?;
+    let number = words[at].parse::<f64>().ok()?;
+    if !number.is_finite() || number <= 0.0 {
+        return None;
+    }
+    let up = [
+        "rise", "rises", "rising", "gain", "gains", "grow", "grows", "up",
+    ];
+    let before = words[..at].join(" ");
+    let sign = if up
+        .iter()
+        .any(|word| before.split(' ').any(|each| each == *word))
+    {
+        1.0
+    } else {
+        -1.0
+    };
+    Some(sign * number.min(100.0))
+}
+
 fn share(value: f64, total: f64) -> f64 {
     if total.abs() < 0.005 {
         0.0
@@ -168,6 +216,41 @@ mod tests {
 
     fn close(left: f64, right: f64) {
         assert!((left - right).abs() < 1e-6, "{left} != {right}");
+    }
+
+    #[test]
+    fn a_question_that_names_a_class_and_a_move_is_a_what_if() {
+        let classes = ["Stocks", "Bonds", "Gold", "Crypto", "Cash"];
+        assert_eq!(
+            asked("What if crypto halves?", classes),
+            Some(vec![Shock::new("Crypto", -50.0)])
+        );
+        assert_eq!(
+            asked("What if stocks fall 20%?", classes),
+            Some(vec![Shock::new("Stocks", -20.0)])
+        );
+        assert_eq!(
+            asked("If gold rises 10%, what happens?", classes),
+            Some(vec![Shock::new("Gold", 10.0)])
+        );
+        assert_eq!(
+            asked("What if bonds double?", classes),
+            Some(vec![Shock::new("Bonds", 100.0)])
+        );
+        // A question about no class the portfolio has is not a shock.
+        assert_eq!(asked("What if watches halve?", classes), None);
+        // Neither is a question with no move in it.
+        assert_eq!(asked("What if crypto is a good idea?", classes), None);
+        assert_eq!(asked("How is crypto doing?", classes), None);
+    }
+
+    #[test]
+    fn a_move_of_more_than_all_of_it_is_all_of_it() {
+        let classes = ["Crypto"];
+        assert_eq!(
+            asked("What if crypto falls 400%?", classes),
+            Some(vec![Shock::new("Crypto", -100.0)])
+        );
     }
 
     #[test]
