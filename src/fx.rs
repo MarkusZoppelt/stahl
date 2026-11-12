@@ -45,11 +45,17 @@ pub const SHEEN: u32 = 6;
 pub const LIFT: u32 = 7;
 /// A floating panel's glass.
 pub const GLASS: u32 = 8;
+/// A plate of brushed steel.
+pub const PLATE: u32 = 9;
+/// A round knob of turned steel.
+pub const KNOB: u32 = 10;
 
 /// How long the refresh's pulse takes to cross the page.
 pub const PULSE_LIFE: f64 = 0.95;
 /// How long light runs along the total for a new record.
 pub const FLOURISH: f64 = 1.3;
+/// How long the band of light takes to sweep once across a new plate.
+pub const SWEEP: f64 = 1.1;
 
 /// The uniform every slot of the door and room shaders writes, in bytes: the door's own
 /// 48-byte struct and the room's larger one share one buffer and one stride.
@@ -161,6 +167,159 @@ pub fn glass() -> El {
         .radius(12.0)
         .effect(GLASS)
         .effect_backdrop(true)
+        .a11y_hidden()
+        .transition(Transition::none())
+}
+
+/// A plate of brushed steel: the door's metal, flat, brushed straight across, with a chamfered
+/// edge on all four sides, lit from the room's light. What the slot is painted with is decided
+/// once here; the caller only says how pale, how coloured and how raised.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Plate {
+    /// How pale the steel is: 0 is the door's dark outer ring, 1 its bright hub.
+    pub tone: f32,
+    /// A colour the steel leans to, in sRGB, and how far (0 to 1, kept low).
+    pub tint: [f32; 3],
+    pub strength: f32,
+    /// Standing off its surface, or set into it, like a channel.
+    pub raised: bool,
+    /// How much light it gives back, 0 to 1: an old plate is duller than a new one.
+    pub gain: f32,
+    /// When a band of light sweeps across it once, on the state's clock.
+    pub sweep: Option<f64>,
+}
+
+impl Plate {
+    /// A plain raised plate of `tone`.
+    pub fn new(tone: f32) -> Plate {
+        Plate {
+            tone,
+            tint: [0.0; 3],
+            strength: 0.0,
+            raised: true,
+            gain: 1.0,
+            sweep: None,
+        }
+    }
+
+    pub fn tint(self, rgb: [f32; 3], strength: f32) -> Plate {
+        Plate {
+            tint: rgb,
+            strength,
+            ..self
+        }
+    }
+
+    pub fn recessed(self) -> Plate {
+        Plate {
+            raised: false,
+            ..self
+        }
+    }
+
+    pub fn gain(self, gain: f32) -> Plate {
+        Plate { gain, ..self }
+    }
+
+    pub fn sweep(self, started: Option<f64>) -> Plate {
+        Plate {
+            sweep: started,
+            ..self
+        }
+    }
+
+    /// The four numbers the slot carries: the tint as one packed 24-bit colour, its strength,
+    /// the tone (plus 2 when set in), and the gain, or a sweep's start as a negative number.
+    fn data(&self) -> [f32; 4] {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+        let packed = (byte(self.tint[0]) << 16) | (byte(self.tint[1]) << 8) | byte(self.tint[2]);
+        [
+            packed as f32,
+            self.strength.clamp(0.0, 1.0),
+            self.tone.clamp(0.0, 1.0) + if self.raised { 0.0 } else { 2.0 },
+            match self.sweep {
+                Some(started) => -(started as f32 + 1.0),
+                None => self.gain.clamp(0.0, 1.0),
+            },
+        ]
+    }
+
+    /// The steel's flat colour, for a window without a compositor: the door's two halves at this
+    /// tone, top and bottom, leaning to the tint.
+    pub fn flat(&self) -> ([f32; 3], [f32; 3]) {
+        let (lit, dim) = ramp(self.tone);
+        let lean = |c: [f32; 3]| {
+            let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            let t = self.tint;
+            let tl = (0.2126 * t[0] + 0.7152 * t[1] + 0.0722 * t[2]).max(0.05);
+            let k = self.strength.clamp(0.0, 1.0);
+            [0, 1, 2].map(|i| c[i] + ((t[i] / tl * l).min(1.0) - c[i]) * k)
+        };
+        (lean(lit), lean(dim))
+    }
+
+    fn unpack(data: [f32; 4]) -> ([f32; 3], f32, f32, bool, f32, Option<f32>) {
+        let packed = data[0].max(0.0) as u32;
+        let tint = [
+            ((packed >> 16) & 255) as f32 / 255.0,
+            ((packed >> 8) & 255) as f32 / 255.0,
+            (packed & 255) as f32 / 255.0,
+        ];
+        let raised = data[2] < 1.5;
+        let tone = if raised { data[2] } else { data[2] - 2.0 };
+        let (gain, sweep) = if data[3] < 0.0 {
+            (1.0, Some(-data[3] - 1.0))
+        } else {
+            (data[3], None)
+        };
+        (tint, data[1], tone, raised, gain, sweep)
+    }
+}
+
+/// The door's lit and shaded steel at `tone`, from its outer ring (0) to its hub (1): the same
+/// tables as the door shader's `LIT` and `DIM`.
+fn ramp(tone: f32) -> ([f32; 3], [f32; 3]) {
+    const LIT: [[f32; 3]; 5] = [
+        [0.149, 0.200, 0.231],
+        [0.235, 0.322, 0.376],
+        [0.294, 0.392, 0.459],
+        [0.647, 0.698, 0.729],
+        [0.824, 0.847, 0.863],
+    ];
+    const DIM: [[f32; 3]; 5] = [
+        [0.067, 0.129, 0.173],
+        [0.110, 0.208, 0.278],
+        [0.125, 0.255, 0.329],
+        [0.565, 0.631, 0.667],
+        [0.780, 0.816, 0.831],
+    ];
+    let x = tone.clamp(0.0, 1.0) * 4.0;
+    let i = (x.floor() as usize).min(3);
+    let f = x - i as f32;
+    let mix = |a: [f32; 3], b: [f32; 3]| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * f);
+    (mix(LIT[i], LIT[i + 1]), mix(DIM[i], DIM[i + 1]))
+}
+
+/// The steel of `plate`, filling its parent, cut to `radius`.
+pub fn steel(plate: Plate, radius: f32) -> El {
+    el().absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(radius)
+        .effect(PLATE)
+        .effect_data(plate.data())
+        .a11y_hidden()
+        .transition(Transition::none())
+}
+
+/// A round knob of turned steel filling its parent, like the door's hub.
+pub fn knob(plate: Plate) -> El {
+    el().absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(999.0)
+        .effect(KNOB)
+        .effect_data(plate.data())
         .a11y_hidden()
         .transition(Transition::none())
 }
@@ -438,6 +597,8 @@ pub struct Gfx {
     wake: bool,
     /// The opening was drawn this frame and has not finished: keep the display link running.
     opening: bool,
+    /// A band of light is sweeping across a plate this frame.
+    sweeping: bool,
     /// When the opening started on the animation clock, so its progress and the state's timer
     /// share one clock even after the host slept.
     opening_start: Option<f32>,
@@ -756,6 +917,7 @@ impl Compositor<State> for Gfx {
         // draws none.
         self.wake
             || self.opening
+            || self.sweeping
             || self.light.as_ref().is_some_and(Light::moving)
             || self.doors.values().any(Door::moving)
             // A surface's glow is still easing in or out.
@@ -873,6 +1035,8 @@ impl Compositor<State> for Gfx {
         let mut slot = 0usize;
         let clock = f.rt.clock;
         let dt = f.dt.max(1.0 / 240.0) as f32;
+        let pressing = f.rt.pressing();
+        let mut sweeping = false;
         f.ui.prepare(device, queue, &mut f.rt.text.atlas, &f.rt.instances, f.size);
         f.ui.draw_with_backdrop(f.encoder, f.target, clear, &mut |phase, site| {
             if let Some(&index) = layer_at.get(&site.index) {
@@ -965,6 +1129,67 @@ impl Compositor<State> for Gfx {
                     rect,
                     color: [0.84, 0.91, 0.97, 0.0],
                     flags: [if dark { 1.0 } else { 0.0 }, lift, 0.0, 0.0],
+                    scale: site.scale,
+                }
+            } else if site.mark == PLATE || site.mark == KNOB {
+                lift_seen.insert(site.index);
+                let [rx, ry, rw, rh] = site.instance.rect;
+                let inside = pointer.is_some_and(|(x, y)| {
+                    let (x, y) = (x * site.scale, y * site.scale);
+                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+                });
+                // Hover answers at once and settles in about 150 ms.
+                let ease = if reduced {
+                    1.0
+                } else {
+                    1.0 - 0.72f32.powf(dt * 60.0)
+                };
+                let lift = self.lifts.entry(site.index).or_insert(0.0);
+                *lift += ((if inside { 1.0 } else { 0.0 }) - *lift) * ease;
+                if *lift < 0.001 {
+                    *lift = 0.0;
+                } else if *lift > 0.999 {
+                    *lift = 1.0;
+                }
+                let hover = *lift;
+                let (tint, strength, tone, raised, gain, sweep) = Plate::unpack(site.data);
+                // A press pushes a raised plate in, for as long as it is held.
+                let depth = if raised != (inside && pressing) {
+                    1.0
+                } else {
+                    -1.0
+                };
+                let progress = match sweep {
+                    Some(started) if !reduced => {
+                        let start = t - (clock - started as f64);
+                        let progress = ((t - start) / SWEEP) as f32;
+                        if (0.0..1.0).contains(&progress) {
+                            sweeping = true;
+                        }
+                        progress
+                    }
+                    _ => 2.0,
+                };
+                let radius = site
+                    .instance
+                    .radii
+                    .iter()
+                    .fold(0.0f32, |a, v| a.max(v.abs()))
+                    / site.scale.max(1e-3);
+                Slot {
+                    center: [0.0, 0.0],
+                    radius,
+                    split: if site.mark == KNOB { 1.0 } else { 0.0 },
+                    light: light.at,
+                    spin: progress,
+                    gain,
+                    origin: site.origin,
+                    encode,
+                    mode: 5.0,
+                    window,
+                    rect,
+                    color: [tint[0], tint[1], tint[2], strength],
+                    flags: [if dark { 1.0 } else { 0.0 }, hover, depth, tone],
                     scale: site.scale,
                 }
             } else if site.mark == SHEEN {
@@ -1125,6 +1350,7 @@ impl Compositor<State> for Gfx {
             pass.draw(0..3, 0..1);
         });
         self.opening = opening;
+        self.sweeping = sweeping;
         if !opening {
             self.opening_start = None;
         }
@@ -1495,6 +1721,153 @@ fn lift(p: vec2f) -> vec4f {
     return encode_out(u.color.rgb, alpha);
 }
 
+// The door's steel, from its outer ring (tone 0) to its hub (tone 1): `LIT` and `DIM` in the door
+// shader, the lit and the shaded half.
+const S_LIT = array<vec3f, 5>(
+    vec3f(0.149, 0.200, 0.231), vec3f(0.235, 0.322, 0.376), vec3f(0.294, 0.392, 0.459),
+    vec3f(0.647, 0.698, 0.729), vec3f(0.824, 0.847, 0.863));
+const S_DIM = array<vec3f, 5>(
+    vec3f(0.067, 0.129, 0.173), vec3f(0.110, 0.208, 0.278), vec3f(0.125, 0.255, 0.329),
+    vec3f(0.565, 0.631, 0.667), vec3f(0.780, 0.816, 0.831));
+
+fn ramp_lit(tone: f32) -> vec3f {
+    let x = clamp(tone, 0.0, 1.0) * 4.0;
+    let i = min(i32(floor(x)), 3);
+    return mix(S_LIT[i], S_LIT[i + 1], x - f32(i));
+}
+
+fn ramp_dim(tone: f32) -> vec3f {
+    let x = clamp(tone, 0.0, 1.0) * 4.0;
+    let i = min(i32(floor(x)), 3);
+    return mix(S_DIM[i], S_DIM[i + 1], x - f32(i));
+}
+
+fn vnoise(p: vec2f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let s = f * f * (3.0 - 2.0 * f);
+    let a = hash2(i);
+    let b = hash2(i + vec2f(1.0, 0.0));
+    let c = hash2(i + vec2f(0.0, 1.0));
+    let d = hash2(i + vec2f(1.0, 1.0));
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
+// The outline of the slot: a rounded rect, or a circle for a knob.
+fn steel_sd(local: vec2f, half: vec2f, radius: f32) -> f32 {
+    return sd_round(local, half, min(radius, min(half.x, half.y)));
+}
+
+// A plate of brushed steel, or a knob of turned steel (`split` 1), lit from the room's light.
+// color.rgb is the tint and .a how far; flags: x dark, y hover, z raised (1) or set in (-1),
+// w tone. `gain` is how much light it gives back, `spin` a sweep's progress.
+fn steel(p: vec2f) -> vec4f {
+    let r = u.rect;
+    let half = r.zw * 0.5;
+    let centre = r.xy + half;
+    let local = p - centre;
+    let sd = steel_sd(local, half, u.radius);
+    let cover = clamp(0.5 - sd * u.scale, 0.0, 1.0);
+    if (cover <= 0.0) { return vec4f(0.0); }
+    let dark = u.flags.x > 0.5;
+    let hover = u.flags.y;
+    let depth = u.flags.z;
+    let tone = u.flags.w;
+    let gain = clamp(u.gain, 0.0, 1.0);
+    let knob = u.split > 0.5;
+    let steel_white = vec3f(0.84, 0.91, 0.97);
+
+    // Where the light is, seen from the plate: across the wall, and how strongly it reaches here.
+    let to_light = u.light - centre;
+    let dir = normalize(to_light + vec2f(0.0, -1e-3));
+    let reach = 0.55 + 0.45 * pool(centre);
+
+    let lit_c = ramp_lit(tone);
+    let dim_c = ramp_dim(tone);
+    var c: vec3f;
+    // Device pixels per point, so brushing never goes finer than a pixel.
+    let dev = u.scale;
+
+    if (knob) {
+        // A dome of turned steel, like the door's hub: lathe rings, lit from the room's light.
+        let rad = min(half.x, half.y);
+        let q = local / rad;
+        let d = length(q);
+        let dome = sqrt(max(1.0 - d * d, 0.0));
+        let n = normalize(vec3f(q * 0.85, dome + 0.35));
+        let l = normalize(vec3f(dir * 0.9, 1.0));
+        let h = normalize(l + vec3f(0.0, 0.0, 1.0));
+        let lines = vnoise(vec2f(d * rad * dev * 0.6, 3.0));
+        let base = mix(dim_c, lit_c, 0.5 + 0.5 * dot(q, dir)) * (0.94 + (lines - 0.5) * 0.10);
+        let diffuse = max(dot(n, l), 0.0);
+        let spec = pow(max(dot(n, h), 0.0), 22.0);
+        c = base * (0.55 + 0.55 * diffuse) + steel_white * spec * (0.55 + 0.35 * hover) * gain;
+        // The rim: a chamfer lit on the side toward the light.
+        let rim = smoothstep(rad - 1.6, rad - 0.2, d * rad);
+        let facing = dot(q / max(d, 1e-3), dir);
+        c += steel_white * rim * max(facing, 0.0) * 0.45 * depth;
+        c *= 1.0 - rim * max(-facing, 0.0) * 0.45;
+        if (depth < 0.0) { c *= 0.88; }
+    } else {
+        // Brushed straight across: long streaks along x, a new one every pixel or two down.
+        let y = p.y * dev;
+        let streak = vnoise(vec2f(p.x * dev * 0.010, y * 0.55)) * 0.65
+            + vnoise(vec2f(p.x * dev * 0.003 + 17.0, y * 0.21)) * 0.35;
+        let blotch = vnoise(local * 0.012 + vec2f(5.0, 9.0));
+        // The plate is a little brighter on the side toward the light, as each half of the door is.
+        let across = clamp(dot(local / max(half, vec2f(1.0)), dir), -1.0, 1.0);
+        var base = mix(dim_c, lit_c, 0.7 + 0.3 * across) * (0.95 + 0.05 * across);
+        base *= 0.93 + (streak - 0.5) * select(0.05, 0.07, dark) + (blotch - 0.5) * 0.04;
+        base *= mix(0.84, 1.04, reach);
+        // A recessed channel sits in shade.
+        if (depth < 0.0) { base *= 0.80; }
+
+        // The highlight on brushed metal stands across the brushing: a soft vertical band under
+        // the light. Hover sharpens it.
+        let width = mix(0.30, 0.22, hover) * r.z + 40.0;
+        let off = (p.x - clamp(u.light.x, r.x - r.z * 0.4, r.x + r.z * 1.4)) / width;
+        let tilt = (p.y - r.y) / max(r.w, 1.0) - 0.5;
+        let band = exp(-off * off * 2.2) * 0.55
+            + exp(-pow(off + tilt * 0.12, 2.0) * mix(18.0, 30.0, hover)) * 0.75;
+        let peak = select(0.10, 0.13, dark) * (1.0 + 0.30 * hover) * gain * reach;
+        c = base + steel_white * band * peak * (0.9 + (streak - 0.5) * 0.4);
+
+        // A band of light sweeps across once, the first time a plate is seen.
+        let run = u.spin;
+        if (run >= 0.0 && run < 1.0) {
+            let x = (p.x - r.x) / max(r.z, 1.0);
+            let at = run * 1.7 - 0.35;
+            let s = exp(-pow((x - at + tilt * 0.15) / 0.09, 2.0)) * sin(run * 3.14159265);
+            c += steel_white * s * 0.34;
+        }
+
+        // The chamfer: a 1.5-point bevel all round, bright on the side facing the light and dark
+        // on the far side; a recessed plate's bevel faces the other way.
+        let e = 0.5;
+        let g = vec2f(
+            steel_sd(local + vec2f(e, 0.0), half, u.radius) - steel_sd(local - vec2f(e, 0.0), half, u.radius),
+            steel_sd(local + vec2f(0.0, e), half, u.radius) - steel_sd(local - vec2f(0.0, e), half, u.radius));
+        let normal = normalize(g + vec2f(0.0, 1e-4));
+        let bevel = smoothstep(-1.5 - 0.5 / dev, -1.5 + 0.5 / dev, sd);
+        let facing = dot(normal, dir) * depth;
+        let edge_lit = select(0.26, 0.24, dark) * (1.0 + 0.6 * hover) * (0.6 + 0.4 * gain);
+        let edge_dim = select(0.22, 0.30, dark);
+        c += steel_white * bevel * max(facing, 0.0) * edge_lit;
+        c *= 1.0 - bevel * max(-facing, 0.0) * edge_dim;
+        // The bevel's own sides: even facing away from the light, it reads as an edge.
+        c *= 1.0 - bevel * (1.0 - abs(facing)) * 0.08;
+    }
+
+    // Coloured steel: the tint takes the hue and keeps the metal's light and dark.
+    let l = dot(c, vec3f(0.2126, 0.7152, 0.0722));
+    let tint = u.color.rgb;
+    let tl = max(dot(tint, vec3f(0.2126, 0.7152, 0.0722)), 0.05);
+    c = mix(c, min(tint / tl * l, vec3f(1.0)), clamp(u.color.a, 0.0, 1.0));
+
+    c += (hash2(floor(p * dev)) - 0.5) / 255.0;
+    return encode_out(clamp(c, vec3f(0.0), vec3f(1.0)), cover);
+}
+
 // A refresh's pulse of light: one soft ring leaving the door and crossing the page, once.
 fn pulse(p: vec2f) -> vec4f {
     let age = clamp(u.spin, 0.0, 1.0);
@@ -1518,6 +1891,9 @@ fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let frag = pos.xy + u.origin;
     let p = frag / u.scale;
+    if (u.mode > 4.5) {
+        return steel(p);
+    }
     if (u.mode > 3.5) {
         return pulse(p);
     }

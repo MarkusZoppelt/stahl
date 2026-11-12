@@ -70,6 +70,8 @@ From `src/view/ui.rs`. Reach for these before writing layout.
 | `ui::glass(s, t)` | A floating surface made of glass: a lens that blurs and bends the page behind it, a lit rim, a tint for legibility, and a shadow. Without a compositor it is `ui::floating` |
 | `ui::glow_orb(color, size, strength)` | A soft round light, for the head and live end of the value chart |
 | `ui::card(t)` | A flat box with a hairline border |
+| `ui::plate(s, t, plate, radius)` | A plate of brushed steel: the door's metal, flat, lit by the room's light and chamfered all round. The `Plate` (`src/fx.rs`) says how pale, how coloured, how raised and how much light it gives back. `ui::knob` is the same steel turned as a round knob, and `ui::steel` the face alone, for a surface that is not a plate |
+| `ui::steel_ink`, `ui::engraved` | The ink for words on steel, whatever the theme, and those words cut into it: dark, with the pale lip of the cut a point below |
 | `ui::ledger(t)` | A section with a rule over it and no box |
 | `ui::rule(t)` | A hairline |
 | `ui::floating(t)` | A surface over the page, with a shadow and a blur |

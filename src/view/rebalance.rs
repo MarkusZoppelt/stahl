@@ -14,11 +14,15 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use rune::{Color, Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, el, row, text};
+use rune::{
+    Color, Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Spring, Tx, col, color::srgb_encode, el,
+    row, text,
+};
 use rune_kit::{Button, ButtonVariant, RollingText, TextInput};
 
 use crate::{
     format,
+    fx::Plate,
     rebalance::{self, Class, Plan},
     state::{BadNumber, RebalancePlan, State, parse_number},
     theme::{LEDE, LEDE_COMPACT, NUMBER, Theme},
@@ -348,13 +352,24 @@ fn rail(s: &State, t: &Theme, stacked: bool) -> El {
                 s.rebalance.placed = true;
             }
         })
-        .child(
+        // A channel cut into steel, when a compositor can draw it; a plain lane otherwise.
+        .child(if s.shaders {
             el().absolute(0.0, bar_y)
                 .w_full()
                 .h(RAIL_BAR)
                 .radius(RAIL_BAR / 2.0)
-                .fill(t.kit.c.layer_03),
-        )
+                .child(ui::steel(
+                    s,
+                    Plate::new(if t.dark { 0.30 } else { 0.70 }).recessed(),
+                    RAIL_BAR / 2.0,
+                ))
+        } else {
+            el().absolute(0.0, bar_y)
+                .w_full()
+                .h(RAIL_BAR)
+                .radius(RAIL_BAR / 2.0)
+                .fill(t.kit.c.layer_03)
+        })
         .child(
             el().absolute(0.0, 0.0)
                 .radius(RAIL_BAR / 2.0)
@@ -362,14 +377,19 @@ fn rail(s: &State, t: &Theme, stacked: bool) -> El {
                 .live_rect(s.rebalance.rail_fill.smooth(spring(s))),
         )
         .child(detent(t, height))
-        .child(
-            el().absolute(0.0, 0.0)
+        .child({
+            let thumb = el()
+                .absolute(0.0, 0.0)
                 .size(RAIL_THUMB, RAIL_THUMB)
                 .radius(RAIL_THUMB / 2.0)
-                .fill(t.kit.c.text_base)
-                .border(2.0, t.card)
-                .live_rect(s.rebalance.rail_thumb.smooth(spring(s))),
-        );
+                .live_rect(s.rebalance.rail_thumb.smooth(spring(s)));
+            // A knob of turned steel, like the door's hub.
+            if s.shaders {
+                thumb.child(ui::knob(s, Plate::new(1.0)))
+            } else {
+                thumb.fill(t.kit.c.text_base).border(2.0, t.card)
+            }
+        });
     if enabled {
         rail = rail
             .on_drag(|s: &mut State, drag: &mut Drag, tx: &mut Tx| rail_drag(s, drag, tx))
@@ -812,12 +832,20 @@ fn thumb(
         .focus_ring(2.0, -15.0, t.info)
         .live_offset(s.rebalance.thumbs[index].smooth(spring(s)))
         .child(
-            el().size(THUMB + 6.0, THUMB + 6.0).center().child(
-                el().size(THUMB, THUMB)
-                    .radius(THUMB / 2.0)
-                    .fill(colour)
-                    .border(2.0, t.card),
-            ),
+            el().size(THUMB + 6.0, THUMB + 6.0)
+                .center()
+                .child(if s.shaders {
+                    // A small steel knob that leans to its class's colour.
+                    el().size(THUMB, THUMB).radius(THUMB / 2.0).child(ui::knob(
+                        s,
+                        Plate::new(0.9).tint([colour.r, colour.g, colour.b].map(srgb_encode), 0.6),
+                    ))
+                } else {
+                    el().size(THUMB, THUMB)
+                        .radius(THUMB / 2.0)
+                        .fill(colour)
+                        .border(2.0, t.card)
+                }),
         );
     if enabled {
         thumb = thumb

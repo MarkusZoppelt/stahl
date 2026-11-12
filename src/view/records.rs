@@ -5,12 +5,14 @@
 //! Opening one lifts it off the wall and sets the value chart under it, with its day marked.
 
 use chrono::NaiveDate;
-use rune::{Align, Cx, El, col, el, icon, row, text};
+use rune::{Align, Cx, El, col, color::srgb_encode, el, icon, row, text};
 use rune_kit::{Button, ButtonVariant};
 
 use crate::{
     backend::HistoryValue,
-    format, icons,
+    format,
+    fx::Plate,
+    icons,
     records::Record,
     state::State,
     theme::{FIGURE, HOLDING_TITLE, LEDE, SECTION, Theme},
@@ -112,15 +114,12 @@ fn plate(s: &State, record: &Record, index: usize, newest: NaiveDate, t: &Theme)
         .record_arrival
         .as_ref()
         .is_some_and(|(id, _)| id == &record.id);
-    let fill = if fresh { t.card } else { t.sunken };
-    let border = if fresh {
-        k.c.border_base
-    } else {
-        k.c.border_muted
-    };
     let id = record.id.clone();
     let words = record.sentence(s.privacy, &s.currency());
     let label = format!("{}, {}", record.title(), words);
+    // A plate is steel, the same metal in either theme, so it is inked the same in both. A gain
+    // leans the steel teal, a fall leans it red; the words stay in the one dark ink.
+    let (ink, lip) = ui::steel_ink();
     let body = col()
         .w_full()
         .min_w(0.0)
@@ -135,74 +134,79 @@ fn plate(s: &State, record: &Record, index: usize, newest: NaiveDate, t: &Theme)
                 .child(
                     text(record.date.format("%-d %B %Y").to_string())
                         .font(k.ty.text_xsmall)
-                        .color(k.c.text_faint),
+                        .color(ink),
                 )
                 .child(
                     text(record.kind.caption())
                         .font(k.ty.text_xsmall)
-                        .color(k.c.text_faint),
+                        .color(ink),
                 ),
         )
-        .child(
-            text(record.title())
-                .font(SECTION)
-                .color(k.c.text_base)
-                .wrap(),
-        )
+        .child(ui::engraved(record.title(), SECTION, ink, lip))
         .children(figure(s, record, t))
-        .child(text(words).font(k.ty.body).color(k.c.text_muted).wrap());
-    let card = col()
+        .child(text(words).font(k.ty.body).color(ink).wrap());
+    let steel = steel_of(record, fresh, t).sweep(
+        s.record_arrival
+            .as_ref()
+            .filter(|(id, _)| id == &record.id)
+            .map(|(_, started)| *started),
+    );
+    let card = ui::plate(s, t, steel, 3.0)
         .key(format!("plate-{}", record.id))
         .role("button")
         .label(label)
         .focusable(true)
         .w_full()
-        .min_w(0.0)
-        .radius(3.0)
-        .fill(fill)
-        .border(1.0, border)
-        .hover(k.c.hover)
         .press_scale(ui::PRESS_CARD)
         .on_press(move |s: &mut State| s.open_record(id.clone()))
-        // The light along the top edge, where a plate would catch it.
-        .children(fresh.then(|| {
-            el().absolute(0.0, 0.0)
-                .w_full()
-                .h(1.0)
-                .fill(k.c.text_base.alpha(0.07))
-                .a11y_hidden()
-        }))
         .child(body);
     if arriving {
-        card.transition(ui::settle())
-            .child(ui::catch_light(format!("plate-{}", record.id), t, 3.0))
+        let card = card.transition(ui::settle());
+        // Without a compositor the band can't sweep; a pale light falls over the plate instead.
+        if s.shaders {
+            card
+        } else {
+            card.child(ui::catch_light(format!("plate-{}", record.id), t, 3.0))
+        }
     } else {
         ui::entering(card, index.min(STAGGERED))
     }
 }
 
-/// The figure under a plate's title, with the percentage a change carries.
+/// The steel a plate is made of: pale in either theme, leaning to the change it records, and
+/// duller when it is old, so it gives back less of the light.
+fn steel_of(record: &Record, fresh: bool, t: &Theme) -> Plate {
+    let tint = record.tone().map(|change| {
+        let c = t.change(change);
+        (
+            [c.r, c.g, c.b].map(srgb_encode),
+            if t.dark { 0.10 } else { 0.07 },
+        )
+    });
+    let tone = if fresh { 0.88 } else { 0.82 } + if t.dark { 0.0 } else { 0.08 };
+    let steel = Plate::new(tone).gain(if fresh { 1.0 } else { 0.45 });
+    match tint {
+        Some((rgb, strength)) => steel.tint(rgb, strength),
+        None => steel,
+    }
+}
+
+/// The figure under a plate's title, with the percentage a change carries, cut into the steel.
 fn figure(s: &State, record: &Record, t: &Theme) -> Option<El> {
     let k = &t.kit;
     let figure = record.figure_text(s.privacy, &s.currency())?;
-    let color = record
-        .tone()
-        .map_or(k.c.text_base, |change| t.change(change));
+    let (ink, lip) = ui::steel_ink();
     let percent = record.percent.map(|percent| {
         text(format!("({})", format::percent(percent)))
             .font(k.ty.text_small_medium)
-            .color(if record.tone().is_some() {
-                color
-            } else {
-                k.c.text_muted
-            })
+            .color(ink)
     });
     Some(
         row()
             .center_y()
             .w_full()
             .gap(8.0)
-            .child(text(figure).font(FIGURE).color(color))
+            .child(ui::engraved(figure, FIGURE, ink, lip))
             .children(percent),
     )
 }
@@ -268,9 +272,14 @@ fn moment(s: &State, record: &Record, t: &Theme, cx: &Cx<State>) -> El {
     let figure = record
         .figure_text(s.privacy, &s.currency())
         .unwrap_or_default();
-    let color = record
-        .tone()
-        .map_or(k.c.text_base, |change| t.change(change));
+    // The plate is the one on the wall, only larger: the same steel, the same ink.
+    let fresh = s
+        .records
+        .data
+        .as_ref()
+        .and_then(|plates| plates.first())
+        .is_some_and(|newest| (newest.date - record.date).num_days() <= FRESH_DAYS);
+    let (ink, lip) = ui::steel_ink();
     let first = points.first().map(|point| point.date.clone());
     col()
         .w_full()
@@ -299,44 +308,29 @@ fn moment(s: &State, record: &Record, t: &Theme, cx: &Cx<State>) -> El {
                 .gap(24.0)
                 // The plate itself, larger than it is on the wall.
                 .child(
-                    col()
+                    ui::plate(s, t, steel_of(record, fresh, t), 3.0)
                         .w_full()
                         .gap(10.0)
                         .padding(24.0)
-                        .radius(3.0)
-                        .fill(t.card)
-                        .border(1.0, k.c.border_base)
-                        .child(
-                            el().absolute(0.0, 0.0)
-                                .w_full()
-                                .h(1.0)
-                                .fill(k.c.text_base.alpha(0.07))
-                                .a11y_hidden(),
-                        )
                         .child(
                             text(record.date.format("%-d %B %Y").to_string())
                                 .font(k.ty.text_xsmall)
-                                .color(k.c.text_faint),
+                                .color(ink),
                         )
-                        .child(
-                            text(record.title())
-                                .font(HOLDING_TITLE)
-                                .color(k.c.text_base)
-                                .wrap(),
-                        )
+                        .child(ui::engraved(record.title(), HOLDING_TITLE, ink, lip))
                         .child(
                             row()
                                 .center_y()
                                 .w_full()
                                 .gap(8.0)
-                                .child(text(figure).font(FIGURE).color(color))
+                                .child(ui::engraved(figure, FIGURE, ink, lip))
                                 .children(record.percent.map(|percent| {
                                     text(format!("({})", format::percent(percent)))
                                         .font(k.ty.text_small_medium)
-                                        .color(color)
+                                        .color(ink)
                                 })),
                         )
-                        .child(text(words).font(k.ty.body).color(k.c.text_muted).wrap()),
+                        .child(text(words).font(k.ty.body).color(ink).wrap()),
                 )
                 .children((marked.is_none()).then(|| {
                     ui::notice(

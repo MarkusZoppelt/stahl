@@ -12,6 +12,7 @@ use rune::{
 use rune_kit::{Button, ButtonVariant};
 
 use crate::{
+    fx::Plate,
     icons,
     state::{Loadable, State},
     theme::{FIGURE, NUMBER, SECTION, Theme},
@@ -128,6 +129,83 @@ pub fn glass(s: &State, t: &Theme) -> El {
                 .fill(t.card.alpha(if t.dark { 0.62 } else { 0.60 }))
                 .a11y_hidden(),
         )
+}
+
+/// Brushed steel filling its parent, cut to `radius`: the door's metal as a flat plate, lit from
+/// the room's light, brushed straight across, with a chamfered edge. Without a compositor (tests,
+/// iOS) it is the same steel, flat: the door's lit and shaded colour from top to bottom.
+pub fn steel(s: &State, plate: Plate, radius: f32) -> El {
+    if s.shaders {
+        return crate::fx::steel(plate, radius);
+    }
+    flat_steel(plate, radius)
+}
+
+/// A round knob of turned steel filling its parent, like the door's hub; flat without a
+/// compositor.
+pub fn knob(s: &State, plate: Plate) -> El {
+    if s.shaders {
+        return crate::fx::knob(plate);
+    }
+    flat_steel(plate, 999.0)
+}
+
+/// A steel plate to build on: a column whose face is [`steel`], standing off the wall on a short
+/// shadow when it is raised. The caller adds the content, inked with [`steel_ink`].
+pub fn plate(s: &State, t: &Theme, plate: Plate, radius: f32) -> El {
+    let col = col().radius(radius).continuous_corners().min_w(0.0);
+    let col = if plate.raised {
+        col.shadow(
+            2.0,
+            6.0,
+            Color::BLACK.alpha(if t.dark { 0.55 } else { 0.22 }),
+        )
+    } else {
+        col
+    };
+    col.child(steel(s, plate, radius))
+}
+
+/// The ink for words on pale steel, whatever the theme: steel is the same metal in either light.
+/// The base ink, and the pale lip a cut catches under the light.
+pub fn steel_ink() -> (Color, Color) {
+    (
+        hex("#141b20").unwrap_or(Color::BLACK),
+        Color::WHITE.alpha(0.42),
+    )
+}
+
+/// Words cut into steel: dark ink with the pale lip of the cut a point below it, on the side
+/// away from the light, so the letters read as engraved rather than printed.
+pub fn engraved(words: impl Into<String>, font: rune::TextStyle, ink: Color, lip: Color) -> El {
+    let words = words.into();
+    col()
+        .min_w(0.0)
+        .child(
+            text(words.clone())
+                .font(font)
+                .color(lip)
+                .wrap()
+                .w_full()
+                .absolute(0.5, 1.0)
+                .a11y_hidden(),
+        )
+        .child(text(words).font(font).color(ink).wrap())
+}
+
+fn flat_steel(plate: Plate, radius: f32) -> El {
+    let (lit, dim) = plate.flat();
+    let color = |c: [f32; 3]| {
+        let [r, g, b] = c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        hex(&format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or(Color::WHITE)
+    };
+    let (top, bottom) = if plate.raised { (lit, dim) } else { (dim, lit) };
+    el().absolute(0.0, 0.0)
+        .w_full()
+        .h_full()
+        .radius(radius)
+        .a11y_hidden()
+        .linear_gradient(180.0, [(0.0, color(top)), (1.0, color(bottom))])
 }
 
 /// A soft round light of `color`, `size` points across, brightest at its centre. For the head
