@@ -19,6 +19,9 @@ use crate::{
 /// What a question looks like: a little quieter than the answer's first sentence.
 const QUESTION: TextStyle = SECTION;
 
+/// How long a word of the first sentence takes to fade in as it lands.
+const REVEAL_FADE: f32 = 0.18;
+
 /// The one sentence that explains an unverified figure.
 const UNVERIFIED: &str = "Underlined figures were written by the model. Stahl didn't compute them.";
 
@@ -262,6 +265,17 @@ pub fn suggestions(s: &State) -> Vec<String> {
     out
 }
 
+/// Where a block sits in an answer: which turn, which block, and how long ago it landed. What
+/// the page draws around it depends on all three.
+#[derive(Clone)]
+struct Slot {
+    /// The block's key, which names every element it draws.
+    key: String,
+    turn: usize,
+    at: usize,
+    age: Option<f64>,
+}
+
 fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) -> El {
     let table = crate::facts::of(s);
     let mut first_say = true;
@@ -270,8 +284,13 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
         .iter()
         .enumerate()
         .filter_map(|(at, block)| {
-            let key = format!("ask-{index}-{at}");
-            let el = block_view(s, t, cx, block, &table, &mut first_say, &key)?;
+            let slot = Slot {
+                key: format!("ask-{index}-{at}"),
+                turn: index,
+                at,
+                age: turn.age(at, s.now),
+            };
+            let el = block_view(s, t, cx, block, &table, &mut first_say, &slot)?;
             Some(ui::entering(el, at))
         })
         .collect();
@@ -294,8 +313,8 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
         && let Some(text) = s.ask.partial.as_deref()
         && !text.is_empty()
     {
-        answer =
-            answer.child(say(text, first_say, &table, s, t).key(format!("ask-{index}-partial")));
+        answer = answer
+            .child(say(text, first_say, &table, s, t, None).key(format!("ask-{index}-partial")));
     }
     if let Some(status) = status(s, t, turn, index) {
         answer = answer.child(status);
@@ -306,9 +325,11 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
 /// What a turn says while it is waiting, stopped or failed.
 fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
     let k = &t.kit;
-    let _ = s;
     match turn.phase {
-        ask::Phase::Waiting => Some(
+        // The sidebar's door already turns its tumblers while a question is out, so the page
+        // shows nothing but the question until the first word. On a phone the door is small,
+        // so a quiet line stands in for it.
+        ask::Phase::Waiting if s.compact => Some(
             row()
                 .key(format!("ask-waiting-{index}"))
                 .role("status")
@@ -325,6 +346,7 @@ fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
                 })))
                 .child(ui::caption("Reading your portfolio", t)),
         ),
+        ask::Phase::Waiting => None,
         ask::Phase::Failed => Some(
             col()
                 .key(format!("ask-failed-{index}"))
@@ -379,16 +401,24 @@ fn block_view(
     block: &Block,
     table: &Table,
     first_say: &mut bool,
-    key: &str,
+    slot: &Slot,
 ) -> Option<El> {
-    let key = key.to_string();
+    let key = slot.key.clone();
     match block {
         Block::Say { text: words } => {
-            let el = say(words, *first_say, table, s, t).key(format!("{key}-say"));
+            // The first sentence of an answer arrives as words, not as a finished paragraph.
+            let visible = s
+                .ask
+                .reveal
+                .as_ref()
+                .filter(|reveal| reveal.turn == slot.turn && reveal.block == slot.at)
+                .filter(|_| !cx.is_reduced_motion())
+                .map(|reveal| reveal.words);
+            let el = say(words, *first_say, table, s, t, visible).key(format!("{key}-say"));
             *first_say = false;
             Some(el)
         }
-        Block::Figures { ids } => figures(ids, table, s, t, &key, ui::room(s, cx)),
+        Block::Figures { ids } => figures(ids, table, s, t, &key, ui::room(s, cx), slot),
         Block::Chart { period, span } => chart(s, t, cx, period.as_deref(), *span, &key),
         Block::Holdings { class, sort, map } => {
             if *map == Some(true) {
@@ -411,12 +441,28 @@ fn block_view(
     }
 }
 
-/// A sentence with its figures filled in from the fact table.
-fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
+/// How a sentence's figures are set: the app's own figures a little heavier, a figure the model
+/// wrote underlined in the warning colour.
+enum Mark {
+    Strong,
+    Unverified,
+}
+
+/// A sentence with its figures filled in from the fact table. `visible` cuts it after that many
+/// words, for the first sentence as it arrives.
+fn say(
+    words: &str,
+    first: bool,
+    table: &Table,
+    s: &State,
+    t: &Theme,
+    visible: Option<usize>,
+) -> El {
     let pieces = ask::pieces(words, table);
     let mut content = String::new();
-    let mut spans = Vec::new();
+    let mut marks: Vec<(usize, usize, Mark)> = Vec::new();
     let mut unverified = false;
+    let currency = s.currency();
     for piece in pieces {
         match piece {
             Piece::Text(text) => content.push_str(&text),
@@ -424,38 +470,41 @@ fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
                 let start = content.len();
                 let shown = table.get(&id).map_or_else(
                     || "—".to_string(),
-                    |fact| ask::figure(fact, &content, s.privacy, &s.currency()),
+                    |fact| ask::figure(fact, &content, s.privacy, &currency),
                 );
                 content.push_str(&shown);
-                spans.push(
-                    Span::new(start, content.len())
-                        .weight(560.0)
-                        .color(t.kit.c.text_base),
-                );
+                marks.push((start, content.len(), Mark::Strong));
             }
             Piece::Gap(_) => {
                 let start = content.len();
                 content.push('—');
-                spans.push(
-                    Span::new(start, content.len())
-                        .color(t.warn)
-                        .underline(t.warn),
-                );
+                marks.push((start, content.len(), Mark::Unverified));
                 unverified = true;
             }
             Piece::Unverified(digits) => {
                 let start = content.len();
                 content.push_str(&digits);
-                spans.push(
-                    Span::new(start, content.len())
-                        .color(t.warn)
-                        .underline(t.warn),
-                );
+                marks.push((start, content.len(), Mark::Unverified));
                 unverified = true;
             }
         }
     }
-    let body = rich(content, spans)
+    if let Some(count) = visible {
+        content.truncate(ask::upto_words(&content, count));
+    }
+    let shown = content.len();
+    let spans: Vec<Span> = marks
+        .into_iter()
+        .filter(|(start, _, _)| *start < shown)
+        .map(|(start, end, mark)| {
+            let span = Span::new(start, end.min(shown));
+            match mark {
+                Mark::Strong => span.weight(560.0).color(t.kit.c.text_base),
+                Mark::Unverified => span.color(t.warn).underline(t.warn),
+            }
+        })
+        .collect();
+    let mut body = rich(content, spans)
         .font(if first {
             if s.compact { LEDE_COMPACT } else { LEDE }
         } else {
@@ -465,6 +514,10 @@ fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
         .wrap()
         .selectable(true)
         .max_w(760.0);
+    if first {
+        // Words, not a paragraph: each one fades in as it lands.
+        body = body.reveal(REVEAL_FADE);
+    }
     if unverified {
         body.help(UNVERIFIED)
     } else {
@@ -476,6 +529,17 @@ fn shown(fact: &Fact, s: &State) -> String {
     fact.value.render(s.privacy, &s.currency())
 }
 
+/// Whether this is the first answer to quote `id`: a figure counts up from zero the first time,
+/// and from the figure the last answer showed after that.
+fn first_time(s: &State, turn: usize, id: &str) -> bool {
+    !s.ask.turns.iter().take(turn).any(|earlier| {
+        earlier.blocks.iter().any(|block| match block {
+            Block::Figures { ids } => ids.iter().any(|each| each == id),
+            _ => false,
+        })
+    })
+}
+
 fn figures(
     ids: &[String],
     table: &Table,
@@ -483,21 +547,34 @@ fn figures(
     t: &Theme,
     key: &str,
     room: ui::Room,
+    slot: &Slot,
 ) -> Option<El> {
     let facts: Vec<&Fact> = ids.iter().filter_map(|id| table.get(id)).take(4).collect();
     if facts.is_empty() {
         return None;
     }
+    let currency = s.currency();
     let figure = |fact: &Fact, index: usize| {
+        let value = shown(fact, s);
+        // A figure that has just arrived counts up from zero; the rolling digits do the counting.
+        let counting =
+            slot.age.is_some_and(|age| age < ask::COUNT_HOLD) && first_time(s, slot.turn, &fact.id);
+        let text = if counting {
+            ask::zero(fact, s.privacy, &currency).unwrap_or_else(|| value.clone())
+        } else {
+            value
+        };
         col()
             .gap(4.0)
             .min_w(0.0)
             .child(ui::caption(fact.short.clone(), t).wrap())
             .child(
-                RollingText::new(format!("{key}-figure-{index}"), shown(fact, s))
+                // Keyed by the figure, so a later answer rolls from the one before it.
+                RollingText::new(format!("ask-figure-{}", fact.id), text)
                     .font(FIGURE)
                     .color(t.kit.c.text_base)
-                    .build(&t.kit),
+                    .build(&t.kit)
+                    .key(format!("{key}-figure-{index}")),
             )
     };
     Some(
@@ -534,7 +611,7 @@ fn chart(
                 &history.points,
                 t,
                 cx,
-                "ask-chart",
+                &format!("{key}-value"),
                 220.0,
             ))
             .child(ui::caption(s.ask_chart_name(period), t)),

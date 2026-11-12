@@ -3639,6 +3639,80 @@ fn counsel_answers_a_typed_question_with_blocks() {
 }
 
 #[test]
+fn the_first_sentence_arrives_word_by_word() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    let sentence = |app: &Harness| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some("ask-0-0-say"))
+            .and_then(|element| element.text.clone())
+            .unwrap_or_default()
+    };
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    // The block lands a third of a second after the question, with its first words only.
+    for _ in 0..21 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let early = sentence(&app);
+    let words = early.split_whitespace().count();
+    assert!(
+        (1..6).contains(&words),
+        "the sentence has only started: {early:?}"
+    );
+    for _ in 0..12 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let later = sentence(&app);
+    assert!(
+        later.split_whitespace().count() > words,
+        "more words have arrived: {early:?} then {later:?}"
+    );
+    assert!(
+        "Since Saturday you are up €291.41. Bitcoin did most of the work, which will surprise nobody."
+            .starts_with(&later),
+        "what is shown is the sentence from its start: {later:?}"
+    );
+    // And it finishes.
+    app.settle();
+    assert!(app.has_text("which will surprise nobody"));
+}
+
+#[test]
+fn a_loss_is_said_plainly_and_never_with_the_joke() {
+    let mut app = Harness::boot(true, None);
+    let change = app
+        .rt
+        .state
+        .change
+        .as_mut()
+        .expect("the demo looked at this portfolio before");
+    change.start = change.end + 300.0;
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("you are down €300.00"),
+        "the loss is stated, without a second sign"
+    );
+    assert!(
+        !app.has_text("surprise nobody"),
+        "the joke is only for a gain"
+    );
+    assert!(!app.has_text("you are up"));
+}
+
+#[test]
 fn thinking_is_true_from_sending_until_the_answer_finishes() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Ask.key());

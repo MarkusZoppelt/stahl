@@ -1321,8 +1321,25 @@ impl State {
         let mut changed = self.drain() || mem::take(&mut self.settled);
         changed |= self.drain_ask();
         changed |= self.ask_advance(now);
+        changed |= self.ask_reveal(now);
         if let Some((at, _)) = self.ask.queued.front() {
             tx.wake_at(*at);
+        }
+        if let Some(reveal) = self.ask.reveal.as_ref().filter(|reveal| !reveal.done()) {
+            tx.wake_at(reveal.next_at());
+        }
+        // A block that has just landed shows what it says for a beat, then moves to what the
+        // shock leaves or counts its figures up. The frames keep coming until it has.
+        if let Some(landed) = self
+            .ask
+            .turns
+            .last()
+            .and_then(|turn| turn.landed.last())
+            .copied()
+            && now < landed + crate::ask::PLAY_HOLD
+        {
+            tx.wake_at(landed + crate::ask::PLAY_HOLD);
+            changed = true;
         }
         if self.ask_settle > 0 {
             self.ask_settle -= 1;
@@ -3415,11 +3432,16 @@ impl State {
     }
 
     /// Show every block that is due, and finish the turn when none are left. True when one landed.
+    ///
+    /// `now` is the clock the queue is read against. A block is stamped with the app's own clock
+    /// ([`State::now`]), which is the same in a frame and never a jump a caller made.
     pub fn ask_advance(&mut self, now: f64) -> bool {
         if self.ask.queued.is_empty() {
             return false;
         }
         let table = crate::facts::of(self);
+        let (hidden, currency) = (self.privacy, self.currency());
+        let landed_at = self.now;
         let mut landed = false;
         while self.ask.queued.front().is_some_and(|(at, _)| *at <= now) {
             let (_, block) = self.ask.queued.pop_front().expect("just checked");
@@ -3428,22 +3450,98 @@ impl State {
             // span it marks is measured the same way the Performance chart's is.
             if keep && let crate::ask::Block::Chart { span, .. } = &block {
                 self.restart_draw = true;
+                // A chart measures the room it has on the frame after it is laid out. Two more
+                // frames, so it takes its width before anyone looks at it, whatever else is on
+                // the page above it.
+                self.ask_settle = self.ask_settle.max(2);
                 if let Some(span) = span {
                     self.measure.span = Some((span[0], span[1]));
                 }
             }
+            // The answer's first sentence arrives word by word, and the rest waits for it.
+            let mut sentence = None;
             if let Some(turn) = self.ask.current_mut() {
                 if keep {
-                    turn.blocks.push(block);
+                    if turn.first_say(&block) {
+                        sentence =
+                            Some(crate::ask::spoken(block.text(), &table, hidden, &currency));
+                    }
+                    turn.land(block, landed_at);
                 }
                 turn.phase = crate::ask::Phase::Streaming;
             }
+            if let Some(sentence) = sentence {
+                self.begin_reveal(sentence, landed_at);
+            }
             landed = true;
         }
-        if landed && self.ask.queued.is_empty() {
-            self.ask_done();
+        if landed {
+            self.ask_finish_if_ready();
         }
         landed
+    }
+
+    /// The sentence that just landed is revealed word by word, and the blocks after it wait
+    /// until its words are on the page.
+    fn begin_reveal(&mut self, sentence: String, now: f64) {
+        let total = sentence.split_whitespace().count();
+        if total < 2 {
+            return;
+        }
+        let Some(turn) = self.ask.turns.len().checked_sub(1) else {
+            return;
+        };
+        let Some(block) = self.ask.turns[turn].blocks.len().checked_sub(1) else {
+            return;
+        };
+        let reveal = crate::ask::Reveal {
+            turn,
+            block,
+            // The block lands with its first word on the page, so nothing is ever an empty box.
+            words: 1,
+            total,
+            started: now,
+        };
+        let ends = reveal.ends_at();
+        self.ask.reveal = Some(reveal);
+        // The rest of the answer follows the sentence closely, then keeps its own rhythm.
+        for (index, (at, _)) in self.ask.queued.iter_mut().enumerate() {
+            *at = ends + crate::ask::AFTER_SENTENCE + crate::ask::NEXT_BLOCK * index as f64;
+        }
+    }
+
+    /// Put the sentence's next words on the page. True when the page changed.
+    pub fn ask_reveal(&mut self, now: f64) -> bool {
+        let Some(reveal) = self.ask.reveal.as_ref() else {
+            return false;
+        };
+        if reveal.done() {
+            self.ask.reveal = None;
+            return true;
+        }
+        let due = (((now - reveal.started) / reveal.step()).floor() as usize + 1).min(reveal.total);
+        if due <= reveal.words {
+            return false;
+        }
+        let done = due >= reveal.total;
+        if let Some(reveal) = &mut self.ask.reveal {
+            reveal.words = due;
+        }
+        if done {
+            self.ask.reveal = None;
+            self.ask_finish_if_ready();
+        }
+        true
+    }
+
+    /// Finish the turn when nothing is left to arrive: no block queued and no words left.
+    fn ask_finish_if_ready(&mut self) {
+        if !self.ask.queued.is_empty() || self.ask.reveal.as_ref().is_some_and(|r| !r.done()) {
+            return;
+        }
+        if self.ask.turns.last().is_some_and(|turn| !turn.finished()) {
+            self.ask_done();
+        }
     }
 
     /// Read what the model has sent. True when anything arrived.
@@ -3463,10 +3561,13 @@ impl State {
     /// A piece of a provider's answer: whole lines become blocks as they complete.
     fn ask_text(&mut self, text: &str) {
         let blocks = self.ask.lines.push(text);
+        let now = self.now;
         if !blocks.is_empty()
             && let Some(turn) = self.ask.current_mut()
         {
-            turn.blocks.extend(blocks);
+            for block in blocks {
+                turn.land(block, now);
+            }
             turn.phase = crate::ask::Phase::Streaming;
         }
         self.ask.partial = crate::ask::partial_say(self.ask.lines.partial());
@@ -3475,14 +3576,18 @@ impl State {
     /// The answer has finished.
     fn ask_done(&mut self) {
         let leftovers = self.ask.lines.finish();
+        let now = self.now;
         if let Some(turn) = self.ask.current_mut() {
-            turn.blocks.extend(leftovers);
+            for block in leftovers {
+                turn.land(block, now);
+            }
             turn.phase = crate::ask::Phase::Done;
         }
         self.ask.thinking = false;
         self.ask.streaming = false;
         self.ask.partial = None;
         self.ask.cancel = None;
+        self.ask.reveal = None;
         // The page is its final height now: two more frames let anything that measures its room
         // take the right size, without drawing the chart in a second time.
         self.ask_settle = 2;
@@ -3496,6 +3601,7 @@ impl State {
         self.ask.streaming = false;
         self.ask.partial = None;
         self.ask.cancel = None;
+        self.ask.reveal = None;
         if let Some(turn) = self.ask.current_mut() {
             turn.phase = crate::ask::Phase::Failed;
             turn.error = Some(why);
@@ -3514,6 +3620,7 @@ impl State {
         self.ask.streaming = false;
         self.ask.queued.clear();
         self.ask.partial = None;
+        self.ask.reveal = None;
         if let Some(turn) = self.ask.current_mut() {
             turn.phase = crate::ask::Phase::Stopped;
         }
@@ -3530,6 +3637,7 @@ impl State {
         }
         let question = last.question.clone();
         self.ask.turns.pop();
+        self.ask.reveal = None;
         self.ask.input.replace_text(&question);
         self.ask_send();
     }

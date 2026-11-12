@@ -879,6 +879,18 @@ fn main() {
                 s.navigate(Page::Holdings);
                 s.navigate(Page::Ask);
             }),
+            // Two answers on one page: the second chart has to measure the room it really has.
+            ("counsel-two", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+                s.skip_opening();
+            }),
+            // The same, with the second answer arriving for real.
+            ("counsel-two-arrive", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                s.skip_opening();
+                s.ask_question("What changed this month?");
+            }),
             ("counsel-span", |s| {
                 ask_answer(s, "When did it move?", ASK_SPAN)
             }),
