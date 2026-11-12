@@ -1637,6 +1637,15 @@ impl State {
         }
     }
 
+    /// Money to the nearest thousand, for ranges where cents are noise.
+    pub fn money_thousands(&self, value: f64) -> String {
+        if self.privacy {
+            format::HIDDEN.to_string()
+        } else {
+            format::currency_thousands(value, &self.currency())
+        }
+    }
+
     pub fn optional_money(&self, value: Option<f64>) -> String {
         value.map_or_else(|| "-".to_string(), |value| self.money(value))
     }

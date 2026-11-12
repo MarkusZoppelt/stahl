@@ -74,9 +74,9 @@ fn sentence(s: &State, t: &Theme, outlook: &Outlook) -> El {
     } else {
         format!(
             "{when}, the portfolio could sit between {} and {}, with {} the middle of the range.",
-            s.money(band.low),
-            s.money(band.high),
-            s.money(band.median),
+            s.money_thousands(band.low),
+            s.money_thousands(band.high),
+            s.money_thousands(band.median),
         )
     };
     text(line)
