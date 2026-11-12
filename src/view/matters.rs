@@ -7,19 +7,20 @@
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+use chrono::NaiveDate;
 use rune::{
-    Color, Cursor, Drag, DragItem, El, Key, KeyEvent, Phase, Spring, Transition, Tx, canvas, col,
-    el, icon, row, text,
+    Color, Cursor, Cx, Drag, DragItem, El, Key, KeyEvent, Phase, Shape, Spring, SpringPair,
+    TextEdit, Transition, Tx, canvas, col, el, icon, row, text,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, Markdown, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Markdown, TextInput};
 
 use crate::{
-    agenda::{Action, Calm},
-    icons,
+    agenda::{Action, Calm, Item, Weight},
+    format, icons,
     matters::{self, Matter, Proposal, Stamp},
     state::{Page, State},
     theme::{FIGURE, NUMBER, SECTION, Theme},
-    view::ui,
+    view::{rebalance, ui},
 };
 
 /// The Sign control: a round steel control a finger can rest on.
@@ -33,11 +34,11 @@ const SPRING_BACK: Spring = Spring::new(0.24, 0.55);
 /// A seal coming down onto paper.
 const STAMP_DOWN: Spring = Spring::new(0.30, 0.62);
 
-fn weight_color(weight: crate::agenda::Weight, t: &Theme) -> Color {
+fn weight_color(weight: Weight, t: &Theme) -> Color {
     match weight {
-        crate::agenda::Weight::Total | crate::agenda::Weight::Critical => t.down,
-        crate::agenda::Weight::Warning => t.warn,
-        crate::agenda::Weight::Notice => t.info,
+        Weight::Total | Weight::Critical => t.down,
+        Weight::Warning => t.warn,
+        Weight::Notice => t.info,
     }
 }
 
@@ -218,13 +219,13 @@ fn hold_ring(progress: f32, t: &Theme) -> El {
             })
             .collect()
     };
-    let mut shape = canvas(rune::Shape::new().stroke(arc(1.0), RING, t.kit.c.layer_03))
+    let mut shape = canvas(Shape::new().stroke(arc(1.0), RING, t.kit.c.layer_03))
         .absolute(0.0, 0.0)
         .size(SIGN, SIGN)
         .a11y_hidden();
     if progress > 0.002 {
         shape = canvas(
-            rune::Shape::new()
+            Shape::new()
                 .stroke(arc(1.0), RING, t.kit.c.layer_03)
                 .stroke(arc(progress), RING, t.accent),
         )
@@ -319,7 +320,7 @@ fn is_sign_key(event: &KeyEvent) -> bool {
 
 /// The seal stamped onto a signed matter: the door's rings in miniature, with the date inside.
 /// One function, so real steel can replace it without touching the card.
-pub fn seal(date: chrono::NaiveDate, size: f32, t: &Theme) -> El {
+pub fn seal(date: NaiveDate, size: f32, t: &Theme) -> El {
     let k = &t.kit;
     let radius = size / 2.0;
     el().key("matter-seal")
@@ -333,7 +334,7 @@ pub fn seal(date: chrono::NaiveDate, size: f32, t: &Theme) -> El {
         .transition(
             Transition::scale(1.35)
                 .combined(Transition::opacity())
-                .springs(rune::SpringPair::new(STAMP_DOWN, STAMP_DOWN)),
+                .springs(SpringPair::new(STAMP_DOWN, STAMP_DOWN)),
         )
         .child(
             el().absolute(4.0, 4.0)
@@ -592,7 +593,7 @@ fn matter_card(
 fn open_plan(s: &mut State, action: Action) {
     if let Action::Open(Page::Rebalance) = action {
         // The plan the matter proposes is the one the page opens on.
-        crate::view::rebalance::set_blend(s, matters::HALFWAY);
+        rebalance::set_blend(s, matters::HALFWAY);
     }
     action.perform(s);
 }
@@ -605,7 +606,7 @@ fn decline_button(matter: &Matter, t: &Theme) -> El {
         .on_press(move |s: &mut State| {
             s.matters.declining = Some(matters::Declining {
                 id: id.clone(),
-                reason: rune::TextEdit::new(""),
+                reason: TextEdit::new(""),
             });
             s.matters.hint = None;
         })
@@ -624,7 +625,7 @@ fn postpone_button(matter: &Matter, t: &Theme) -> El {
 }
 
 /// A data fix: lighter than a matter, with the one action that deals with it.
-fn todo_row(item: &crate::agenda::Item, index: usize, t: &Theme, narrow: bool) -> El {
+fn todo_row(item: &Item, index: usize, t: &Theme, narrow: bool) -> El {
     let k = &t.kit;
     let action = item.action;
     let words = col()
@@ -687,7 +688,10 @@ fn todo_row(item: &crate::agenda::Item, index: usize, t: &Theme, narrow: bool) -
 fn quiet(s: &State, t: &Theme, with_detail: bool) -> El {
     let k = &t.kit;
     let detail = match s.agenda_calm() {
-        Calm::Checking => "Checking against your policy…".to_string(),
+        // Nothing can be claimed either way until the review lands.
+        Calm::Checking => {
+            return ui::muted("Checking against your policy…", t).key("matters-checking");
+        }
         Calm::Clear(words) => words,
     };
     row()
@@ -764,7 +768,12 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
                 ),
         );
     }
-    section
+    section.children(
+        s.matters
+            .error
+            .as_ref()
+            .map(|error| ui::danger(error.clone(), t)),
+    )
 }
 
 /// The reduced-motion confirmation, drawn over the page as the app's other dialogs are.
@@ -778,7 +787,7 @@ pub fn confirm_dialog(s: &State, t: &Theme, layer: &mut Vec<El>) {
     };
     let k = &t.kit;
     let id = matter.id.clone();
-    rune_kit::Dialog::new("matter-confirm", "Sign this decision?")
+    Dialog::new("matter-confirm", "Sign this decision?")
         .open(true)
         .fit()
         .width(460.0)
@@ -816,7 +825,7 @@ pub fn confirm_dialog(s: &State, t: &Theme, layer: &mut Vec<El>) {
 }
 
 /// The decision records on the Documents page, newest first, with the one opened below them.
-pub fn records(s: &State, t: &Theme, cx: &rune::Cx<State>) -> El {
+pub fn records(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let k = &t.kit;
     let room = ui::room(s, cx);
     let narrow = room == ui::Room::Narrow;
@@ -843,7 +852,7 @@ pub fn records(s: &State, t: &Theme, cx: &rune::Cx<State>) -> El {
                         "Declined" => t.warn,
                         _ => t.kit.c.text_muted,
                     };
-                    let date = chrono::NaiveDate::parse_from_str(&decision.date, "%Y-%m-%d")
+                    let date = NaiveDate::parse_from_str(&decision.date, "%Y-%m-%d")
                         .map_or_else(|_| decision.date.clone(), matters::long_date);
                     let words = if narrow {
                         col()
@@ -930,7 +939,7 @@ pub fn records(s: &State, t: &Theme, cx: &rune::Cx<State>) -> El {
                             .justify_between()
                             .gap(12.0)
                             .child(
-                                ui::caption(crate::format::place(&path), t)
+                                ui::caption(format::place(&path), t)
                                     .truncate_middle()
                                     .shrink()
                                     .drag_out(move |_: &State| {
@@ -953,7 +962,7 @@ pub fn records(s: &State, t: &Theme, cx: &rune::Cx<State>) -> El {
                     )
                     .children(saved.map(|path| {
                         ui::caption(
-                            format!("Saved in {}", crate::format::place(&path.to_string_lossy())),
+                            format!("Saved in {}", format::place(&path.to_string_lossy())),
                             t,
                         )
                         .truncate_middle()
@@ -987,7 +996,7 @@ mod tests {
 
     #[test]
     fn the_seal_carries_the_date_in_the_bank_s_short_form() {
-        let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
         assert_eq!(matters::seal_date(date), "3 OCT");
         assert_eq!(matters::long_date(date), "3 October 2026");
     }

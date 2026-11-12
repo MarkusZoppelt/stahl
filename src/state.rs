@@ -45,6 +45,7 @@ use crate::{
         reconcile::{self, Bought, Holding, Ledger},
         text::Sheet,
     },
+    matters::MattersPage,
     records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
@@ -929,7 +930,7 @@ pub struct State {
     pub policy: PolicyPage,
     pub documents: DocumentsPage,
     /// What the bank has prepared for signature, and what was decided.
-    pub matters: crate::matters::MattersPage,
+    pub matters: MattersPage,
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
@@ -1223,7 +1224,7 @@ impl State {
                 message: None,
                 error: None,
             },
-            matters: crate::matters::MattersPage::default(),
+            matters: MattersPage::default(),
             settings: SettingsForm {
                 currency: TextEdit::new(""),
                 provider_url: TextEdit::new(""),

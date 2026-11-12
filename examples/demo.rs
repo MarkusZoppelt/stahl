@@ -744,6 +744,28 @@ fn main() {
                 s.settle();
             }),
             ("phone-matters", |s| phone(s, Page::Overview)),
+            ("phone-matters-expanded", |s| {
+                phone(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            ("phone-matters-todo", |s| {
+                phone(s, Page::Overview);
+                on_target(s);
+                s.findings.push(Finding::new(
+                    "stale_prices",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    "2 position(s) have prices older than the stale threshold".to_string(),
+                ));
+            }),
+            ("phone-matters-declined", |s| {
+                phone(s, Page::Overview);
+                if let Some(id) = first_matter(s) {
+                    let mut reason = rune::TextEdit::new("");
+                    reason.replace_text("Not this month.");
+                    s.matters.declining = Some(stahl::matters::Declining { id, reason });
+                }
+            }),
             ("phone-matters-light", |s| {
                 phone(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);

@@ -15,17 +15,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chrono::{Datelike as _, Local, NaiveDate};
+use chrono::{Datelike as _, Duration, Local, NaiveDate};
 use portfolio_rs::{
-    policy::Policy, review::Review, services::atomic_write, state::AllocationItemDto,
+    mcp::snapshots,
+    policy::Policy,
+    review::{AllocationReview as ReviewAllocation, Review},
+    services::atomic_write,
+    state::AllocationItemDto,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     agenda::{self, Action as AgendaAction, Item as AgendaItem, Weight},
+    backend::{Backend, BackendResult},
     format,
     rebalance::{self, Class, Plan},
-    state::State,
+    state::{Page, State},
 };
 
 /// How long the Sign control is held before the decision is recorded.
@@ -435,7 +440,7 @@ fn rebalance_matter(
         return None;
     }
     // Furthest past its tolerance first, so the sentence names what matters most.
-    let excess = |class: &&portfolio_rs::review::AllocationReview| {
+    let excess = |class: &&ReviewAllocation| {
         class.drift_percent.abs() / class.tolerance_percent.unwrap_or(5.0).max(0.1)
     };
     let mut sorted = outside.clone();
@@ -521,7 +526,7 @@ fn rebalance_matter(
         records: "Signing records it in Documents, with the plan and these figures. Stahl never \
                   trades."
             .to_string(),
-        adjust: Some(AgendaAction::Open(crate::state::Page::Rebalance)),
+        adjust: Some(AgendaAction::Open(Page::Rebalance)),
         fix: None,
         figures,
         steps,
@@ -632,7 +637,7 @@ fn place_cash_matter(
         prior: None,
         proposal,
         records: "Signing records where it would go, in Documents. Stahl never trades.".to_string(),
-        adjust: Some(AgendaAction::Open(crate::state::Page::Rebalance)),
+        adjust: Some(AgendaAction::Open(Page::Rebalance)),
         fix: None,
         figures,
         steps,
@@ -701,7 +706,7 @@ fn top_up_matter(
         records: "Signing records the sales that would restore it, in Documents. Stahl never \
                   trades."
             .to_string(),
-        adjust: Some(AgendaAction::Open(crate::state::Page::Rebalance)),
+        adjust: Some(AgendaAction::Open(Page::Rebalance)),
         fix: None,
         figures,
         steps,
@@ -819,6 +824,9 @@ impl Entry {
 /// The decisions kept beside the history, newest last.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ledger {
+    /// The file's shape. One, for now; a later reader can tell what it is looking at.
+    #[serde(default)]
+    pub version: u32,
     #[serde(default)]
     pub entries: Vec<Entry>,
 }
@@ -830,6 +838,7 @@ impl Ledger {
 
     /// Keep one entry per matter id: the latest decision replaces the one before it.
     pub fn record(&mut self, entry: Entry) {
+        self.version = 1;
         self.entries.retain(|each| each.id != entry.id);
         self.entries.push(entry);
     }
@@ -936,14 +945,14 @@ fn write_ledger(ledger: &Ledger) -> String {
 
 /// The day a postponed matter comes back.
 fn tomorrow(today: NaiveDate) -> NaiveDate {
-    today + chrono::Duration::days(1)
+    today + Duration::days(1)
 }
 
 // --- Where matters and records live ---
 
 /// The directory a workspace keeps its matters in, beside its history.
 pub fn matters_dir(workspace: &Path) -> PathBuf {
-    portfolio_rs::mcp::snapshots::data_dir(None, Some(workspace))
+    snapshots::data_dir(None, Some(workspace))
         .unwrap_or_else(|| workspace.join("portfolio/history"))
         .join("main")
 }
@@ -1130,7 +1139,7 @@ pub fn record_markdown(
 
 // --- The backend's side ---
 
-impl crate::backend::Backend {
+impl Backend {
     /// The workspace's directory, when one is open.
     async fn matters_workspace(&self) -> Option<PathBuf> {
         let open = self.open_document().await;
@@ -1160,7 +1169,7 @@ impl crate::backend::Backend {
     }
 
     /// Write the ledger beside the history, where `seen.json` lives.
-    pub async fn save_matters(&self, ledger: &Ledger) -> crate::backend::BackendResult<()> {
+    pub async fn save_matters(&self, ledger: &Ledger) -> BackendResult<()> {
         let workspace = self
             .matters_workspace()
             .await
@@ -1180,7 +1189,7 @@ impl crate::backend::Backend {
         reason: Option<String>,
         date: NaiveDate,
         currency: &str,
-    ) -> crate::backend::BackendResult<String> {
+    ) -> BackendResult<String> {
         let workspace = self
             .matters_workspace()
             .await
@@ -1321,7 +1330,7 @@ impl State {
         }
         self.run(
             |backend| async move { Ok(backend.matters().await) },
-            |state, result: crate::backend::BackendResult<(Ledger, Option<Policy>)>| {
+            |state, result: BackendResult<(Ledger, Option<Policy>)>| {
                 if let Ok((ledger, policy)) = result {
                     state.matters.ledger = ledger;
                     state.matters.policy = policy;
@@ -1335,7 +1344,7 @@ impl State {
         self.matters.loading = true;
         self.run(
             |backend| async move { Ok(backend.decisions().await) },
-            |state, result: crate::backend::BackendResult<Vec<Decision>>| {
+            |state, result: BackendResult<Vec<Decision>>| {
                 state.matters.loading = false;
                 match result {
                     Ok(decisions) => {
@@ -1407,6 +1416,7 @@ impl State {
         ledger.record(entry(&matter, Status::Signed, today, None));
         self.matters.ledger = ledger.clone();
         let saved = ledger.clone();
+        let rollback_id = id.to_string();
         self.run(
             move |backend| async move {
                 let path = backend
@@ -1415,7 +1425,7 @@ impl State {
                 backend.save_matters(&saved).await?;
                 Ok(path)
             },
-            |state, result: crate::backend::BackendResult<String>| match result {
+            move |state, result: BackendResult<String>| match result {
                 Ok(path) => {
                     state.matters.message =
                         Some("Recorded. The plan is in your documents.".to_string());
@@ -1425,8 +1435,14 @@ impl State {
                     let _ = path;
                 }
                 Err(error) => {
+                    // Nothing was written, so nothing was decided: put the matter back.
                     state.matters.error = Some(error);
                     state.matters.stamp = None;
+                    state
+                        .matters
+                        .ledger
+                        .entries
+                        .retain(|entry| entry.id != rollback_id);
                 }
             },
         );
@@ -1458,6 +1474,7 @@ impl State {
         }
         let saved = ledger;
         let currency = self.currency();
+        let rollback_id = id.to_string();
         self.run(
             move |backend| async move {
                 backend
@@ -1466,9 +1483,14 @@ impl State {
                 backend.save_matters(&saved).await?;
                 Ok(())
             },
-            |state, result: crate::backend::BackendResult<()>| {
+            move |state, result: BackendResult<()>| {
                 if let Err(error) = result {
                     state.matters.error = Some(error);
+                    state
+                        .matters
+                        .ledger
+                        .entries
+                        .retain(|entry| entry.id != rollback_id);
                 } else {
                     state.matters.decisions_loaded = false;
                 }
@@ -1498,11 +1520,17 @@ impl State {
         if !self.is_workspace() {
             return;
         }
+        let rollback_id = id.to_string();
         self.run(
             move |backend| async move { backend.save_matters(&ledger).await },
-            |state, result: crate::backend::BackendResult<()>| {
+            move |state, result: BackendResult<()>| {
                 if let Err(error) = result {
                     state.matters.error = Some(error);
+                    state
+                        .matters
+                        .ledger
+                        .entries
+                        .retain(|entry| entry.id != rollback_id);
                 }
             },
         );
@@ -1570,7 +1598,7 @@ fn entry(matter: &Matter, status: Status, today: NaiveDate, reason: Option<Strin
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, env, process, time::SystemTime};
 
     use portfolio_rs::{
         policy::{AllocationTarget, Constraints, RiskProfile},
@@ -1673,10 +1701,7 @@ mod tests {
         let prepared = prepare(&inputs(None, None, &allocation, false));
         assert!(prepared.matters.is_empty());
         assert_eq!(prepared.todo.len(), 1, "the policy is still a to-do");
-        assert_eq!(
-            prepared.todo[0].action,
-            AgendaAction::Open(crate::state::Page::Policy)
-        );
+        assert_eq!(prepared.todo[0].action, AgendaAction::Open(Page::Policy));
     }
 
     #[test]
@@ -1845,7 +1870,7 @@ mod tests {
 
     fn signed_entry(matter: &Matter, status: Status, days_ago: i64) -> Entry {
         let today = Local::now().date_naive();
-        let at = today - chrono::Duration::days(days_ago);
+        let at = today - Duration::days(days_ago);
         entry(matter, status, at, None)
     }
 
@@ -1998,11 +2023,11 @@ mod tests {
 
     #[test]
     fn a_record_is_read_back_with_its_title_date_and_status() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = env::temp_dir().join(format!(
             "stahl-matters-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos())
         ));
         let records = dir.join("portfolio/decisions");
@@ -2023,11 +2048,11 @@ mod tests {
 
     #[test]
     fn a_record_path_never_overwrites_one() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = env::temp_dir().join(format!(
             "stahl-matters-paths-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos())
         ));
         fs::create_dir_all(&dir).unwrap();

@@ -15,7 +15,7 @@ use crate::{
     update,
     view::{
         answers::{self, Figure},
-        guide, page_icon,
+        guide, matters, page_icon,
         portfolio::matches_search,
         ui, updates,
     },
@@ -43,7 +43,7 @@ pub fn build(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
     if s.intake.is_some() {
         super::intake::sheet(s, t, cx, layer);
     }
-    crate::view::matters::confirm_dialog(s, t, layer);
+    matters::confirm_dialog(s, t, layer);
     updates::build(s, t, layer);
     if let Some((message, _)) = &s.toast {
         let mut toast = Toast::new("toast", message.clone()).icon(&t.kit, &icons::CHECK_CIRCLE);
