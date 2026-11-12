@@ -1852,9 +1852,11 @@ fn steel(p: vec2f) -> vec4f {
             steel_sd(local + vec2f(0.0, e), half, u.radius) - steel_sd(local - vec2f(0.0, e), half, u.radius));
         let normal = normalize(g + vec2f(0.0, 1e-4));
         let bevel = smoothstep(-1.5 - 0.5 / dev, -1.5 + 0.5 / dev, sd);
-        let facing = dot(normal, dir) * depth;
-        let edge_lit = select(0.26, 0.24, dark) * (1.0 + 0.6 * hover) * (0.6 + 0.4 * gain);
-        let edge_dim = select(0.22, 0.30, dark);
+        // The one light, but from above as well as across: the top edge catches it as a hairline
+        // and the bottom edge is in shade, so the plate has a thickness.
+        let facing = dot(normal, normalize(dir + vec2f(0.0, -1.1))) * depth;
+        let edge_lit = select(0.34, 0.42, dark) * (1.0 + 0.6 * hover) * (0.6 + 0.4 * gain);
+        let edge_dim = select(0.30, 0.46, dark);
         c += steel_white * bevel * max(facing, 0.0) * edge_lit;
         c *= 1.0 - bevel * max(-facing, 0.0) * edge_dim;
         // The bevel's own sides: even facing away from the light, it reads as an edge.
