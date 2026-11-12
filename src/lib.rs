@@ -16,5 +16,6 @@ pub mod scenario;
 pub mod state;
 pub mod statement;
 pub mod theme;
+pub mod time;
 pub mod update;
 pub mod view;

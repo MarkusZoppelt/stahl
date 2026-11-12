@@ -76,10 +76,28 @@ fn turn_dial(s: &mut State, drag: &mut Drag, _tx: &mut Tx) {
                     delta += TAU;
                 }
                 s.dial_hand += delta;
+                turn_time(s, delta);
             }
             s.dial_drag = Some(angle);
         }
-        Phase::Up => s.dial_drag = None,
+        Phase::Up => {
+            s.dial_drag = None;
+            s.time.dial_rest = 0.0;
+        }
+    }
+}
+
+/// The dial turns time: each notch turned back is a recorded day back, each notch forward a day
+/// forward, and it stops at today. Only with a portfolio open, so the welcome door stays a door.
+fn turn_time(s: &mut State, delta: f32) {
+    if !s.has_portfolio() {
+        return;
+    }
+    s.time.dial_rest += delta;
+    let notches = (s.time.dial_rest / NOTCH).trunc();
+    if notches != 0.0 {
+        s.time.dial_rest -= notches * NOTCH;
+        s.step_time(notches as i64);
     }
 }
 
@@ -89,6 +107,9 @@ fn turn_key(s: &mut State, event: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Left => s.dial_hand -= NOTCH,
         Key::Right => s.dial_hand += NOTCH,
         _ => return false,
+    }
+    if s.has_portfolio() {
+        s.step_time(if event.key == Key::Left { -1 } else { 1 });
     }
     true
 }
@@ -132,7 +153,11 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
             .focusable(true)
             .on_drag(turn_dial)
             .on_key(turn_key)
-            .help("Drag to turn the dial, or press the left and right arrow keys");
+            .help(if s.has_portfolio() && !s.time.days.is_empty() {
+                "Turn the dial back to go back in time, a recorded day a notch. The arrow keys turn it too."
+            } else {
+                "Drag to turn the dial, or press the left and right arrow keys"
+            });
     }
     door.role("img")
         .label(format!("Stahl Capital. {}", describe(count)))

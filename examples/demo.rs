@@ -96,6 +96,19 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
+    /// A page on the lowest day Stahl recorded, as the time strip or the door would leave it.
+    fn past_scene(s: &mut State, page: Page) {
+        scene(s, page);
+        s.skip_opening();
+        let lowest = s
+            .time
+            .days
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total.total_cmp(&b.1.total))
+            .map(|(index, _)| index);
+        s.travel(lowest);
+    }
     /// A newer release waiting, as if a check at startup had found it.
     fn update_scene(s: &mut State, installation: Installation, dialog: bool) {
         scene(s, Page::Overview);
@@ -877,6 +890,33 @@ fn main() {
                 s.ask_question("How much is in crypto?");
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // Time turned back: the whole app on the lowest recorded day.
+            ("past", |s| past_scene(s, Page::Overview)),
+            ("past-light", |s| {
+                past_scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("past-holdings", |s| past_scene(s, Page::Holdings)),
+            ("past-holdings-map", |s| {
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-allocation", |s| past_scene(s, Page::Allocation)),
+            ("past-rebalance", |s| past_scene(s, Page::Rebalance)),
+            ("phone-past", |s| {
+                s.compact = true;
+                past_scene(s, Page::Overview);
+            }),
+            ("phone-past-holdings", |s| {
+                s.compact = true;
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-private", |s| {
+                past_scene(s, Page::Overview);
+                s.privacy = true;
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

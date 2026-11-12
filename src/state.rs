@@ -887,6 +887,8 @@ pub struct State {
     pub since: Option<Since>,
     /// The portfolio since then, from the stored valuations.
     pub change: Option<Change>,
+    /// Where the owner is in time: today, or a recorded day in the past.
+    pub time: crate::time::Time,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1182,6 +1184,7 @@ impl State {
             seen_for: None,
             since: None,
             change: None,
+            time: crate::time::Time::default(),
         }
     }
 
@@ -1197,7 +1200,7 @@ impl State {
 
     // --- Running work off the UI thread ---
 
-    fn run<T, F>(
+    pub(crate) fn run<T, F>(
         &mut self,
         work: impl FnOnce(Backend) -> F,
         done: impl FnOnce(&mut State, BackendResult<T>) + Send + 'static,
@@ -1656,6 +1659,8 @@ impl State {
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        // Today's figures land as today's, and the day being looked at is shown again over them.
+        let past = self.leave_past_for_news();
         self.summary = Some(snapshot.summary);
         self.positions = snapshot.positions;
         self.quotes = snapshot.quotes;
@@ -1669,6 +1674,8 @@ impl State {
         self.load_page();
         self.load_since();
         self.load_record_mark();
+        self.travel(past);
+        self.load_days();
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -1901,6 +1908,8 @@ impl State {
 
     /// A different portfolio is open now, so nothing fetched for the last one still applies.
     fn opened_another(&mut self) {
+        self.travel(None);
+        self.time = crate::time::Time::default();
         self.dirty = false;
         self.form = None;
         self.folder_prompt = None;
@@ -2476,6 +2485,9 @@ impl State {
 
     /// What changed since the owner last looked, in words, or `None` with nothing worth saying.
     pub fn statement(&self) -> Option<Statement> {
+        if let Some(statement) = self.past_statement() {
+            return Some(statement);
+        }
         let summary = self.summary.as_ref()?;
         let currency = self.currency();
         let encrypted = self
@@ -2555,6 +2567,8 @@ impl State {
         if !self.has_portfolio() {
             return;
         }
+        // Positions are edited as they are today.
+        self.return_to_today();
         let position = existing.and_then(|id| self.positions.iter().find(|p| p.id == id));
         self.form = Some(PositionForm::new(position));
     }
@@ -2627,6 +2641,7 @@ impl State {
     }
 
     pub fn delete_position(&mut self, id: usize) {
+        self.return_to_today();
         self.selected = None;
         self.inspector.set_open(false);
         self.change_and_reload(

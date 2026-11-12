@@ -457,9 +457,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
             let big_name = w >= 320.0 && h >= 200.0;
             let label = match (change, points) {
                 (Some(_), Some(_)) => {
-                    format!("{name}, {own} today, {share} of the portfolio's move")
+                    format!(
+                        "{name}, {own} {}, {share} of the portfolio's move",
+                        s.when().word()
+                    )
                 }
-                (Some(_), None) => format!("{name}, {own} today"),
+                (Some(_), None) => format!("{name}, {own} {}", s.when().word()),
                 _ => name.clone(),
             };
             el().key(format!("tile-{id}"))
@@ -552,16 +555,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .mt(14.0)
                                     .gap(20.0)
                                     // Cash has no move today: no dashes, just its share.
-                                    .children(
-                                        change
-                                            .is_some()
-                                            .then(|| figure("Today", own.clone(), own_color, t)),
-                                    )
-                                    .children(
-                                        points.is_some().then(|| {
-                                            figure("Of today", share.clone(), share_color, t)
-                                        }),
-                                    )
+                                    .children(change.is_some().then(|| {
+                                        figure(&s.when().title(), own.clone(), own_color, t)
+                                    }))
+                                    .children(points.is_some().then(|| {
+                                        figure(&s.when().of(), share.clone(), share_color, t)
+                                    }))
                                     .child(figure("Of portfolio", weight, k.c.text_base, t)),
                             ),
                         Detail::Figures => body
@@ -571,16 +570,17 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .color(k.c.text_muted)
                                     .truncate(),
                             )
-                            .children(
-                                change
-                                    .is_some()
-                                    .then(|| labelled(own.clone(), "today", own_color, t).mt(6.0)),
-                            )
-                            .children(
-                                points
-                                    .is_some()
-                                    .then(|| labelled(share.clone(), "of today", share_color, t)),
-                            )
+                            .children(change.is_some().then(|| {
+                                labelled(own.clone(), &s.when().word(), own_color, t).mt(6.0)
+                            }))
+                            .children(points.is_some().then(|| {
+                                labelled(
+                                    share.clone(),
+                                    &s.when().of().to_lowercase(),
+                                    share_color,
+                                    t,
+                                )
+                            }))
                             // The first figure to go when the tile is short.
                             .children(
                                 (h >= WEIGHT_ROOM)
@@ -619,9 +619,11 @@ fn tile_line(
     if room < 22.0 {
         return None;
     }
+    // The lines are the month up to today: not a past day's.
     let values = position.position_id.as_deref().and_then(|id| {
         s.history
             .as_ref()
+            .filter(|_| !s.in_past())
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;

@@ -48,6 +48,7 @@ use tokio::{runtime::Handle, sync::RwLock};
 use crate::{
     records::{self, Record},
     statement::{Change, Contribution, Seen},
+    time,
 };
 
 pub type BackendResult<T> = Result<T, String>;
@@ -1258,6 +1259,25 @@ impl Backend {
                 .first()
                 .and_then(|point| snapshots::strict_date(&point.date)),
         }))
+    }
+
+    // --- Time ---
+
+    /// Every recorded day before today, oldest first, that can be shown as it stood: complete,
+    /// and in today's base currency. An encrypted portfolio has none.
+    pub async fn days(&self) -> BackendResult<Vec<time::Day>> {
+        if self.encrypted().await {
+            return Ok(Vec::new());
+        }
+        let Some(path) = self.history_path().await else {
+            return Ok(Vec::new());
+        };
+        let portfolio = self.state.portfolio().await;
+        let today = self.today_point(&portfolio).await;
+        let (mut points, _skipped) = snapshots::read(&path);
+        points
+            .retain(|point| point.base_currency == today.base_currency && point.date < today.date);
+        Ok(time::days_from(&points))
     }
 
     // --- The records room ---

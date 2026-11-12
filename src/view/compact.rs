@@ -44,7 +44,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         // Overview says what the page is for in its own sentence. On a phone, repeating it
         // in a caption pushes what to do under the tab bar.
         let about = (s.page != Page::Overview).then(|| guide::about(s.page));
-        if s.page == Page::Ask {
+        if s.page == Page::Ask && !s.in_past() {
             ask::page(s, t, cx)
         } else {
             page_column(
@@ -63,6 +63,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .h_full()
         .child(top_bar(s, t))
+        .children(super::past::band(s, t))
         .child(
             col()
                 .key("main-frame")

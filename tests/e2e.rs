@@ -3813,3 +3813,142 @@ fn a_plate_opens_to_its_moment_and_closes() {
     assert!(app.rt.state.record_plate.is_none());
     assert!(app.exists(&format!("plate-{id}")), "the plate is back");
 }
+
+// --- Time ---
+
+/// The strip's left edge and middle height, in window points.
+fn strip_start(app: &Harness) -> (f32, f32) {
+    let (x, y) = app
+        .rt
+        .find("time-strip")
+        .expect("the time strip is in the toolbar");
+    (x - stahl::time::STRIP / 2.0, y)
+}
+
+#[test]
+fn dragging_the_time_strip_turns_the_whole_app_back_and_escape_returns() {
+    let mut app = Harness::boot(true, None);
+    assert!(app.has_text("€107,400.00"), "today's total");
+    let days = app.rt.state.time.days.len();
+    assert!(days >= 60, "the demo's history is read: {days}");
+    let (left, y) = strip_start(&app);
+    let (x, _) = app.rt.find("time-strip").unwrap();
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=8 {
+        app.rt
+            .pointer_move(x + stahl::time::STRIP / 2.0 - step as f32 * 30.0, y);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_move(left, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(left, y);
+    app.settle();
+    let state = &app.rt.state;
+    assert_eq!(
+        state.time.at,
+        Some(0),
+        "the far left is the first recorded day"
+    );
+    let first = state.time.days[0].total;
+    let total = state.summary.as_ref().unwrap().total_value;
+    assert!((total - first).abs() < 0.01, "the total is that day's");
+    assert!(!app.has_text("€107,400.00"), "today's total is gone");
+    assert!(app.exists("time-band"), "the band says it is the past");
+    assert!(
+        app.has_text("you held"),
+        "the statement speaks about that day"
+    );
+    // The allocation follows too.
+    let shares: f64 = state.allocation.iter().map(|item| item.percent).sum();
+    assert!((shares - 100.0).abs() < 0.01);
+
+    app.press(Key::Escape);
+    assert!(!app.rt.state.in_past(), "escape returns to today");
+    assert!(app.has_text("€107,400.00"));
+    assert!(!app.exists("time-band"));
+}
+
+#[test]
+fn the_keyboard_walks_through_recorded_days() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (x, y) = app.rt.find("time-strip").unwrap();
+    // Focus the strip without moving time: a press at today.
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.pointer_up(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.settle();
+    assert!(!app.rt.state.in_past());
+    app.press(Key::Left);
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 1),
+        "one recorded day back"
+    );
+    app.rt.key(KeyEvent {
+        key: Key::Left,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    app.settle();
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 8),
+        "a week more with shift"
+    );
+    app.press(Key::End);
+    assert!(!app.rt.state.in_past(), "End is today");
+    // And from anywhere, with the main modifier and the brackets.
+    app.command('[', false);
+    assert_eq!(app.rt.state.time.at, Some(days - 1));
+    app.command(']', false);
+    assert!(!app.rt.state.in_past());
+}
+
+#[test]
+fn turning_the_door_back_turns_time_back() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (cx, cy) = app.rt.find("door-sidebar").unwrap();
+    // A quarter turn the other way round from the right to the top: six notches back.
+    app.rt.pointer_down(cx + 10.0, cy);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=12 {
+        let angle = -(step as f32) / 12.0 * std::f32::consts::FRAC_PI_2;
+        app.rt
+            .pointer_move(cx + 10.0 * angle.cos(), cy + 10.0 * angle.sin());
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(cx, cy - 10.0);
+    app.settle();
+    let at = app.rt.state.time.at.expect("the door turned time back");
+    assert!(
+        (days - 7..=days - 5).contains(&at),
+        "a notch a day: {at} of {days}"
+    );
+    assert!(app.exists("time-band"));
+}
+
+#[test]
+fn a_page_about_today_says_so_in_the_past() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    app.click(Page::Rebalance.key());
+    assert!(app.has_text("Rebalance is about today"));
+    assert!(!app.has_text("I have this much to invest"), "no stale plan");
+    app.click("time-now-only-today");
+    assert!(!app.rt.state.in_past());
+    assert!(app.has_text("I have this much to invest"));
+}
+
+#[test]
+fn editing_in_the_past_happens_today() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    assert!(app.rt.state.in_past());
+    app.command('n', false);
+    assert!(app.rt.state.form.is_some(), "the form opens");
+    assert!(!app.rt.state.in_past(), "for today's positions");
+}
