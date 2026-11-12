@@ -26,6 +26,7 @@ pub mod door;
 pub mod guide;
 mod insights;
 mod intake;
+pub mod matters;
 mod overlays;
 mod overview;
 pub mod past;

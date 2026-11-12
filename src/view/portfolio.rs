@@ -468,7 +468,12 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         // Questions and decisions are about today; a past day only shows what was.
         .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
         .child(hero(s, t, cx, !narrow))
-        .children((!s.in_past()).then(|| ui::entering(overview::agenda(s, t, narrow), 2)))
+        .children((!s.in_past()).then(|| {
+            ui::entering(
+                overview::agenda(s, t, narrow, cx.is_reduced_motion()),
+                2,
+            )
+        }))
         .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
             ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })

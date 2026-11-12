@@ -928,6 +928,8 @@ pub struct State {
     pub doctor: Loadable<WorkspaceHealth>,
     pub policy: PolicyPage,
     pub documents: DocumentsPage,
+    /// What the bank has prepared for signature, and what was decided.
+    pub matters: crate::matters::MattersPage,
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
@@ -1221,6 +1223,7 @@ impl State {
                 message: None,
                 error: None,
             },
+            matters: crate::matters::MattersPage::default(),
             settings: SettingsForm {
                 currency: TextEdit::new(""),
                 provider_url: TextEdit::new(""),
@@ -1408,6 +1411,8 @@ impl State {
                 tx.wake_at(started + RECORD_ARRIVAL_FOR);
             }
         }
+        // A hold on a Sign control fills its ring, and completes or lets go on the clock.
+        changed |= self.matters_tick();
         if self
             .toast
             .as_ref()
@@ -2030,6 +2035,7 @@ impl State {
         self.documents.generated = None;
         self.documents.message = None;
         self.documents.error = None;
+        self.matters.clear();
         if self.page.needs_workspace() && !self.is_workspace() {
             self.page = Page::Overview;
         }
@@ -2609,6 +2615,8 @@ impl State {
                 self.load_history();
                 // The agenda reads the same review as the Review page, so they never disagree.
                 self.load_review();
+                // What was signed, declined or put off, and the policy the plans are measured by.
+                self.load_matters();
             }
             Page::Holdings | Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
@@ -2625,7 +2633,7 @@ impl State {
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
-            Page::Documents => {}
+            Page::Documents => self.load_decisions(),
             Page::Ask => {
                 // A chart block and an allocation block read what the Overview reads.
                 self.load_history();
