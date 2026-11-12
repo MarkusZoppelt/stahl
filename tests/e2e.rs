@@ -4686,3 +4686,26 @@ fn declining_in_an_encrypted_portfolio_says_it_is_not_kept() {
     let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
     assert!(toast.unwrap().contains("this session only"));
 }
+
+#[test]
+fn an_unreadable_ledger_is_reported_and_survives_a_decision() {
+    let mut app = Harness::boot_tall(true);
+    let path = app.dir.path().join("portfolio/portfolio/matters.json");
+    fs::write(&path, "{ not a ledger").unwrap();
+    app.rt.state.load_matters();
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.exists("matters-ledger-problem"));
+    assert!(app.has_text("can't be read"));
+
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    app.settle();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(decision_files(&app).is_empty(), "no record was written");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(app.has_text("Nothing was written."));
+
+    app.click("matter-postpone-cash-place");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+}

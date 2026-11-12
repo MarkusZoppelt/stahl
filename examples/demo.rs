@@ -718,6 +718,21 @@ fn main() {
             }),
             // On a past day nothing can be signed, and the section says why.
             ("matters-past", |s| past_scene(s, Page::Overview)),
+            // A ledger that can't be read is kept and reported, and nothing is written over it.
+            ("matters-ledger", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                if let Some(dir) = s.open.workspace_dir.clone() {
+                    fs::write(
+                        Path::new(&dir).join("portfolio/matters.json"),
+                        "{ \"entries\": [ oops",
+                    )
+                    .ok();
+                }
+                s.load_matters();
+                s.settle();
+                s.matters.expanded = first_matter(s);
+            }),
             ("matters-light", |s| {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);

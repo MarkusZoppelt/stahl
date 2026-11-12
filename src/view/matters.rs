@@ -719,7 +719,13 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
     let prepared = s.prepared();
     let mut section = ui::ledger(t)
         .key("agenda")
-        .child(ui::title("For your signature", t));
+        .child(ui::title("For your signature", t))
+        .children(
+            s.matters
+                .ledger_problem
+                .as_ref()
+                .map(|problem| ui::danger(problem.clone(), t).key("matters-ledger-problem")),
+        );
     let mut cards: Vec<El> = prepared
         .matters
         .iter()
@@ -780,6 +786,7 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
         s.matters
             .error
             .as_ref()
+            .filter(|error| Some(*error) != s.matters.ledger_problem.as_ref())
             .map(|error| ui::danger(error.clone(), t)),
     )
 }

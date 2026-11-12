@@ -12,12 +12,12 @@
 use std::{
     collections::BTreeMap,
     fs,
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
 use chrono::{Datelike as _, Duration, Local, NaiveDate};
 use portfolio_rs::{
-    mcp::snapshots,
     policy::Policy,
     review::{AllocationReview as ReviewAllocation, Review},
     services::atomic_write,
@@ -911,8 +911,57 @@ fn settled(entry: &Entry, matter: &Matter) -> bool {
         })
 }
 
-fn read_ledger(text: &str) -> Ledger {
-    serde_json::from_str(text).unwrap_or_default()
+fn read_ledger(text: &str) -> Result<Ledger, String> {
+    serde_json::from_str(text).map_err(|error| error.to_string())
+}
+
+/// What the ledger file held, when it was read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LedgerRead {
+    pub ledger: Ledger,
+    /// A sentence, when the file exists but can't be read. It is left alone, and no decision is
+    /// written over it.
+    pub problem: Option<String>,
+}
+
+fn unreadable(path: &Path, why: &str) -> String {
+    format!(
+        "The decision ledger ({}) can't be read: {why}. Stahl has left it as it is and will not \
+         write over it. Fix or move the file to keep deciding here.",
+        path.display()
+    )
+}
+
+/// Read a workspace's ledger. A missing file is an empty ledger; one that can't be read is
+/// reported, never replaced.
+pub fn load_ledger(workspace: &Path) -> LedgerRead {
+    let path = matters_dir(workspace).join(LEDGER_FILE);
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Before the ledger moved, it sat beside the history, inside the workspace.
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            match fs::read_to_string(workspace.join("portfolio/history/main").join(LEDGER_FILE)) {
+                Ok(text) => text,
+                Err(_) => return LedgerRead::default(),
+            }
+        }
+        Err(error) => {
+            return LedgerRead {
+                ledger: Ledger::default(),
+                problem: Some(unreadable(&path, &error.to_string())),
+            };
+        }
+    };
+    match read_ledger(&text) {
+        Ok(ledger) => LedgerRead {
+            ledger,
+            problem: None,
+        },
+        Err(why) => LedgerRead {
+            ledger: Ledger::default(),
+            problem: Some(unreadable(&path, &why)),
+        },
+    }
 }
 
 fn write_ledger(ledger: &Ledger) -> String {
@@ -926,11 +975,10 @@ fn tomorrow(today: NaiveDate) -> NaiveDate {
 
 // --- Where matters and records live ---
 
-/// The directory a workspace keeps its matters in, beside its history.
+/// The directory a workspace keeps its decision ledger in: its own, whatever the environment
+/// says about history, so two workspaces never share a decision.
 pub fn matters_dir(workspace: &Path) -> PathBuf {
-    snapshots::data_dir(None, Some(workspace))
-        .unwrap_or_else(|| workspace.join("portfolio/history"))
-        .join("main")
+    workspace.join("portfolio")
 }
 
 /// Where a workspace keeps its decision records.
@@ -1132,29 +1180,65 @@ impl Backend {
     }
 
     /// The matters the owner has already decided, and the policy the plans are measured against.
-    pub async fn matters(&self) -> (Ledger, Option<Policy>) {
+    pub async fn matters(&self) -> (LedgerRead, Option<Policy>) {
         let policy = self.policy().await;
         let Some(workspace) = self.matters_workspace().await else {
-            return (Ledger::default(), policy);
+            return (LedgerRead::default(), policy);
         };
-        let path = matters_dir(&workspace).join(LEDGER_FILE);
-        let ledger = fs::read_to_string(path)
-            .map(|text| read_ledger(&text))
-            .unwrap_or_default();
-        (ledger, policy)
+        (load_ledger(&workspace), policy)
     }
 
-    /// Write the ledger beside the history, where `seen.json` lives.
-    pub async fn save_matters(&self, workspace: &Path, ledger: &Ledger) -> BackendResult<()> {
+    /// Decide a matter: read the ledger, change it, write the record and then the ledger. A
+    /// failure leaves the files as they were, so "nothing was written" is true when it is said.
+    /// Returns the ledger as it now stands on disk.
+    pub async fn decide(
+        &self,
+        workspace: &Path,
+        entry: Entry,
+        record: Option<RecordRequest>,
+    ) -> BackendResult<Ledger> {
+        let read = load_ledger(workspace);
+        if let Some(problem) = read.problem {
+            return Err(format!("Nothing was written. {problem}"));
+        }
+        let mut ledger = read.ledger;
+        ledger.record(entry);
+        let written = match &record {
+            Some(request) => Some(
+                self.record_matter(
+                    workspace,
+                    &request.matter,
+                    request.status,
+                    request.reason.clone(),
+                    request.date,
+                    &request.currency,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let dir = matters_dir(workspace);
-        fs::create_dir_all(&dir)
-            .map_err(|error| format!("couldn't create {}: {error}", dir.display()))?;
-        atomic_write::write_atomic_private(&dir.join(LEDGER_FILE), write_ledger(ledger).as_bytes())
-            .map_err(|error| format!("couldn't save the decision ledger: {error}"))
+        let saved = fs::create_dir_all(&dir)
+            .map_err(|error| format!("couldn't create {}: {error}", dir.display()))
+            .and_then(|()| {
+                atomic_write::write_atomic_private(
+                    &dir.join(LEDGER_FILE),
+                    write_ledger(&ledger).as_bytes(),
+                )
+                .map_err(|error| format!("couldn't save the decision ledger: {error}"))
+            });
+        if let Err(error) = saved {
+            // The record without its ledger entry would be listed as decided when it isn't.
+            if let Some(path) = written {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!("Nothing was written: {error}"));
+        }
+        Ok(ledger)
     }
 
     /// Write a signed or declined matter as a decision record, and return its path.
-    pub async fn record_matter(
+    async fn record_matter(
         &self,
         workspace: &Path,
         matter: &Matter,
@@ -1180,6 +1264,15 @@ impl Backend {
             None => Vec::new(),
         }
     }
+}
+
+/// The record a decision leaves beside its ledger entry.
+pub struct RecordRequest {
+    pub matter: Matter,
+    pub status: Status,
+    pub reason: Option<String>,
+    pub date: NaiveDate,
+    pub currency: String,
 }
 
 // --- The page's state ---
@@ -1230,12 +1323,22 @@ pub struct MattersPage {
     /// The record opened on the Documents page.
     pub open_decision: Option<String>,
     pub error: Option<String>,
+    /// Why the ledger on disk can't be read, while it can't. Nothing is decided meanwhile.
+    pub ledger_problem: Option<String>,
 }
 
 impl MattersPage {
     /// A portfolio was opened or closed: nothing from the last one carries over.
     pub fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// A decision wasn't written: put back the entry the matter had before, or none.
+    fn restore(&mut self, id: &str, before: &Ledger) {
+        self.ledger.entries.retain(|entry| entry.id != id);
+        if let Some(previous) = before.entries.iter().find(|entry| entry.id == id) {
+            self.ledger.entries.push(previous.clone());
+        }
     }
 
     pub fn progress(&self, now: f64) -> Option<f32> {
@@ -1308,10 +1411,11 @@ impl State {
         prepared
     }
 
-    /// The matter as the record keeps it: the same one, with its money written out.
-    fn unmasked(&self, matter: &Matter) -> Matter {
+    /// The matter as the record keeps it: the same one, with its money written out. `None` when
+    /// it can't be built that way, because a record is never written masked.
+    fn unmasked(&self, matter: &Matter) -> Option<Matter> {
         if !self.privacy {
-            return matter.clone();
+            return Some(matter.clone());
         }
         let mut inputs = self.matter_inputs();
         inputs.privacy = false;
@@ -1319,7 +1423,34 @@ impl State {
             .matters
             .into_iter()
             .find(|open| open.id == matter.id)
-            .unwrap_or_else(|| matter.clone())
+    }
+
+    /// Whether a decision may be written now; if not, say why, on the page.
+    fn can_decide(&mut self) -> bool {
+        match self.matters.ledger_problem.clone() {
+            Some(problem) => {
+                self.matters.error = Some(format!("Nothing was written. {problem}"));
+                self.matters.hold = None;
+                self.matters.declining = None;
+                false
+            }
+            None => true,
+        }
+    }
+
+    /// The matter as it goes in a record, or the page says it can't be written.
+    fn matter_for_record(&mut self, matter: &Matter) -> Option<Matter> {
+        let unmasked = self.unmasked(matter);
+        if unmasked.is_none() {
+            self.matters.error = Some(
+                "These figures can't be written in full just now, and a record is never written \
+                 with its amounts hidden. Nothing was recorded; try again in a moment."
+                    .to_string(),
+            );
+            self.matters.hold = None;
+            self.matters.declining = None;
+        }
+        unmasked
     }
 
     /// Where a decision may be written: a plaintext workspace, or nothing. An encrypted
@@ -1347,6 +1478,7 @@ impl State {
     pub fn load_matters(&mut self) {
         if !self.is_workspace() {
             self.matters.ledger = Ledger::default();
+            self.matters.ledger_problem = None;
             self.matters.policy = None;
             self.matters.decisions.clear();
             self.matters.decisions_loaded = false;
@@ -1354,9 +1486,10 @@ impl State {
         }
         self.run(
             |backend| async move { Ok(backend.matters().await) },
-            |state, result: BackendResult<(Ledger, Option<Policy>)>| {
-                if let Ok((ledger, policy)) = result {
-                    state.matters.ledger = ledger;
+            |state, result: BackendResult<(LedgerRead, Option<Policy>)>| {
+                if let Ok((read, policy)) = result {
+                    state.matters.ledger = read.ledger;
+                    state.matters.ledger_problem = read.problem;
                     state.matters.policy = policy;
                 }
             },
@@ -1403,7 +1536,7 @@ impl State {
     /// The hold was completed: record the decision and stamp the card.
     pub fn sign_matter(&mut self, id: &str) {
         let prepared = self.prepared();
-        let Some(matter) = prepared
+        let Some(card) = prepared
             .matters
             .iter()
             .find(|matter| matter.id == id)
@@ -1412,10 +1545,14 @@ impl State {
             self.matters.hold = None;
             return;
         };
+        if !self.can_decide() {
+            return;
+        }
         // The card may hide amounts; the record sits beside a table of real ones, so it is
         // written from the same matter prepared without the masks.
-        let card = matter;
-        let matter = self.unmasked(&card);
+        let Some(matter) = self.matter_for_record(&card) else {
+            return;
+        };
         let workspace = match self.matters_workspace() {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -1438,35 +1575,31 @@ impl State {
             started: self.now,
             date: today,
         });
-        let mut ledger = self.matters.ledger.clone();
-        ledger.record(entry(&matter, Status::Signed, today, None));
-        self.matters.ledger = ledger.clone();
-        let saved = ledger.clone();
-        let rollback_id = id.to_string();
+        let entry = entry(&matter, Status::Signed, today, None);
+        let before = self.matters.ledger.clone();
+        self.matters.ledger.record(entry.clone());
+        let request = RecordRequest {
+            matter,
+            status: Status::Signed,
+            reason: None,
+            date: today,
+            currency,
+        };
+        let id = id.to_string();
         self.run(
-            move |backend| async move {
-                let path = backend
-                    .record_matter(&workspace, &matter, Status::Signed, None, today, &currency)
-                    .await?;
-                backend.save_matters(&workspace, &saved).await?;
-                Ok(path)
-            },
-            move |state, result: BackendResult<String>| match result {
-                Ok(path) => {
+            move |backend| async move { backend.decide(&workspace, entry, Some(request)).await },
+            move |state, result: BackendResult<Ledger>| match result {
+                Ok(ledger) => {
                     state.matters.error = None;
+                    state.matters.ledger = ledger;
                     state.matters.decisions_loaded = false;
                     state.show_toast("Recorded. The plan is in your documents.");
-                    let _ = path;
                 }
                 Err(error) => {
                     // Nothing was written, so nothing was decided: put the matter back.
                     state.matters.error = Some(error);
                     state.matters.stamp = None;
-                    state
-                        .matters
-                        .ledger
-                        .entries
-                        .retain(|entry| entry.id != rollback_id);
+                    state.matters.restore(&id, &before);
                 }
             },
         );
@@ -1475,7 +1608,7 @@ impl State {
     /// Decline a matter, with an optional one-line reason, and write the record.
     pub fn decline_matter(&mut self, id: &str, reason: String) {
         let prepared = self.prepared();
-        let Some(matter) = prepared
+        let Some(card) = prepared
             .matters
             .iter()
             .find(|matter| matter.id == id)
@@ -1483,15 +1616,20 @@ impl State {
         else {
             return;
         };
-        let matter = self.unmasked(&matter);
+        if !self.can_decide() {
+            return;
+        }
+        let Some(matter) = self.matter_for_record(&card) else {
+            return;
+        };
         let today = Local::now().date_naive();
         let reason = reason.trim().to_string();
         let reason = (!reason.is_empty()).then_some(reason);
         self.matters.declining = None;
         self.matters.hint = None;
-        let mut ledger = self.matters.ledger.clone();
-        ledger.record(entry(&matter, Status::Declined, today, reason.clone()));
-        self.matters.ledger = ledger.clone();
+        let entry = entry(&matter, Status::Declined, today, reason.clone());
+        let before = self.matters.ledger.clone();
+        self.matters.ledger.record(entry.clone());
         let Ok(workspace) = self.matters_workspace() else {
             self.show_toast(
                 "Declined for this session only. An encrypted portfolio keeps no record, so it \
@@ -1500,34 +1638,25 @@ impl State {
             return;
         };
         self.show_toast("Declined. We won't bring it again unless the numbers move.");
-        let saved = ledger;
-        let currency = self.currency();
-        let rollback_id = id.to_string();
+        let request = RecordRequest {
+            matter,
+            status: Status::Declined,
+            reason,
+            date: today,
+            currency: self.currency(),
+        };
+        let id = id.to_string();
         self.run(
-            move |backend| async move {
-                backend
-                    .record_matter(
-                        &workspace,
-                        &matter,
-                        Status::Declined,
-                        reason,
-                        today,
-                        &currency,
-                    )
-                    .await?;
-                backend.save_matters(&workspace, &saved).await?;
-                Ok(())
-            },
-            move |state, result: BackendResult<()>| {
-                if let Err(error) = result {
-                    state.matters.error = Some(error);
-                    state
-                        .matters
-                        .ledger
-                        .entries
-                        .retain(|entry| entry.id != rollback_id);
-                } else {
+            move |backend| async move { backend.decide(&workspace, entry, Some(request)).await },
+            move |state, result: BackendResult<Ledger>| match result {
+                Ok(ledger) => {
+                    state.matters.error = None;
+                    state.matters.ledger = ledger;
                     state.matters.decisions_loaded = false;
+                }
+                Err(error) => {
+                    state.matters.error = Some(error);
+                    state.matters.restore(&id, &before);
                 }
             },
         );
@@ -1544,12 +1673,14 @@ impl State {
         else {
             return;
         };
+        if !self.can_decide() {
+            return;
+        }
         let today = Local::now().date_naive();
         let mut entry = entry(&matter, Status::Postponed, today, None);
         entry.until = Some(tomorrow(today).format("%Y-%m-%d").to_string());
-        let mut ledger = self.matters.ledger.clone();
-        ledger.record(entry);
-        self.matters.ledger = ledger.clone();
+        let before = self.matters.ledger.clone();
+        self.matters.ledger.record(entry.clone());
         let Ok(workspace) = self.matters_workspace() else {
             self.show_toast(
                 "Set aside for this session only. An encrypted portfolio keeps no record, so it \
@@ -1558,17 +1689,17 @@ impl State {
             return;
         };
         self.show_toast("Set aside until tomorrow");
-        let rollback_id = id.to_string();
+        let id = id.to_string();
         self.run(
-            move |backend| async move { backend.save_matters(&workspace, &ledger).await },
-            move |state, result: BackendResult<()>| {
-                if let Err(error) = result {
+            move |backend| async move { backend.decide(&workspace, entry, None).await },
+            move |state, result: BackendResult<Ledger>| match result {
+                Ok(ledger) => {
+                    state.matters.error = None;
+                    state.matters.ledger = ledger;
+                }
+                Err(error) => {
                     state.matters.error = Some(error);
-                    state
-                        .matters
-                        .ledger
-                        .entries
-                        .retain(|entry| entry.id != rollback_id);
+                    state.matters.restore(&id, &before);
                 }
             },
         );
@@ -1629,13 +1760,21 @@ fn entry(matter: &Matter, status: Status, today: NaiveDate, reason: Option<Strin
         until: None,
         summary: matter.kind.summary().to_string(),
         policy: matter.policy.clone(),
-        figures: matter.figures.clone(),
+        // A figure that isn't a number would be written as `null`, which the file can't read back.
+        figures: matter
+            .figures
+            .iter()
+            .filter(|(_, value)| value.is_finite())
+            .map(|(key, value)| (key.clone(), *value))
+            .collect(),
         out_of_band: matter.out_of_band.clone(),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
     use std::{collections::BTreeMap, env, process, time::SystemTime};
 
     use portfolio_rs::{
@@ -2055,8 +2194,8 @@ mod tests {
         assert_eq!(ledger.entries[0].status, Status::Signed);
         let text = write_ledger(&ledger);
         assert!(text.contains("\"id\": \"rebalance\""));
-        assert_eq!(read_ledger(&text), ledger);
-        assert_eq!(read_ledger("not json"), Ledger::default());
+        assert_eq!(read_ledger(&text), Ok(ledger));
+        assert!(read_ledger("not json").is_err());
     }
 
     #[test]
@@ -2168,5 +2307,155 @@ mod tests {
             material(&entry, matter),
             "a new class out of band is material"
         );
+    }
+
+    // --- The ledger on disk ---
+
+    fn sample() -> (Matter, Entry) {
+        let review = demo_review();
+        let policy = policy(Some(20_000.0));
+        let prepared = prepare(&inputs_with(Some(&review), Some(&policy)));
+        let matter = prepared.matters[0].clone();
+        let today = Local::now().date_naive();
+        let entry = entry(&matter, Status::Signed, today, None);
+        (matter, entry)
+    }
+
+    fn request(matter: &Matter) -> RecordRequest {
+        RecordRequest {
+            matter: matter.clone(),
+            status: Status::Signed,
+            reason: None,
+            date: Local::now().date_naive(),
+            currency: "EUR".to_string(),
+        }
+    }
+
+    fn backend(dir: &Path, runtime: &tokio::runtime::Runtime) -> Backend {
+        crate::demo::backend(dir, Some(dir), runtime.handle().clone())
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("stahl-ledger-{name}-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("portfolio")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn an_unreadable_ledger_is_kept_reported_and_never_written_over() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (matter, entry) = sample();
+        let mut kinds = Vec::new();
+        for (name, text) in [
+            ("hand-edit", "{ \"entries\": [ oops".to_string()),
+            (
+                "new-kind",
+                r#"{"version":2,"entries":[{"id":"x","kind":"time_travel","status":"signed","at":"2026-01-01","policy":"P"}]}"#.to_string(),
+            ),
+            (
+                "null-figure",
+                r#"{"version":1,"entries":[{"id":"x","kind":"rebalance","status":"signed","at":"2026-01-01","policy":"P","figures":{"class:Stocks":null}}]}"#.to_string(),
+            ),
+        ] {
+            let dir = scratch(name);
+            let path = dir.join("portfolio/matters.json");
+            fs::write(&path, &text).unwrap();
+            let read = load_ledger(&dir);
+            let problem = read.problem.expect("the page is told");
+            assert!(problem.contains("can't be read"), "{problem}");
+            assert!(read.ledger.entries.is_empty());
+            let backend = backend(&dir, &runtime);
+            let result = runtime.block_on(backend.decide(
+                &dir,
+                entry.clone(),
+                Some(request(&matter)),
+            ));
+            let error = result.expect_err("a decision is refused");
+            assert!(error.starts_with("Nothing was written"), "{error}");
+            assert_eq!(fs::read_to_string(&path).unwrap(), text, "{name}: kept");
+            assert!(decisions(&dir).is_empty(), "{name}: no record either");
+            kinds.push(name);
+        }
+        assert_eq!(kinds.len(), 3);
+    }
+
+    #[test]
+    fn a_figure_that_is_not_a_number_is_never_written() {
+        let (mut matter, _) = sample();
+        matter.figures.insert("class:Odd".to_string(), f64::NAN);
+        let entry = entry(&matter, Status::Signed, Local::now().date_naive(), None);
+        assert!(!entry.figures.contains_key("class:Odd"));
+        assert!(
+            read_ledger(&write_ledger(&Ledger {
+                version: 1,
+                entries: vec![entry]
+            }))
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn two_workspaces_keep_separate_ledgers_whatever_the_environment_says() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (matter, entry) = sample();
+        let first = scratch("first");
+        let second = scratch("second");
+        assert!(matters_dir(&first).starts_with(&first));
+        assert_ne!(matters_dir(&first), matters_dir(&second));
+        let backend = backend(&first, &runtime);
+        runtime
+            .block_on(backend.decide(&first, entry, Some(request(&matter))))
+            .unwrap();
+        assert_eq!(load_ledger(&first).ledger.entries.len(), 1);
+        assert!(load_ledger(&second).ledger.entries.is_empty());
+        assert!(decisions(&second).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_write_leaves_no_record_and_the_old_ledger() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (matter, entry) = sample();
+        let dir = scratch("failed");
+        let backend = backend(&dir, &runtime);
+        // An earlier decision, written properly.
+        let mut earlier = entry.clone();
+        earlier.id = "earlier".to_string();
+        runtime
+            .block_on(backend.decide(&dir, earlier, None))
+            .unwrap();
+        let before = fs::read_to_string(dir.join("portfolio/matters.json")).unwrap();
+        // The records can be written, the ledger can't: the directory refuses new files.
+        fs::create_dir_all(decisions_dir(&dir)).unwrap();
+        let portfolio = dir.join("portfolio");
+        fs::set_permissions(&portfolio, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = runtime.block_on(backend.decide(&dir, entry, Some(request(&matter))));
+        fs::set_permissions(&portfolio, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = result.expect_err("the ledger could not be written");
+        assert!(error.starts_with("Nothing was written"), "{error}");
+        assert_eq!(
+            fs::read_to_string(dir.join("portfolio/matters.json")).unwrap(),
+            before
+        );
+        assert!(decisions(&dir).is_empty(), "the orphaned record is gone");
+    }
+
+    #[test]
+    fn a_decision_that_fails_gives_the_matter_its_old_entry_back() {
+        let (matter, entry) = sample();
+        let mut page = MattersPage::default();
+        let mut old = entry.clone();
+        old.status = Status::Postponed;
+        let before = Ledger {
+            version: 1,
+            entries: vec![old.clone()],
+        };
+        page.ledger = before.clone();
+        page.ledger.record(entry);
+        page.restore(&matter.id, &before);
+        assert_eq!(page.ledger.entries, vec![old]);
+        page.restore("other", &Ledger::default());
+        assert_eq!(page.ledger.entries.len(), 1);
     }
 }
