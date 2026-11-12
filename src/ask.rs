@@ -251,18 +251,49 @@ pub fn pieces(text: &str, table: &Table) -> Vec<Piece> {
 /// The plain text of a `say`, as a screen reader and a test read it: each figure replaced by what
 /// it shows, each gap by a dash.
 pub fn spoken(text: &str, table: &Table, hidden: bool, currency: &str) -> String {
-    pieces(text, table)
-        .into_iter()
-        .map(|piece| match piece {
-            Piece::Text(words) => words,
-            Piece::Chip(id) => table.get(&id).map_or_else(
-                || "—".to_string(),
-                |fact| fact.value.render(hidden, currency),
-            ),
-            Piece::Gap(_) => "—".to_string(),
-            Piece::Unverified(digits) => digits,
+    let mut out = String::new();
+    for piece in pieces(text, table) {
+        match piece {
+            Piece::Text(words) => out.push_str(&words),
+            Piece::Chip(id) => {
+                let shown = table.get(&id).map_or_else(
+                    || "—".to_string(),
+                    |fact| figure(fact, &out, hidden, currency),
+                );
+                out.push_str(&shown);
+            }
+            Piece::Gap(_) => out.push('—'),
+            Piece::Unverified(digits) => out.push_str(&digits),
+        }
+    }
+    out
+}
+
+/// Words that already say which way a figure went. The figure after one is written without its
+/// sign, as the Statement writes amounts in prose: "you are up €291", never "up +€291".
+const DIRECTIONS: [&str; 6] = ["up", "down", "higher", "lower", "gained", "lost"];
+
+/// Whether the words just before a figure carry its direction.
+pub fn directed(words: &str) -> bool {
+    words
+        .split_whitespace()
+        .next_back()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
         })
-        .collect()
+        .is_some_and(|word| DIRECTIONS.contains(&word.as_str()))
+}
+
+/// A figure as a sentence writes it, given the words before it: unsigned after a word that
+/// already says the direction, so a loss never reads "down -€291".
+pub fn figure(fact: &crate::facts::Fact, before: &str, hidden: bool, currency: &str) -> String {
+    use crate::facts::Value;
+    match (&fact.value, directed(before)) {
+        (Value::SignedMoney(value), true) => Value::Money(value.abs()).render(hidden, currency),
+        (Value::SignedPercent(value), true) => Value::Percent(value.abs()).render(hidden, currency),
+        (value, _) => value.render(hidden, currency),
+    }
 }
 
 /// The ids a `say` names, for a test to check the answer only quotes what exists.
@@ -469,14 +500,37 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
         return blocks;
     }
 
-    // What changed since the last look, in the app's own figures.
+    // What changed since the last look, in the app's own figures. The words carry the direction,
+    // so the figure is written without a sign, and a loss is said plainly: no joke on a bad day.
     let asks_change = keywords
         .iter()
         .any(|word| ["changed", "change", "since", "today", "moved"].contains(&word.as_str()));
     if asks_change && s.change.is_some() {
-        blocks.push(Block::Say {
-            text: "Since {since.date}, the total has moved by {since.change}.".to_string(),
-        });
+        let total = s
+            .change
+            .as_ref()
+            .map_or(0.0, crate::statement::Change::total);
+        let leader = table.get("since.leader").is_some();
+        let text = if total > 0.005 {
+            if leader {
+                "Since {since.date} you are up {since.change}. {since.leader} did most of the work, \
+                 which will surprise nobody."
+                    .to_string()
+            } else {
+                "Since {since.date} you are up {since.change}.".to_string()
+            }
+        } else if total < -0.005 {
+            if leader {
+                "Since {since.date} you are down {since.change}. {since.leader} accounted for most \
+                 of it."
+                    .to_string()
+            } else {
+                "Since {since.date} you are down {since.change}.".to_string()
+            }
+        } else {
+            "Since {since.date} the total is where it was.".to_string()
+        };
+        blocks.push(Block::Say { text });
         blocks.push(Block::Figures {
             ids: ["since.change", "since.percent", "total", "today.change"]
                 .into_iter()
@@ -1243,13 +1297,40 @@ mod tests {
         let table = table();
         assert_eq!(
             spoken("You are up {today.change}.", &table, false, "EUR"),
-            "You are up +€280.00."
+            "You are up €280.00.",
+            "the words carry the direction, so the figure does not repeat it"
+        );
+        assert_eq!(
+            spoken("It moved by {today.change}.", &table, false, "EUR"),
+            "It moved by +€280.00.",
+            "with no direction in the words, the figure keeps its sign"
         );
         assert_eq!(
             spoken("You are up {today.change}.", &table, true, "EUR"),
             "You are up ••••••."
         );
         assert_eq!(spoken("Gap {nope.here}.", &table, false, "EUR"), "Gap —.");
+    }
+
+    #[test]
+    fn a_loss_after_the_word_down_is_not_written_with_a_second_sign() {
+        let mut table = table();
+        table.insert(Fact {
+            id: "since.change".to_string(),
+            label: "the change".to_string(),
+            short: "Since".to_string(),
+            value: Value::SignedMoney(-291.41),
+            class: None,
+        });
+        assert_eq!(
+            spoken("Since Friday you are down {since.change}.", &table, false, "EUR"),
+            "Since Friday you are down €291.41.",
+            "never \"down -€291.41\""
+        );
+        assert_eq!(
+            spoken("You are up {since.change}.", &table, false, "EUR"),
+            "You are up €291.41."
+        );
     }
 
     #[test]

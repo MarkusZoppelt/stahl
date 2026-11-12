@@ -120,9 +120,10 @@ pub fn scripted(question: &str) -> String {
     SCRIPT_ELSE.to_string()
 }
 
-/// A month of small moves, and the one class worth a look.
+/// A month of small moves, and the one class worth a look. The demo's change is a gain, so the
+/// sentence says "up"; a loss says so plainly and drops the joke (see [`crate::ask::builtin`]).
 const SCRIPT_CHANGE: &str = concat!(
-    r#"{"block":"say","text":"Since {since.date}, the total has moved by {since.change}. {since.leader} did most of the work, which will surprise nobody."}"#,
+    r#"{"block":"say","text":"Since {since.date} you are up {since.change}. {since.leader} did most of the work, which will surprise nobody."}"#,
     "\n",
     r#"{"block":"figures","ids":["total","since.change","today.change","cash.value"]}"#,
     "\n",
@@ -136,11 +137,11 @@ const SCRIPT_CHANGE: &str = concat!(
 
 /// A shock, and what it would leave.
 const SCRIPT_HALVES: &str = concat!(
-    r#"{"block":"say","text":"A halving is the kind of day worth planning for. Here is what it would leave, and what a move toward your targets would ask of you."}"#,
+    r#"{"block":"say","text":"If crypto fell by half, here is what would be left, and what it would do to your plan."}"#,
     "\n",
     r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
     "\n",
-    r#"{"block":"say","text":"Nothing needs signing today. The plan is there for when it does."}"#,
+    r#"{"block":"say","text":"It would also, for once, put crypto close to where your policy wants it. An expensive way to rebalance."}"#,
     "\n",
     r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"What is my crypto target?","ask":"What is my crypto target?"}]}"#,
     "\n",

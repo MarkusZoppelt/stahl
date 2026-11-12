@@ -422,9 +422,10 @@ fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
             Piece::Text(text) => content.push_str(&text),
             Piece::Chip(id) => {
                 let start = content.len();
-                let shown = table
-                    .get(&id)
-                    .map_or_else(|| "—".to_string(), |fact| shown(fact, s));
+                let shown = table.get(&id).map_or_else(
+                    || "—".to_string(),
+                    |fact| ask::figure(fact, &content, s.privacy, &s.currency()),
+                );
                 content.push_str(&shown);
                 spans.push(
                     Span::new(start, content.len())

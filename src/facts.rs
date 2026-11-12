@@ -31,7 +31,12 @@ pub enum Value {
     SignedPercent(f64),
     /// Percentage points away from a target, unsigned: "12.8 points".
     Points(f64),
-    Date(NaiveDate),
+    /// A day, named as the Statement names it ("yesterday", "Tuesday", "October 14"), so an
+    /// answer and the Overview never disagree about what to call the same date.
+    Day {
+        date: NaiveDate,
+        today: NaiveDate,
+    },
     Count(usize),
     /// A name: a policy, a holding, a class.
     Name(String),
@@ -63,7 +68,7 @@ impl Value {
                 value.abs()
             ),
             Value::Points(value) => format!("{:.1} points", value.abs()),
-            Value::Date(date) => date.format("%B %-d").to_string(),
+            Value::Day { date, today } => crate::statement::day_name(*date, *today),
             Value::Count(count) => count.to_string(),
             Value::Name(name) => name.clone(),
         }
@@ -130,6 +135,8 @@ pub struct Input<'a> {
     pub change: Option<&'a Change>,
     pub policy_name: Option<&'a str>,
     pub currency: &'a str,
+    /// The day the app is showing, so a date reads as the Statement names it.
+    pub today: NaiveDate,
     /// Privacy mode only matters for the words in [`Table::describe`].
     pub hidden: bool,
 }
@@ -272,7 +279,10 @@ pub fn build(input: &Input) -> Table {
             "since.date",
             "The day the change is measured from".to_string(),
             "Since",
-            Value::Date(change.from),
+            Value::Day {
+                date: change.from,
+                today: input.today,
+            },
         );
         if let Some(leader) = change.leader.as_ref() {
             push(
@@ -452,6 +462,7 @@ pub fn of(s: &crate::state::State) -> Table {
         change: s.change.as_ref(),
         policy_name,
         currency: &currency,
+        today: chrono::Local::now().date_naive(),
         hidden: s.privacy,
     })
 }
@@ -563,6 +574,7 @@ mod tests {
             }),
             policy_name: Some("Balanced Growth"),
             currency: "EUR",
+            today: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
             hidden: false,
         })
     }
@@ -614,7 +626,10 @@ mod tests {
         );
         assert_eq!(
             table.get("since.date").unwrap().value,
-            Value::Date(NaiveDate::from_ymd_opt(2026, 11, 5).unwrap())
+            Value::Day {
+                date: NaiveDate::from_ymd_opt(2026, 11, 5).unwrap(),
+                today: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
+            }
         );
         assert_eq!(
             table.get("policy.name").unwrap().value,
@@ -633,7 +648,11 @@ mod tests {
         assert_eq!(render("today.percent"), "+0.5%");
         assert_eq!(render("class.stocks.drift"), "5.0 points");
         assert_eq!(render("class.stocks.today"), "-1.5%");
-        assert_eq!(render("since.date"), "November 5");
+        assert_eq!(
+            render("since.date"),
+            "Thursday",
+            "named as the Statement names it, not as a bare date"
+        );
         assert_eq!(render("policy.name"), "Balanced Growth");
         assert_eq!(render("count.positions"), "1");
         // Privacy hides amounts and keeps shares, percentages and names.
@@ -675,6 +694,7 @@ mod tests {
             change: None,
             policy_name: None,
             currency: "EUR",
+            today: NaiveDate::from_ymd_opt(2026, 11, 10).unwrap(),
             hidden: false,
         });
         assert!(table.get("policy.name").is_none());
