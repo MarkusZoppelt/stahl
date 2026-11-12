@@ -140,6 +140,26 @@ fn main() {
             .map(|decision| decision.path.to_string_lossy().into_owned());
         s.toast = None;
     }
+    /// The Documents page after a decline, with the record open.
+    fn documents_declined(s: &mut State) {
+        scene(s, Page::Documents);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.decline_matter(
+                &id,
+                "Not this month; the cash stays put until spring.".to_string(),
+            );
+            s.settle();
+        }
+        s.load_decisions();
+        s.settle();
+        s.matters.open_decision = s
+            .matters
+            .decisions
+            .first()
+            .map(|decision| decision.path.to_string_lossy().into_owned());
+        s.toast = None;
+    }
     /// A Sign control held down, for the strip from press to filed: render at several `--at`.
     fn holding(s: &mut State) {
         scene(s, Page::Overview);
@@ -738,6 +758,7 @@ fn main() {
                 ));
             }),
             ("documents-decisions", documents_records),
+            ("documents-declined", documents_declined),
             ("documents-decisions-light", |s| {
                 documents_records(s);
                 s.set_theme(ThemeMode::Light);

@@ -4550,6 +4550,12 @@ fn reduced_motion_asks_plainly_instead_of_holding() {
     app.click("matter-sign-rebalance");
     assert!(app.rt.state.matters.hold.is_none());
     assert!(app.exists("matter-confirm-sign"));
+    app.press(Key::Escape);
+    assert!(
+        !app.exists("matter-confirm-sign"),
+        "Escape closes the question"
+    );
+    app.click("matter-sign-rebalance");
     app.click("matter-confirm-sign");
     assert_eq!(
         app.rt

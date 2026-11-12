@@ -79,6 +79,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             s.consent_cancel();
             return true;
         }
+        if s.matters.confirm_sign.take().is_some() {
+            return true;
+        }
         if s.ask_stop() {
             return true;
         }
