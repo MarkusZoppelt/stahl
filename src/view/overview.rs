@@ -83,7 +83,7 @@ pub fn statement(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
     )
 }
 
-/// What deserves a look, most important first, each with the one button that deals with it.
+/// What the bank has prepared for signature, and what needs doing but not signing.
 pub fn agenda(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
     super::matters::section(s, t, narrow, reduced)
 }

@@ -4,7 +4,7 @@
 //! A private bank does not hand its client a list of problems. It prepares what needs deciding,
 //! with the figures, and brings it for signature. [`prepare`] turns the same review and findings
 //! the Overview already reads into two lists: matters that can be signed, declined or put off,
-//! and the data fixes that need doing but not signing. It is pure; [`State::matters`] feeds it.
+//! and the data fixes that need doing but not signing. It is pure; [`State::prepared`] feeds it.
 //!
 //! Signing records a decision in the workspace's decisions folder. It never places an order:
 //! Stahl has no way to trade, and every matter says so.
@@ -56,8 +56,6 @@ pub enum Kind {
     PlaceCash,
     /// Sell enough to bring cash back to the policy's minimum.
     TopUpCash,
-    /// A data problem: the fix is an action, not a signature.
-    Todo,
 }
 
 impl Kind {
@@ -65,7 +63,6 @@ impl Kind {
     fn group(self) -> Option<&'static str> {
         match self {
             Kind::Rebalance | Kind::PlaceCash | Kind::TopUpCash => Some("allocation"),
-            Kind::Todo => None,
         }
     }
 
@@ -75,7 +72,6 @@ impl Kind {
             Kind::Rebalance => "a halfway rebalance",
             Kind::PlaceCash => "putting the excess cash to work",
             Kind::TopUpCash => "topping up cash",
-            Kind::Todo => "a data fix",
         }
     }
 
@@ -85,12 +81,7 @@ impl Kind {
             Kind::Rebalance => "Rebalance",
             Kind::PlaceCash => "Cash",
             Kind::TopUpCash => "Cash floor",
-            Kind::Todo => "Data",
         }
-    }
-
-    pub fn signable(self) -> bool {
-        self != Kind::Todo
     }
 }
 
@@ -128,10 +119,6 @@ pub struct Proposal {
 }
 
 impl Proposal {
-    pub fn is_empty(&self) -> bool {
-        self.trades.is_empty() && self.rows.is_empty()
-    }
-
     /// What the plan does, in money, for a record.
     pub fn traded(&self) -> (f64, f64) {
         let bought = self
@@ -181,8 +168,6 @@ pub struct Matter {
     pub records: String,
     /// The page that shows the plan behind the proposal.
     pub adjust: Option<AgendaAction>,
-    /// For a to-do: the one action that deals with it.
-    pub fix: Option<AgendaAction>,
     /// The numbers this matter is about, for telling a material change from a quiet one.
     pub figures: BTreeMap<String, f64>,
     /// How far each figure has to move before the matter is worth raising again.
@@ -190,12 +175,6 @@ pub struct Matter {
     /// The classes outside their tolerance when the matter was prepared, sorted.
     pub out_of_band: Vec<String>,
     pub policy: String,
-}
-
-impl Matter {
-    pub fn signable(&self) -> bool {
-        self.kind.signable()
-    }
 }
 
 /// Everything the Overview's prepared section shows.
@@ -411,7 +390,7 @@ fn month_name(date: NaiveDate) -> String {
 }
 
 /// "3 October", or "3 October 2025" for another year.
-pub fn date_words(date: NaiveDate) -> String {
+fn date_words(date: NaiveDate) -> String {
     let month = month_name(date);
     if date.year() == Local::now().date_naive().year() {
         format!("{} {month}", date.day())
@@ -527,7 +506,6 @@ fn rebalance_matter(
                   trades."
             .to_string(),
         adjust: Some(AgendaAction::Open(Page::Rebalance)),
-        fix: None,
         figures,
         steps,
         out_of_band: out_of_band(review),
@@ -638,7 +616,6 @@ fn place_cash_matter(
         proposal,
         records: "Signing records where it would go, in Documents. Stahl never trades.".to_string(),
         adjust: Some(AgendaAction::Open(Page::Rebalance)),
-        fix: None,
         figures,
         steps,
         out_of_band: out_of_band(review),
@@ -690,7 +667,7 @@ fn top_up_matter(
         "shortfall".to_string(),
         shortfall / review.portfolio_value.max(1e-9) * 100.0,
     );
-    // A tenth of the minimum is material: a small rounding is not worth raising again.
+    // A share of the minimum is material: a small rounding is not worth raising again.
     steps.insert(
         "shortfall".to_string(),
         (shortfall / minimum * 100.0).clamp(0.5, 5.0),
@@ -707,7 +684,6 @@ fn top_up_matter(
                   trades."
             .to_string(),
         adjust: Some(AgendaAction::Open(Page::Rebalance)),
-        fix: None,
         figures,
         steps,
         out_of_band: out_of_band(review),
@@ -757,7 +733,6 @@ pub fn prepare(inputs: &Inputs) -> Prepared {
         Kind::TopUpCash => 0,
         Kind::Rebalance => 1,
         Kind::PlaceCash => 2,
-        Kind::Todo => 3,
     });
     prepared
 }
@@ -887,7 +862,8 @@ impl Ledger {
 ///
 /// A matter comes back when its policy changes, when the set of classes outside their tolerance
 /// changes, or when any figure it was judged by moves by more than the step recorded for it: a
-/// class's own tolerance for a drift, and a tenth of the minimum for a cash shortfall.
+/// class's own tolerance for a drift, and a share of the minimum for a cash shortfall (between
+/// half a point and five points of the portfolio).
 pub fn material(entry: &Entry, matter: &Matter) -> bool {
     if entry.policy != matter.policy {
         return true;
@@ -1260,9 +1236,7 @@ pub struct MattersPage {
     pub confirm_sign: Option<String>,
     /// The record opened on the Documents page.
     pub open_decision: Option<String>,
-    pub loading: bool,
     pub error: Option<String>,
-    pub message: Option<String>,
 }
 
 impl MattersPage {
@@ -1341,19 +1315,15 @@ impl State {
 
     /// Load the decision records the Documents page lists.
     pub fn load_decisions(&mut self) {
-        self.matters.loading = true;
         self.run(
             |backend| async move { Ok(backend.decisions().await) },
-            |state, result: BackendResult<Vec<Decision>>| {
-                state.matters.loading = false;
-                match result {
-                    Ok(decisions) => {
-                        state.matters.decisions = decisions;
-                        state.matters.decisions_loaded = true;
-                        state.matters.error = None;
-                    }
-                    Err(error) => state.matters.error = Some(error),
+            |state, result: BackendResult<Vec<Decision>>| match result {
+                Ok(decisions) => {
+                    state.matters.decisions = decisions;
+                    state.matters.decisions_loaded = true;
+                    state.matters.error = None;
                 }
+                Err(error) => state.matters.error = Some(error),
             },
         );
     }
@@ -1427,8 +1397,6 @@ impl State {
             },
             move |state, result: BackendResult<String>| match result {
                 Ok(path) => {
-                    state.matters.message =
-                        Some("Recorded. The plan is in your documents.".to_string());
                     state.matters.error = None;
                     state.matters.decisions_loaded = false;
                     state.show_toast("Recorded. The plan is in your documents.");
@@ -1467,8 +1435,7 @@ impl State {
         let mut ledger = self.matters.ledger.clone();
         ledger.record(entry(&matter, Status::Declined, today, reason.clone()));
         self.matters.ledger = ledger.clone();
-        self.matters.message =
-            Some("Declined. We won't bring it again unless the numbers move.".to_string());
+        self.show_toast("Declined. We won't bring it again unless the numbers move.");
         if !self.is_workspace() {
             return;
         }
@@ -1515,7 +1482,6 @@ impl State {
         let mut ledger = self.matters.ledger.clone();
         ledger.record(entry);
         self.matters.ledger = ledger.clone();
-        self.matters.message = Some("Set aside until tomorrow.".to_string());
         self.show_toast("Set aside until tomorrow");
         if !self.is_workspace() {
             return;
