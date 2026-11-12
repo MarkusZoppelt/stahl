@@ -4092,6 +4092,10 @@ fn a_question_to_a_provider_asks_before_it_goes() {
     assert!(app.rt.state.consent.is_some(), "the prompt asks first");
     assert!(app.exists("consent-panel"));
     assert!(app.has_text("api.example.com"));
+    assert!(
+        app.has_text("Authorization header"),
+        "the key is not in the body, so the sheet says where it goes"
+    );
 
     app.click("consent-show");
     assert!(
@@ -4110,6 +4114,24 @@ fn a_question_to_a_provider_asks_before_it_goes() {
     assert!(
         !app.dir.path().join("ask-consent.json").exists(),
         "nothing was remembered"
+    );
+}
+
+#[test]
+fn a_remote_provider_must_be_https() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://example.com/v1");
+    app.click("settings-save");
+    app.settle();
+    let error = app.rt.state.settings.error.clone().expect("refused");
+    assert!(error.contains("https"), "{error}");
+    assert!(app.has_text("example.com would be reached without encryption"));
+    assert_eq!(
+        app.rt.state.backend.llm_now().map(|llm| llm.url),
+        None,
+        "nothing was saved"
     );
 }
 

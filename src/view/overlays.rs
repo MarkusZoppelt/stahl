@@ -936,7 +936,8 @@ fn consent(s: &State, t: &Theme, layer: &mut Vec<El>) {
     let host = consent.host.clone();
     let explanation = format!(
         "Your question, your holdings and what they are worth, and your policy will go to {} at \
-         {}. Stahl sends nothing else, and only when you ask a question.",
+         {}. Stahl sends nothing else, and only when you ask a question. Your key travels in \
+         the Authorization header, which is not part of the text below.",
         consent.model, host
     );
     let shown = consent.show;

@@ -496,6 +496,16 @@ fn main() {
             ("briefing", |s| scene(s, Page::Briefing)),
             ("health", |s| scene(s, Page::Health)),
             ("settings", |s| scene(s, Page::Settings)),
+            // A provider away from this machine over plain http is refused with a sentence.
+            ("settings-refused", |s| {
+                scene(s, Page::Settings);
+                s.settings
+                    .provider_url
+                    .replace_text("http://api.example.com/v1");
+                s.settings.model.replace_text("gpt-4o-mini");
+                s.save_settings();
+                s.settle();
+            }),
             ("palette", |s| {
                 scene(s, Page::Overview);
                 s.open_palette();

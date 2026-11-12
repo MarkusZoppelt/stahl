@@ -3982,6 +3982,14 @@ impl State {
             return;
         }
         let provider_url = text_or_none(&form.provider_url.text);
+        if let Some(problem) = provider_url
+            .as_deref()
+            .and_then(crate::ask::provider_problem)
+        {
+            form.error = Some(problem);
+            form.message = None;
+            return;
+        }
         let api_key = text_or_none(&form.api_key.text);
         let model = text_or_none(&form.model.text);
         self.change_and_reload(
