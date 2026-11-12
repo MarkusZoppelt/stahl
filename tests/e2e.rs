@@ -175,6 +175,29 @@ impl Harness {
         self.rt.find(key).is_some()
     }
 
+    /// Click the first visible element whose text is exactly `label`, for a control with no key.
+    fn click_label(&mut self, label: &str) {
+        let (x, y) = self
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| {
+                element.text.as_deref() == Some(label)
+                    && element.visible[2] > 0.0
+                    && element.visible[3] > 0.0
+            })
+            .map(|element| {
+                let [x, y, width, height] = element.rect;
+                (x + width / 2.0, y + height / 2.0)
+            })
+            .unwrap_or_else(|| panic!("nothing to click labelled {label}"));
+        self.rt.pointer_move(x, y);
+        self.rt.frame(1.0 / 60.0);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
     fn has_text(&self, wanted: &str) -> bool {
         self.rt.elements().iter().any(|element| {
             element
@@ -341,6 +364,146 @@ fn adding_a_position_is_unsaved_until_saved() {
     assert!(!app.rt.state.dirty);
     assert!(fs::read_to_string(&path).unwrap().contains("Apple"));
     assert!(!app.exists("save"));
+}
+
+/// A broker's file from `tests/intake/`, dropped on the window as the platform hands it over.
+fn dropped(app: &mut Harness, name: &str) -> PathBuf {
+    let path = app.dir.path().join(name);
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name),
+        &path,
+    )
+    .unwrap();
+    app.rt.drop_files(vec![path.clone()], Some((660.0, 430.0)));
+    app.settle();
+    path
+}
+
+/// Every position's id and count, which an import changes and an undo puts back.
+fn counts(app: &Harness) -> Vec<(String, f64)> {
+    app.rt
+        .state
+        .positions
+        .iter()
+        .map(|position| {
+            (
+                position.position_id.clone().unwrap_or_default(),
+                position.amount,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "de-transactions.csv");
+    assert!(app.rt.state.intake.is_some(), "the review sheet is up");
+    assert!(app.has_text("Two purchases, one sale and one holding we have not seen before."));
+    assert!(app.exists("intake-accept-all"));
+    assert!(app.exists("intake-accept-0"));
+    assert!(
+        app.has_text("line 5:"),
+        "each change shows the file's own row"
+    );
+
+    app.click("intake-accept-all");
+    assert!(
+        app.rt.state.intake.is_none(),
+        "taking everything puts the sheet away"
+    );
+    assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
+    assert!(app.rt.state.intake_undo.is_some());
+    assert!(app.exists("toast"));
+    let after = counts(&app);
+    assert_ne!(before, after, "the positions changed");
+    assert!(
+        app.rt
+            .state
+            .positions
+            .iter()
+            .any(|position| position.ticker.as_deref() == Some("NGSC")),
+        "the holding the file added is on record"
+    );
+
+    app.click_label("Undo");
+    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
+    assert!(app.rt.state.intake_undo.is_none(), "one undo only");
+    assert_eq!(counts(&app), before, "the positions are as they were");
+}
+
+#[test]
+fn one_row_can_be_accepted_on_its_own() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    dropped(&mut app, "de-transactions.csv");
+
+    app.click("intake-accept-0");
+    assert!(
+        app.rt.state.intake.is_some(),
+        "the sheet stays open for the rest"
+    );
+    assert!(app.has_text("Recorded"), "the row says what happened to it");
+    assert!(app.rt.state.dirty);
+    assert_ne!(counts(&app), before, "that one change is on record");
+    assert!(app.rt.state.intake_undo.is_some());
+
+    app.click("intake-leave-1");
+    assert!(!app.exists("intake-row-1"), "a row left is not asked again");
+    app.click("intake-dismiss");
+    assert!(app.rt.state.intake.is_none());
+}
+
+#[test]
+fn the_same_broker_file_twice_proposes_nothing_the_second_time() {
+    let mut app = Harness::boot(true, None);
+    let path = dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-all");
+    assert!(app.rt.state.dirty);
+
+    app.rt.drop_files(vec![path], Some((660.0, 430.0)));
+    app.settle();
+    let review = app.rt.state.intake.as_ref().expect("the sheet still opens");
+    let ledger = review.ledger.as_ref().expect("the file still reads");
+    assert!(
+        ledger.proposals.iter().all(|proposal| !proposal.ready),
+        "{:#?}",
+        ledger.proposals
+    );
+    assert!(ledger.agreed > 0);
+    assert!(!app.exists("intake-accept-all"), "there is nothing to take");
+    assert!(app.has_text("every line is already on your record"));
+}
+
+#[test]
+fn an_unreadable_file_says_why_and_offers_nothing_to_take() {
+    let mut app = Harness::boot(true, None);
+    app.command('2', false);
+    let path = app.dir.path().join("statement.pdf");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/intake/statement.pdf"),
+        &path,
+    )
+    .unwrap();
+    app.click("import-intake");
+    assert_eq!(
+        app.rt.file_dialog().expect("the import dialog is open").0,
+        FileDialogKind::Open
+    );
+    app.rt
+        .resolve_file_dialog(Some(path))
+        .expect("the dialog is answered");
+    app.settle();
+
+    assert!(app.has_text("This is a PDF."));
+    assert!(!app.exists("intake-accept-all"));
+    app.click("intake-cancel");
+    assert!(app.rt.state.intake.is_none(), "Close puts the sheet away");
+    assert!(!app.rt.state.dirty, "an unreadable file changes nothing");
 }
 
 #[test]

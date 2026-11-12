@@ -1092,6 +1092,12 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .on_press(|s: &mut State| s.open_form(None))
         .build(k)
         .key("add-position");
+    let import = Button::new("Import")
+        .icon(&icons::DOWNLOAD)
+        .help("Compare a file from your broker with these positions")
+        .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_intake(tx))
+        .build(k)
+        .key("import-intake");
     let view = SegmentedControl::new(&["Table", "Map"], Some(usize::from(s.holdings_map)))
         .label("View")
         .fit()
@@ -1118,6 +1124,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .gap(8.0)
                     .child(view)
                     .child(search)
+                    .child(import)
                     .child(add),
             )
     } else {
@@ -1127,6 +1134,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .w_full()
                 .gap(8.0)
                 .child(search.grow(1.0).min_w(0.0))
+                .child(import)
                 .child(add),
         )
     };

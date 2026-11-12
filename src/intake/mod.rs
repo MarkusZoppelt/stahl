@@ -41,6 +41,15 @@ pub enum Outcome {
     },
 }
 
+/// Words joined the way a person says them: "a", "a and b", "a, b and c".
+pub fn spoken(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => (*one).to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// What the start of a file says it is, when it is something other than text.
 fn kind_of_bytes(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"%PDF") {

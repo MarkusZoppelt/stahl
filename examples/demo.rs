@@ -176,6 +176,28 @@ fn main() {
         s.change = None;
         s.history = None;
     }
+    /// A broker's file from `tests/intake/`, copied beside the open portfolio and imported, as
+    /// dropping it on the window does.
+    fn intake(s: &mut State, name: &str) {
+        let Some(parent) = s
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(s.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+        else {
+            return;
+        };
+        let target = parent.join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name);
+        if fs::copy(source, &target).is_err() {
+            return;
+        }
+        s.open_intake(&target);
+        s.settle();
+    }
     /// A portfolio on its targets, so the agenda has nothing to ask.
     fn on_target(s: &mut State) {
         if let Some(review) = &mut s.review.data {
@@ -419,6 +441,27 @@ fn main() {
             ("edit-position-purchases", |s| {
                 scene(s, Page::Holdings);
                 s.open_form(Some(0));
+            }),
+            // A broker's file, read and compared with the positions: what it holds, and one row
+            // per change, each with the file's own line under it.
+            ("intake-review", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+            }),
+            ("intake-review-light", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // A file the app can't read: one plain sentence saying why.
+            ("intake-unreadable", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "statement.pdf");
+            }),
+            ("phone-intake-review", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
             }),
             ("welcome", first_run),
             ("welcome-light", |s| {

@@ -46,6 +46,7 @@ use serde_json::{Error as JsonError, from_value, to_value};
 use tokio::{runtime::Handle, sync::RwLock};
 
 use crate::{
+    intake::apply::{self as intake_apply, Op as IntakeOp},
     records::{self, Record},
     statement::{Change, Contribution, Seen},
     time,
@@ -1407,6 +1408,21 @@ impl Backend {
 
     pub async fn save_portfolio(&self) -> BackendResult<()> {
         self.state.save().await.map_err(report)
+    }
+
+    /// Write approved changes from a broker's file into the positions, and hand back the
+    /// positions as they were, so the owner can undo them.
+    pub async fn apply_intake(&self, ops: Vec<IntakeOp>) -> BackendResult<String> {
+        let before = self.state.positions_json.read().await.clone();
+        let after = intake_apply::apply(&before, &ops)?;
+        self.state.set_positions_json(after).await;
+        Ok(before)
+    }
+
+    /// Put the positions back as they were before an import.
+    pub async fn restore_positions(&self, json: String) -> BackendResult<()> {
+        self.state.set_positions_json(json).await;
+        Ok(())
     }
 
     // --- Policy ---

@@ -1,6 +1,6 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::{env, mem};
+use std::{env, mem, path::Path};
 
 use rune::{
     Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
@@ -24,6 +24,7 @@ mod compact;
 pub mod door;
 pub mod guide;
 mod insights;
+mod intake;
 mod overlays;
 mod overview;
 pub mod past;
@@ -60,6 +61,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        // The sheet over the page is the first thing Escape puts away.
+        if s.intake.take().is_some() {
+            return true;
+        }
         // A plate lifted off the wall goes back on it first.
         if s.record_plate.take().is_some() {
             return true;
@@ -137,14 +142,20 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         shell(s, &t, cx, &mut layer)
     };
     layer.extend(door::opening(s));
-    overlays::build(s, &t, &mut layer);
+    overlays::build(s, &t, cx, &mut layer);
 
     let body = body
         .fill(t.kit.c.bg_base)
         .on_drop_files(|s: &mut State, files, _| {
             s.drop_hover = false;
-            if let Some(path) = files.first() {
-                let path = path.clone();
+            let Some(path) = files.first() else {
+                return;
+            };
+            let path = path.clone();
+            // A broker's export goes to the review sheet; anything else opens as it always has.
+            if s.has_portfolio() && is_broker_file(&path) {
+                s.open_intake(&path);
+            } else {
                 s.open_dropped(&path);
             }
         })
@@ -173,6 +184,13 @@ fn drops_work() -> bool {
     // Nor does the iOS shell pass drops on yet.
     !cfg!(target_os = "ios")
         && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
+}
+
+/// Whether a dropped file is a broker's export, which goes to the review sheet.
+fn is_broker_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "csv" | "tsv"))
 }
 
 fn welcome(s: &State, t: &Theme) -> El {

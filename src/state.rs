@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    mem,
+    fs, mem,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -21,6 +21,7 @@ use portfolio_rs::{
     doctor::WorkspaceHealth,
     mcp::dto::Finding,
     policy::Policy,
+    position::parse_purchase_date,
     review::Review,
     simulate::RebalanceSimulation,
     state::{
@@ -38,6 +39,12 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    intake::{
+        self,
+        apply::{self as intake_apply, Choice},
+        reconcile::{self, Bought, Holding, Ledger},
+        text::Sheet,
+    },
     records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
@@ -118,6 +125,8 @@ pub struct Opening {
 }
 
 const TOAST_FOR: Duration = Duration::from_millis(2600);
+/// Longer, because the Undo beside it is worth a moment's thought.
+const UNDO_FOR: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -447,6 +456,55 @@ impl PositionForm {
     }
 }
 
+/// What the owner did with one change a broker's file proposes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Decision {
+    /// Still to decide.
+    Pending,
+    /// Recorded.
+    Accepted,
+    /// Not taken.
+    Left,
+}
+
+/// A broker's file, read and compared with the positions: what it asks for, or why it can't be
+/// used. The review sheet is drawn from this and nothing else.
+pub struct IntakeReview {
+    /// The file's name, as the owner knows it.
+    pub file: String,
+    /// The rows it was read from, so each change can show the file's own line.
+    pub sheet: Option<Sheet>,
+    /// What the file means for the record. `None` when it can't be read.
+    pub ledger: Option<Ledger>,
+    /// Why the file can't be used, in plain words.
+    pub problem: Option<String>,
+    /// One decision per proposal in `ledger`.
+    pub decided: Vec<Decision>,
+    /// A change is being written, so a second press mustn't start another.
+    pub busy: bool,
+}
+
+impl IntakeReview {
+    fn problem(file: String, why: String) -> IntakeReview {
+        IntakeReview {
+            file,
+            sheet: None,
+            ledger: None,
+            problem: Some(why),
+            decided: Vec::new(),
+            busy: false,
+        }
+    }
+}
+
+/// The positions as they were before an import, so the toast's Undo can put them back.
+pub struct IntakeUndo {
+    json: String,
+    dirty: bool,
+    /// The proposals it took, to put them back to undecided.
+    taken: Vec<usize>,
+}
+
 /// The New Workspace form.
 pub struct NewWorkspaceForm {
     pub name: TextEdit,
@@ -513,6 +571,7 @@ pub enum Command {
     Theme,
     Sidebar,
     AddPosition,
+    Import,
     CopyBriefing,
     CheckForUpdates,
     /// Ask Counsel this question, from the palette.
@@ -812,6 +871,10 @@ pub struct State {
     pub drop_hover: bool,
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
+    /// A broker's file waiting for the owner's approval.
+    pub intake: Option<IntakeReview>,
+    /// The positions from before the last import, while its Undo is offered.
+    pub intake_undo: Option<IntakeUndo>,
     pub new_workspace: Option<NewWorkspaceForm>,
     pub guide: bool,
     /// Set when a folder was opened and it is not a workspace. The previous portfolio stays in
@@ -1107,6 +1170,8 @@ impl State {
             drop_hover: false,
             palette: None,
             form: None,
+            intake: None,
+            intake_undo: None,
             new_workspace: None,
             guide: false,
             folder_prompt: None,
@@ -1314,7 +1379,8 @@ impl State {
         }
         if self.toast_armed {
             self.toast_armed = false;
-            tx.wake_after(TOAST_FOR + Duration::from_millis(50));
+            let shown_for = self.toast_for();
+            tx.wake_after(shown_for + Duration::from_millis(50));
         }
         // A new plate's arrival plays once: after it, the plate is simply on the wall.
         if let Some((_, started)) = &self.record_arrival {
@@ -1328,9 +1394,10 @@ impl State {
         if self
             .toast
             .as_ref()
-            .is_some_and(|(_, shown)| shown.elapsed() >= TOAST_FOR)
+            .is_some_and(|(_, shown)| shown.elapsed() >= self.toast_for())
         {
             self.toast = None;
+            self.intake_undo = None;
             changed = true;
         }
         // A save or revert asked for from the unsaved-changes dialog finishes in `drain`, above.
@@ -1354,8 +1421,23 @@ impl State {
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>) {
+        self.intake_undo = None;
+        self.show_undo_toast(message);
+    }
+
+    /// A toast with an Undo beside it, which puts the positions back as they were.
+    fn show_undo_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
         self.toast_armed = true;
+    }
+
+    /// How long the toast stays: an Undo is worth more than a word of confirmation.
+    fn toast_for(&self) -> Duration {
+        if self.intake_undo.is_some() {
+            UNDO_FOR
+        } else {
+            TOAST_FOR
+        }
     }
 
     /// A tap on the door in the phone's top bar turns it a quarter. A full turn seals the vault.
@@ -1912,6 +1994,8 @@ impl State {
         self.time = crate::time::Time::default();
         self.dirty = false;
         self.form = None;
+        self.intake = None;
+        self.intake_undo = None;
         self.folder_prompt = None;
         self.selected = None;
         self.inspector.set_open(false);
@@ -1948,6 +2032,278 @@ impl State {
             return;
         }
         self.show_file_dialog(tx);
+    }
+
+    /// Ask for a broker's file to compare with the positions.
+    pub fn ask_for_intake(&mut self, tx: &mut Tx) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        let directory = self
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(self.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf);
+        let options = FileDialogOptions {
+            title: "Import a Broker File".into(),
+            directory,
+            ..Default::default()
+        }
+        .filter("Broker export", &["csv", "tsv", "txt"]);
+        if self.platform_picker {
+            self.ask_platform(PickKind::File, options.title, |state, path| {
+                state.open_intake(Path::new(&path));
+            });
+            return;
+        }
+        tx.open_file(options, |state: &mut State, result, _| match result {
+            Ok(Some(path)) => state.open_intake(&path),
+            Ok(None) => {}
+            Err(error) => state.error = Some(error.to_string()),
+        });
+    }
+
+    /// Read a broker's file and compare it with the positions, for the owner to approve.
+    pub fn open_intake(&mut self, path: &Path) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        self.intake_undo = None;
+        let file = path.to_string_lossy().into_owned();
+        let name = file_name(&file).to_string();
+        self.run(
+            move |_backend| async move {
+                fs::read(&file).map_err(|error| format!("This file can't be read: {error}"))
+            },
+            move |state, result| match result {
+                Ok(bytes) => state.read_intake(name, &bytes),
+                Err(error) => state.intake = Some(IntakeReview::problem(name, error)),
+            },
+        );
+    }
+
+    /// What was made of a file's bytes, compared with the positions on record.
+    fn read_intake(&mut self, file: String, bytes: &[u8]) {
+        let review = match intake::understand(bytes) {
+            intake::Outcome::Read { sheet, reading, .. } => {
+                let ledger = reconcile::reconcile(&reading, &self.intake_holdings());
+                // The sheet is over Holdings: what the file changes is in the table behind it.
+                self.navigate(Page::Holdings);
+                IntakeReview {
+                    file,
+                    decided: vec![Decision::Pending; ledger.proposals.len()],
+                    sheet: Some(sheet),
+                    ledger: Some(ledger),
+                    problem: None,
+                    busy: false,
+                }
+            }
+            intake::Outcome::Unreadable(why) => IntakeReview::problem(file, why),
+            intake::Outcome::Unmapped { missing, .. } => IntakeReview::problem(
+                file,
+                format!(
+                    "This table can be read, but nothing in it says {}. A different export from \
+                     your broker may name its columns.",
+                    intake::spoken(&missing)
+                ),
+            ),
+        };
+        self.intake = Some(review);
+    }
+
+    /// The positions as reconciling a broker's file needs them.
+    fn intake_holdings(&self) -> Vec<Holding> {
+        self.positions
+            .iter()
+            .map(|position| Holding {
+                id: position
+                    .position_id
+                    .clone()
+                    .unwrap_or_else(|| position.id.to_string()),
+                name: position.name.clone(),
+                ticker: position.ticker.clone(),
+                class: position.asset_class.clone(),
+                quantity: position.amount,
+                purchases: position
+                    .purchases
+                    .iter()
+                    .map(|purchase| Bought {
+                        date: purchase
+                            .date
+                            .as_deref()
+                            .and_then(parse_purchase_date)
+                            .map(|date| date.date_naive()),
+                        quantity: purchase.quantity,
+                        price: purchase.price,
+                    })
+                    .collect(),
+                currency: self
+                    .quote(position)
+                    .and_then(|quote| quote.currency.clone()),
+            })
+            .collect()
+    }
+
+    /// Record one change the sheet proposed.
+    pub fn accept_intake(&mut self, index: usize) {
+        self.write_intake(vec![index], false);
+    }
+
+    /// Record every change that needs no second look, and put the sheet away.
+    pub fn accept_all_intake(&mut self) {
+        let indices = self.intake.as_ref().map_or_else(Vec::new, |review| {
+            let Some(ledger) = &review.ledger else {
+                return Vec::new();
+            };
+            ledger
+                .proposals
+                .iter()
+                .enumerate()
+                .filter(|(index, proposal)| {
+                    proposal.in_all && review.decided.get(*index) == Some(&Decision::Pending)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        });
+        self.write_intake(indices, true);
+    }
+
+    /// Refuse one change, so the sheet stops asking about it.
+    pub fn leave_intake(&mut self, index: usize) {
+        if let Some(review) = &mut self.intake
+            && let Some(decision) = review.decided.get_mut(index)
+        {
+            *decision = Decision::Left;
+        }
+    }
+
+    /// Write the changes at `indices`, then re-read what they affect, keeping the positions from
+    /// before them so the toast's Undo can put them back.
+    fn write_intake(&mut self, indices: Vec<usize>, close: bool) {
+        let Some(review) = self.intake.as_mut() else {
+            return;
+        };
+        if review.busy {
+            return;
+        }
+        let Some(ledger) = &review.ledger else {
+            return;
+        };
+        let mut ops = Vec::new();
+        let mut taken = Vec::new();
+        for index in indices {
+            let Some(proposal) = ledger.proposals.get(index) else {
+                continue;
+            };
+            if review.decided.get(index) != Some(&Decision::Pending) || !proposal.ready {
+                continue;
+            }
+            if let Some(op) = intake_apply::op(proposal, &Choice::of(proposal)) {
+                ops.push(op);
+                taken.push(index);
+            }
+        }
+        if ops.is_empty() {
+            return;
+        }
+        review.busy = true;
+        let was_dirty = self.dirty;
+        let count = taken.len();
+        self.run(
+            move |backend| async move {
+                let before = backend.apply_intake(ops).await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((before, open, snapshot, backend.config().await))
+            },
+            move |state, result| {
+                if let Some(review) = &mut state.intake {
+                    review.busy = false;
+                }
+                match result {
+                    Ok((before, open, snapshot, config)) => {
+                        state.open = open;
+                        state.config = Some(config);
+                        if let Some(snapshot) = snapshot {
+                            state.apply_snapshot(snapshot);
+                        }
+                        state.dirty = true;
+                        if let Some(review) = &mut state.intake {
+                            for &index in &taken {
+                                if let Some(decision) = review.decided.get_mut(index) {
+                                    *decision = Decision::Accepted;
+                                }
+                            }
+                        }
+                        if close {
+                            state.intake = None;
+                        }
+                        state.intake_undo = Some(IntakeUndo {
+                            json: before,
+                            dirty: was_dirty,
+                            taken,
+                        });
+                        state.show_undo_toast(if count == 1 {
+                            "Imported. Save to keep it.".to_string()
+                        } else {
+                            format!("{count} changes imported. Save to keep them.")
+                        });
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+            },
+        );
+    }
+
+    /// Put the positions back as they were before the last import.
+    pub fn undo_intake(&mut self) {
+        let Some(undo) = self.intake_undo.take() else {
+            return;
+        };
+        self.run(
+            move |backend| async move {
+                backend.restore_positions(undo.json).await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((
+                    undo.dirty,
+                    undo.taken,
+                    open,
+                    snapshot,
+                    backend.config().await,
+                ))
+            },
+            |state, result| match result {
+                Ok((dirty, taken, open, snapshot, config)) => {
+                    state.open = open;
+                    state.config = Some(config);
+                    if let Some(snapshot) = snapshot {
+                        state.apply_snapshot(snapshot);
+                    }
+                    state.dirty = dirty;
+                    if let Some(review) = &mut state.intake {
+                        for index in taken {
+                            if let Some(decision) = review.decided.get_mut(index) {
+                                *decision = Decision::Pending;
+                            }
+                        }
+                    }
+                    state.show_toast("Import undone");
+                }
+                Err(error) => state.error = Some(error),
+            },
+        );
     }
 
     fn show_file_dialog(&mut self, tx: &mut Tx) {
@@ -2759,6 +3115,7 @@ impl State {
                 self.open_form(None);
             }
             Command::Ask(question) => self.ask_about(question),
+            Command::Import => self.ask_for_intake(tx),
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
             Command::Close => self.reset(),
