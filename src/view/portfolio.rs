@@ -465,13 +465,14 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(if narrow { 16.0 } else { 24.0 })
         .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
-        // Questions and decisions are about today; a past day only shows what was.
+        // Questions are about today; a past day only shows what was.
         .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
         .child(hero(s, t, cx, !narrow))
-        .children(
-            (!s.in_past())
-                .then(|| ui::entering(overview::agenda(s, t, narrow, cx.is_reduced_motion()), 2)),
-        )
+        // On a past day the section says why nothing can be signed, instead of vanishing.
+        .child(ui::entering(
+            overview::agenda(s, t, narrow, cx.is_reduced_motion()),
+            2,
+        ))
         .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
             ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })

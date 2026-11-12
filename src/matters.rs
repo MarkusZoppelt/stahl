@@ -1270,12 +1270,34 @@ impl State {
         }
     }
 
+    /// Why nothing can be signed right now, in a sentence, or `None`. A record says what was true
+    /// on the day it was signed, so it is never built from a past day's figures or from a review
+    /// that doesn't describe the allocation on screen.
+    pub fn matters_withheld(&self) -> Option<&'static str> {
+        if self.in_past() {
+            Some(
+                "You are looking at a day in the past. Decisions are signed on today's figures, \
+                 so return to today to see what needs your signature.",
+            )
+        } else if self.review.loading && self.review.data.is_some() {
+            Some(
+                "The review is being redone on the latest figures. Decisions will return in a moment.",
+            )
+        } else {
+            None
+        }
+    }
+
     /// What the bank has prepared: matters to sign, and data fixes, with past decisions noted.
     pub fn prepared(&self) -> Prepared {
         if self.positions.is_empty() {
             return Prepared::default();
         }
         let mut prepared = prepare(&self.matter_inputs());
+        if self.matters_withheld().is_some() {
+            prepared.matters.clear();
+            return prepared;
+        }
         let today = Local::now().date_naive();
         for matter in &mut prepared.matters {
             matter.prior = self.matters.ledger.prior(matter);
@@ -1284,6 +1306,20 @@ impl State {
             .matters
             .retain(|matter| !self.matters.ledger.hidden(matter, today));
         prepared
+    }
+
+    /// The matter as the record keeps it: the same one, with its money written out.
+    fn unmasked(&self, matter: &Matter) -> Matter {
+        if !self.privacy {
+            return matter.clone();
+        }
+        let mut inputs = self.matter_inputs();
+        inputs.privacy = false;
+        prepare(&inputs)
+            .matters
+            .into_iter()
+            .find(|open| open.id == matter.id)
+            .unwrap_or_else(|| matter.clone())
     }
 
     /// Where a decision may be written: a plaintext workspace, or nothing. An encrypted
@@ -1376,6 +1412,10 @@ impl State {
             self.matters.hold = None;
             return;
         };
+        // The card may hide amounts; the record sits beside a table of real ones, so it is
+        // written from the same matter prepared without the masks.
+        let card = matter;
+        let matter = self.unmasked(&card);
         let workspace = match self.matters_workspace() {
             Ok(workspace) => workspace,
             Err(error) => {
@@ -1393,7 +1433,7 @@ impl State {
         let currency = self.currency();
         self.matters.hold = None;
         self.matters.stamp = Some(Stamp {
-            matter: matter.clone(),
+            matter: card,
             index,
             started: self.now,
             date: today,
@@ -1443,6 +1483,7 @@ impl State {
         else {
             return;
         };
+        let matter = self.unmasked(&matter);
         let today = Local::now().date_naive();
         let reason = reason.trim().to_string();
         let reason = (!reason.is_empty()).then_some(reason);
@@ -1451,10 +1492,14 @@ impl State {
         let mut ledger = self.matters.ledger.clone();
         ledger.record(entry(&matter, Status::Declined, today, reason.clone()));
         self.matters.ledger = ledger.clone();
-        self.show_toast("Declined. We won't bring it again unless the numbers move.");
         let Ok(workspace) = self.matters_workspace() else {
+            self.show_toast(
+                "Declined for this session only. An encrypted portfolio keeps no record, so it \
+                 will return next time.",
+            );
             return;
         };
+        self.show_toast("Declined. We won't bring it again unless the numbers move.");
         let saved = ledger;
         let currency = self.currency();
         let rollback_id = id.to_string();
@@ -1505,10 +1550,14 @@ impl State {
         let mut ledger = self.matters.ledger.clone();
         ledger.record(entry);
         self.matters.ledger = ledger.clone();
-        self.show_toast("Set aside until tomorrow");
         let Ok(workspace) = self.matters_workspace() else {
+            self.show_toast(
+                "Set aside for this session only. An encrypted portfolio keeps no record, so it \
+                 will return next time.",
+            );
             return;
         };
+        self.show_toast("Set aside until tomorrow");
         let rollback_id = id.to_string();
         self.run(
             move |backend| async move { backend.save_matters(&workspace, &ledger).await },

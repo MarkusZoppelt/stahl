@@ -4619,3 +4619,70 @@ fn reduced_motion_asks_plainly_instead_of_holding() {
         Some(stahl::matters::Status::Signed)
     );
 }
+
+#[test]
+fn no_matter_can_be_signed_on_a_day_in_the_past() {
+    let mut app = Harness::boot_tall(true);
+    assert!(app.exists("matter-sign-rebalance"), "today it can be");
+    app.rt.state.travel(Some(10));
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.rt.state.in_past());
+    assert!(!app.exists("matter-rebalance"), "no card on a past day");
+    assert!(!app.exists("matter-sign-rebalance"));
+    assert!(app.exists("matters-withheld"));
+    assert!(app.has_text("Decisions are signed on today's figures"));
+    // Even a hold that somehow completes records nothing.
+    app.rt.state.sign_matter("rebalance");
+    app.settle();
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(decision_files(&app).is_empty());
+
+    app.rt.state.travel(None);
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(
+        app.exists("matter-sign-rebalance"),
+        "back today, it returns"
+    );
+}
+
+#[test]
+fn a_record_signed_in_privacy_mode_is_written_with_real_amounts() {
+    let mut app = Harness::boot_tall(true);
+    app.click("privacy");
+    assert!(app.rt.state.privacy);
+    assert!(
+        !app.has_text("€"),
+        "the card hides its amounts while privacy is on"
+    );
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        written.contains('€'),
+        "the record has its money:\n{written}"
+    );
+    assert!(
+        !written.contains("••"),
+        "no masks in the record:\n{written}"
+    );
+}
+
+#[test]
+fn declining_in_an_encrypted_portfolio_says_it_is_not_kept() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.open.file_path = Some("portfolio.json.gpg".to_string());
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    let toast = toast.expect("a toast");
+    assert!(toast.contains("this session only"), "{toast}");
+    assert!(!toast.contains("won't bring it again"), "{toast}");
+    assert!(decision_files(&app).is_empty());
+
+    app.click("matter-postpone-cash-place");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    assert!(toast.unwrap().contains("this session only"));
+}

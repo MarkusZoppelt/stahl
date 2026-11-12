@@ -740,7 +740,15 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
             matter_card(&stamp.matter, at, s, t, narrow, reduced, Some(stamp)),
         );
     }
-    if cards.is_empty() {
+    if let Some(why) = s.matters_withheld().filter(|_| cards.is_empty()) {
+        // Nothing can be signed on these figures, and the section says why instead of "quiet".
+        section = section.child(
+            row()
+                .key("matters-withheld")
+                .w_full()
+                .child(ui::muted(why, t).wrap()),
+        );
+    } else if cards.is_empty() {
         // The detail is only true when the agenda itself is quiet: a signed or declined matter
         // leaves the list, but the portfolio it was about may still be out of band.
         section = section.child(quiet(

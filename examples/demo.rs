@@ -716,6 +716,8 @@ fn main() {
                 scene(s, Page::Overview);
                 s.matters.expanded = first_matter(s);
             }),
+            // On a past day nothing can be signed, and the section says why.
+            ("matters-past", |s| past_scene(s, Page::Overview)),
             ("matters-light", |s| {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
