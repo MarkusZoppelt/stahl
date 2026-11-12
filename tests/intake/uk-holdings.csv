@@ -1,0 +1,8 @@
+Portfolio valuation as at 12 November 2026
+Account,ISA 0000123
+
+Investment,Ticker,ISIN,Quantity,Price (GBP),Value (GBP)
+S&P 500 Index Trust,SPY,US78462F1030,83,401.20,"33,299.60"
+Treasury 20+ Year Bond,TLT,US4642874329,60,71.10,"4,266.00"
+Harbour UK Equity Income,HUKE.L,GB00B0000000,250,2.14,535.00
+Total,,,,,"38,100.60"

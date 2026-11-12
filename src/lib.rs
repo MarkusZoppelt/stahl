@@ -9,6 +9,7 @@ pub mod facts;
 pub mod format;
 pub mod fx;
 pub mod icons;
+pub mod intake;
 pub mod rebalance;
 pub mod records;
 pub mod scenario;
