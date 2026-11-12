@@ -4460,6 +4460,28 @@ fn decision_files(app: &Harness) -> Vec<PathBuf> {
 }
 
 #[test]
+fn sign_and_the_seal_are_on_the_first_screen_collapsed_and_expanded() {
+    for expanded in [false, true] {
+        let mut app = Harness::boot(true, None);
+        if expanded {
+            // The toggle itself may be below the fold, so open the plan as the demo does.
+            app.rt.state.matters.expanded = Some("rebalance".to_string());
+            app.settle();
+        }
+        for key in ["matter-sign-rebalance", "matter-seal-blank"] {
+            let (x, y) = app
+                .rt
+                .find(key)
+                .unwrap_or_else(|| panic!("{key} is not on the page (expanded: {expanded})"));
+            assert!(
+                (0.0..1320.0).contains(&x) && (0.0..860.0).contains(&y),
+                "{key} is at ({x}, {y}), outside the 1320x860 window (expanded: {expanded})"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_held_sign_records_a_decision_and_documents_lists_it() {
     let mut app = Harness::boot_tall(true);
     assert!(

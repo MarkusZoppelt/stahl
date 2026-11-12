@@ -16,7 +16,9 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Dialog, Markdown, TextInput};
 
 use crate::{
     agenda::{Action, Calm, Item, Weight},
-    format, icons,
+    format,
+    fx::Plate,
+    icons,
     matters::{self, Matter, Proposal, Stamp},
     state::{Page, State},
     theme::{FIGURE, NUMBER, SECTION, Theme},
@@ -25,6 +27,8 @@ use crate::{
 
 /// The Sign control: a round steel control a finger can rest on.
 const SIGN: f32 = 58.0;
+/// The seal's diameter.
+const SEAL: f32 = 40.0;
 /// The ring's stroke, and how far inside the control it sits.
 const RING: f32 = 3.0;
 /// A card presses in this much while its Sign control is held.
@@ -36,8 +40,8 @@ const STAMP_DOWN: Spring = Spring::new(0.30, 0.62);
 
 fn weight_color(weight: Weight, t: &Theme) -> Color {
     match weight {
-        Weight::Total | Weight::Critical => t.down,
-        Weight::Warning => t.warn,
+        // Attention, not loss: no matter here is about a loss, so none borrows its colour.
+        Weight::Total | Weight::Critical | Weight::Warning => t.warn,
         Weight::Notice => t.info,
     }
 }
@@ -318,38 +322,64 @@ fn is_sign_key(event: &KeyEvent) -> bool {
     event.key == Key::Enter || matches!(&event.key, Key::Text(text) if text == " ")
 }
 
-/// The seal stamped onto a signed matter: the door's rings in miniature, with the date inside.
-/// One function, so real steel can replace it without touching the card.
-pub fn seal(date: NaiveDate, size: f32, t: &Theme) -> El {
+/// The seal of a matter: a disc of turned steel with a raised rim, lit by the room's one light.
+/// Unsigned it is blank; signed it carries the date, struck into the metal. Under reduced motion
+/// it arrives in its final state with no movement.
+pub fn seal(s: &State, date: Option<NaiveDate>, size: f32, t: &Theme, reduced: bool) -> El {
     let k = &t.kit;
     let radius = size / 2.0;
-    el().key("matter-seal")
+    let (ink, lip) = ui::steel_ink();
+    let transition = if reduced || date.is_none() {
+        Transition::none()
+    } else {
+        Transition::scale(1.35)
+            .combined(Transition::opacity())
+            .springs(SpringPair::new(STAMP_DOWN, STAMP_DOWN))
+    };
+    let disc = ui::plate(s, t, Plate::new(0.8), radius)
+        .key(if date.is_some() {
+            "matter-seal"
+        } else {
+            "matter-seal-blank"
+        })
         .size(size, size)
         .radius(radius)
         .continuous_corners()
         .center()
-        .fill(t.sunken)
-        .border(1.0, t.accent.alpha(0.55))
         .a11y_hidden()
-        .transition(
-            Transition::scale(1.35)
-                .combined(Transition::opacity())
-                .springs(SpringPair::new(STAMP_DOWN, STAMP_DOWN)),
-        )
+        .transition(transition)
+        // The raised rim: lit on the side facing the light, in shade on the other.
         .child(
-            el().absolute(4.0, 4.0)
-                .size(size - 8.0, size - 8.0)
-                .radius((size - 8.0) / 2.0)
-                .border(1.0, k.c.border_muted)
+            el().absolute(0.0, 0.0)
+                .size(size, size)
+                .radius(radius)
+                .border(1.5, lip)
                 .a11y_hidden(),
         )
         .child(
-            col().center().gap(2.0).child(ui::door(size * 0.34)).child(
-                text(matters::seal_date(date))
-                    .font(k.ty.small.tracking(0.7))
-                    .color(k.c.text_muted),
-            ),
-        )
+            el().absolute(5.0, 5.0)
+                .size(size - 10.0, size - 10.0)
+                .radius((size - 10.0) / 2.0)
+                .border(1.0, ink.alpha(0.28))
+                .a11y_hidden(),
+        );
+    match date {
+        Some(date) => {
+            // The day over the month, each cut into the metal on its own line.
+            let stamp = matters::seal_date(date);
+            let (day, month) = stamp.split_once(' ').unwrap_or((stamp.as_str(), ""));
+            let word = |words: &str| {
+                row().justify_center().w(size - 12.0).child(ui::engraved(
+                    words.to_string(),
+                    k.ty.text_xsmall.tracking(0.4),
+                    ink,
+                    lip,
+                ))
+            };
+            disc.child(col().center().child(word(day)).child(word(month)))
+        }
+        None => disc,
+    }
 }
 
 /// Decline asks for an optional line, so the same matter is not proposed again for the same
@@ -453,20 +483,28 @@ fn matter_card(
     }
     // The seal takes the Adjust button's place when the matter is signed, so the head never
     // changes height and the card never jumps.
+    let adjust = || {
+        matter.adjust.map(|action| {
+            Button::new("Adjust")
+                .variant(ButtonVariant::Outline)
+                .control_size(ControlSize::Small)
+                .on_press(move |s: &mut State| open_plan(s, action))
+                .build(k)
+                .key(format!("matter-adjust-{}", matter.id))
+                .transition(Transition::none())
+        })
+    };
+    // On a wide screen Sign and the seal sit in the head, beside Adjust, so they are on the
+    // first screen however long the plan is. A phone keeps Sign under the card.
     let right = match stamp {
-        Some(stamp) => seal(stamp.date, 68.0, t),
-        None => matter
-            .adjust
-            .map(|action| {
-                Button::new("Adjust")
-                    .variant(ButtonVariant::Outline)
-                    .control_size(ControlSize::Small)
-                    .on_press(move |s: &mut State| open_plan(s, action))
-                    .build(k)
-                    .key(format!("matter-adjust-{}", matter.id))
-                    .transition(Transition::none())
-            })
-            .unwrap_or_else(el),
+        Some(stamp) => seal(s, Some(stamp.date), SEAL, t, reduced),
+        None if narrow => adjust().unwrap_or_else(el),
+        None => row()
+            .center_y()
+            .gap(12.0)
+            .children(adjust())
+            .child(sign_control(matter, s, t, reduced))
+            .child(seal(s, None, SEAL, t, reduced)),
     };
     let head = row()
         .key("head")
@@ -537,34 +575,21 @@ fn matter_card(
             .as_ref()
             .filter(|(id, _)| id == &matter.id)
             .map(|_| ui::caption("Hold to sign.", t).transition(ui::appear()));
+        let others = row()
+            .center_y()
+            .gap(4.0)
+            .children(hint)
+            .child(decline_button(matter, t))
+            .child(postpone_button(matter, t));
         let actions = if narrow {
             col()
                 .w_full()
                 .gap(10.0)
                 .items_start()
                 .child(sign_control(matter, s, t, reduced))
-                .child(
-                    row()
-                        .center_y()
-                        .gap(4.0)
-                        .children(hint)
-                        .child(decline_button(matter, t))
-                        .child(postpone_button(matter, t)),
-                )
+                .child(others)
         } else {
-            row()
-                .center_y()
-                .w_full()
-                .gap(12.0)
-                .child(sign_control(matter, s, t, reduced))
-                .child(
-                    row()
-                        .center_y()
-                        .gap(4.0)
-                        .children(hint)
-                        .child(decline_button(matter, t))
-                        .child(postpone_button(matter, t)),
-                )
+            row().center_y().w_full().gap(12.0).child(others)
         };
         actions.key("actions").transition(Transition::none())
     };
