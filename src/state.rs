@@ -3172,6 +3172,11 @@ impl State {
         self.ask.thinking
     }
 
+    /// The owner pressed "Now" or "Then" on a what-if: hold it there.
+    pub fn what_if_show(&mut self, turn: usize, block: usize, now: bool) {
+        self.ask.what_if_show(turn, block, now);
+    }
+
     /// The model that answers questions. The real app wires the provider here; the demo and the
     /// tests wire the scripted one.
     pub fn with_model(mut self, model: Arc<dyn crate::ask::Model>) -> State {

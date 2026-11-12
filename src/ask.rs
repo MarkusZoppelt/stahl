@@ -1168,6 +1168,30 @@ impl Reveal {
     }
 }
 
+/// A what-if block, as the page is playing it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhatIf {
+    pub turn: usize,
+    pub block: usize,
+    /// The owner is holding it on today, rather than on what the shock would leave.
+    pub now: bool,
+    /// The table behind "Details" is open.
+    pub details: bool,
+}
+
+/// A plan block the owner is playing with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanPlay {
+    pub turn: usize,
+    pub block: usize,
+    /// The fraction the owner dragged the slider to, if they have.
+    pub fraction: Option<f64>,
+    /// The slider's width in points, measured once it is on the page.
+    pub width: f32,
+    /// A pointer is on the slider.
+    pub dragging: bool,
+}
+
 /// The session's conversation. Nothing here is written to disk.
 pub struct Conversation {
     pub turns: Vec<Turn>,
@@ -1190,6 +1214,10 @@ pub struct Conversation {
     pub lines: Lines,
     /// The sentence being revealed word by word, if one is.
     pub reveal: Option<Reveal>,
+    /// The what-if blocks on the page, and where the owner has put them.
+    pub what_if: Vec<WhatIf>,
+    /// The plan blocks the owner has played with.
+    pub plan: Vec<PlanPlay>,
 }
 
 impl Default for Conversation {
@@ -1215,6 +1243,86 @@ impl Conversation {
             chart: None,
             lines: Lines::new(),
             reveal: None,
+            what_if: Vec::new(),
+            plan: Vec::new(),
+        }
+    }
+
+    /// A what-if block, if the page has played with it.
+    pub fn what_if_at(&self, turn: usize, block: usize) -> Option<&WhatIf> {
+        self.what_if
+            .iter()
+            .find(|what_if| what_if.turn == turn && what_if.block == block)
+    }
+
+    fn what_if_mut(&mut self, turn: usize, block: usize) -> &mut WhatIf {
+        if let Some(index) = self
+            .what_if
+            .iter()
+            .position(|what_if| what_if.turn == turn && what_if.block == block)
+        {
+            return &mut self.what_if[index];
+        }
+        self.what_if.push(WhatIf {
+            turn,
+            block,
+            now: false,
+            details: false,
+        });
+        self.what_if.last_mut().expect("just pushed")
+    }
+
+    /// Hold a what-if on today, or let it show what the shock leaves.
+    pub fn what_if_show(&mut self, turn: usize, block: usize, now: bool) {
+        self.what_if_mut(turn, block).now = now;
+    }
+
+    /// Open or close the table behind a what-if's "Details".
+    pub fn what_if_details(&mut self, turn: usize, block: usize) {
+        let what_if = self.what_if_mut(turn, block);
+        what_if.details = !what_if.details;
+    }
+
+    /// A plan block, if the owner has played with it.
+    pub fn plan_at(&self, turn: usize, block: usize) -> Option<&PlanPlay> {
+        self.plan
+            .iter()
+            .find(|play| play.turn == turn && play.block == block)
+    }
+
+    fn plan_mut(&mut self, turn: usize, block: usize) -> &mut PlanPlay {
+        if let Some(index) = self
+            .plan
+            .iter()
+            .position(|play| play.turn == turn && play.block == block)
+        {
+            return &mut self.plan[index];
+        }
+        self.plan.push(PlanPlay {
+            turn,
+            block,
+            fraction: None,
+            width: 0.0,
+            dragging: false,
+        });
+        self.plan.last_mut().expect("just pushed")
+    }
+
+    /// The fraction the owner dragged a plan's slider to.
+    pub fn plan_set(&mut self, turn: usize, block: usize, fraction: f64) {
+        self.plan_mut(turn, block).fraction = Some(fraction.clamp(0.0, 1.0));
+    }
+
+    /// A pointer took the slider, or let it go.
+    pub fn plan_drag(&mut self, turn: usize, block: usize, dragging: bool) {
+        self.plan_mut(turn, block).dragging = dragging;
+    }
+
+    /// The slider's width, measured once it is on the page.
+    pub fn plan_measure(&mut self, turn: usize, block: usize, width: f32) {
+        let play = self.plan_mut(turn, block);
+        if (play.width - width).abs() > 0.5 {
+            play.width = width;
         }
     }
 

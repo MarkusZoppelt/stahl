@@ -3832,6 +3832,103 @@ fn a_figure_the_model_made_up_is_marked_unverified() {
 }
 
 #[test]
+fn the_what_if_toggle_shows_today_and_what_the_shock_leaves() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What if crypto halves?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    // The answer settles on what the shock would leave.
+    assert!(app.has_text("What would be left"));
+    assert!(app.has_text("€93,900.00"), "the shocked total");
+    assert!(app.has_text("€13,500.00"), "the difference beside it");
+
+    // "Now" goes back to today.
+    app.click("ask-0-1-now");
+    assert!(app.has_text("€107,400.00"), "today's total");
+    assert!(!app.has_text("€13,500.00"), "no difference to state");
+    assert!(
+        app.rt
+            .state
+            .ask
+            .what_if_at(0, 1)
+            .is_some_and(|what_if| what_if.now)
+    );
+
+    // The right arrow goes forward again, the left one back: the toggle has the keyboard.
+    app.press(Key::Right);
+    assert!(app.has_text("€93,900.00"));
+    app.press(Key::Left);
+    assert!(app.has_text("€107,400.00"));
+
+    // And the details table is a disclosure, closed until asked for.
+    assert!(!app.exists("ask-0-1-details-body"));
+    app.click("ask-0-1-details");
+    assert!(app.exists("ask-0-1-details-body"));
+    assert!(
+        app.has_text("€27,000.00"),
+        "the table has what crypto is worth today"
+    );
+    app.click("ask-0-1-details");
+    assert!(!app.exists("ask-0-1-details-body"));
+}
+
+#[test]
+fn dragging_the_plan_in_an_answer_changes_its_trades_and_carries_the_fraction_over() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("50% of the way to your targets"));
+
+    // Drag the answer's own slider to about 80% of the way.
+    let (x, y) = app.rt.find("ask-0-3-rail").expect("the slider is there");
+    let width = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .map_or(0.0, |play| play.width);
+    assert!(width > 100.0, "the slider measured itself: {width}");
+    let want = x + width * 0.3;
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(want, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(want, y);
+    app.settle();
+
+    let fraction = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .and_then(|play| play.fraction)
+        .expect("the slider took the drag");
+    assert!((0.7..0.9).contains(&fraction), "{fraction}");
+    let percent = (fraction * 100.0).round() as i64;
+    assert!(
+        app.has_text(&format!("{percent}% of the way to your targets")),
+        "the plan is worked out again at the new fraction"
+    );
+    assert!(!app.has_text("50% of the way to your targets"));
+
+    // And the Rebalance page opens at the fraction the owner dragged to.
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert!((app.rt.state.rebalance.fraction - fraction).abs() < 1e-9);
+    assert!(app.has_text(&format!("Go {percent}% of the way")));
+}
+
+#[test]
 fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Ask.key());

@@ -17,6 +17,7 @@ use crate::{
     theme::{PAGE_TITLE, STATEMENT, STATEMENT_COMPACT, Theme, WORDMARK},
 };
 
+pub mod answer;
 pub mod answers;
 pub mod ask;
 mod charts;

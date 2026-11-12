@@ -13,7 +13,7 @@ use crate::{
     format, icons,
     state::{Page, State},
     theme::{FIGURE, LEDE, LEDE_COMPACT, SECTION, Theme},
-    view::{charts, rebalance as plan, ui},
+    view::{charts, ui},
 };
 
 /// What a question looks like: a little quieter than the answer's first sentence.
@@ -268,12 +268,12 @@ pub fn suggestions(s: &State) -> Vec<String> {
 /// Where a block sits in an answer: which turn, which block, and how long ago it landed. What
 /// the page draws around it depends on all three.
 #[derive(Clone)]
-struct Slot {
+pub struct Slot {
     /// The block's key, which names every element it draws.
-    key: String,
-    turn: usize,
-    at: usize,
-    age: Option<f64>,
+    pub key: String,
+    pub turn: usize,
+    pub at: usize,
+    pub age: Option<f64>,
 }
 
 fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) -> El {
@@ -435,8 +435,16 @@ fn block_view(
             }
         }
         Block::Allocation => Some(allocation(s, t, &key)),
-        Block::Plan { fraction, amount } => Some(plan_block(s, t, *fraction, *amount, &key)),
-        Block::Scenario { shocks } => Some(scenario_block(s, t, shocks, &key)),
+        Block::Plan { fraction, amount } => {
+            Some(super::answer::plan_block(s, t, *fraction, *amount, slot))
+        }
+        Block::Scenario { shocks } => Some(super::answer::scenario(
+            s,
+            t,
+            shocks,
+            slot,
+            cx.is_reduced_motion(),
+        )),
         Block::Go { steps } => Some(go(steps, t, &key)),
     }
 }
@@ -769,161 +777,6 @@ fn allocation(s: &State, t: &Theme, key: &str) -> El {
                 .items_start()
                 .child(open_button("Open Allocation", Page::Allocation, t, key)),
         )
-}
-
-/// A rebalance plan, compactly, with the way to open it on the Rebalance page.
-fn plan_block(s: &State, t: &Theme, fraction: Option<f64>, amount: Option<f64>, key: &str) -> El {
-    let classes = plan::load_classes(s);
-    let (plan, title, detail) = match (fraction, amount) {
-        (Some(fraction), _) => {
-            let plan = crate::rebalance::blend(&classes, fraction);
-            let title = if fraction >= 0.999 {
-                "All the way to your targets".to_string()
-            } else {
-                format!(
-                    "{}% of the way to your targets",
-                    (fraction * 100.0).round() as i64
-                )
-            };
-            (plan, title, "The total stays where it is.".to_string())
-        }
-        (_, Some(amount)) if amount >= 0.0 => (
-            crate::rebalance::place(&classes, amount)
-                .unwrap_or_else(|_| crate::rebalance::today(&classes)),
-            "Where new money goes".to_string(),
-            format!("Buying only, {} in all.", s.money(amount)),
-        ),
-        (_, Some(amount)) => (
-            crate::rebalance::place(&classes, amount)
-                .unwrap_or_else(|_| crate::rebalance::today(&classes)),
-            "Where a withdrawal comes from".to_string(),
-            format!("Selling only, {} in all.", s.money(-amount)),
-        ),
-        _ => (
-            crate::rebalance::today(&classes),
-            String::new(),
-            String::new(),
-        ),
-    };
-    let trades = plan.trades.iter().map(|trade| {
-        row()
-            .center_y()
-            .w_full()
-            .gap(10.0)
-            .child(ui::dot(t.class_color(&trade.asset_class)))
-            .child(
-                text(trade.asset_class.clone())
-                    .font(t.kit.ty.ui)
-                    .color(t.kit.c.text_base)
-                    .grow(1.0)
-                    .truncate(),
-            )
-            .child(ui::caption(trade.action.label(), t))
-            .child(ui::number(s.money(trade.amount), t.kit.c.text_base))
-    });
-    let open = move |s: &mut State| {
-        if let Some(amount) = amount {
-            plan::set_amount(s, amount);
-        } else {
-            plan::set_blend(s, fraction.unwrap_or(0.0));
-        }
-        s.navigate(Page::Rebalance);
-    };
-    col()
-        .key(format!("{key}-plan"))
-        .w_full()
-        .gap(8.0)
-        .child(ui::header(title, detail, t))
-        .children(trades)
-        .child(
-            row().items_start().child(
-                Button::new("Open in Rebalance")
-                    .variant(ButtonVariant::Outline)
-                    .control_size(ControlSize::Small)
-                    .icon(&icons::SCALE)
-                    .on_press(open)
-                    .build(&t.kit)
-                    .key(format!("{key}-open-plan")),
-            ),
-        )
-}
-
-/// A what-if: the model's shocks, the app's consequences.
-fn scenario_block(s: &State, t: &Theme, shocks: &[crate::scenario::Shock], key: &str) -> El {
-    let classes = plan::load_classes(s);
-    let outcome = crate::scenario::project(&classes, shocks);
-    let name = |shock: &crate::scenario::Shock| {
-        if shock.percent <= -100.0 {
-            format!("{} goes to nothing", shock.class)
-        } else if shock.percent < 0.0 {
-            format!("{} falls {:.0}%", shock.class, -shock.percent)
-        } else if shock.percent > 0.0 {
-            format!("{} rises {:.0}%", shock.class, shock.percent)
-        } else {
-            format!("{} stands still", shock.class)
-        }
-    };
-    let words = if shocks.is_empty() {
-        "Nothing changes.".to_string()
-    } else {
-        let list = shocks.iter().map(name).collect::<Vec<_>>().join(", ");
-        match outcome.percent() {
-            Some(percent) => format!(
-                "If {list}, your total goes from {} to {} ({}).",
-                s.money(outcome.total_before),
-                s.money(outcome.total_after),
-                format::percent(percent)
-            ),
-            None => format!("If {list}, there is no total to change."),
-        }
-    };
-    let rows = outcome
-        .lines
-        .iter()
-        .filter(|line| line.before >= 0.005 || line.after >= 0.005)
-        .map(|line| {
-            let note = if line.leaves_band() {
-                Some("leaves its band")
-            } else if line.returns_to_band() {
-                Some("back inside its band")
-            } else {
-                None
-            };
-            vec![
-                row()
-                    .center_y()
-                    .gap(8.0)
-                    .child(ui::dot(t.class_color(&line.name)))
-                    .child(
-                        text(line.name.clone())
-                            .font(t.kit.ty.ui)
-                            .color(t.kit.c.text_base)
-                            .truncate(),
-                    ),
-                ui::number(format!("{:.1}%", line.before_share), t.kit.c.text_muted),
-                ui::number(format!("{:.1}%", line.after_share), t.kit.c.text_base),
-                note.map_or_else(
-                    || ui::number("", t.kit.c.text_faint),
-                    |note| ui::caption(note, t),
-                ),
-            ]
-        })
-        .collect();
-    col()
-        .key(format!("{key}-scenario"))
-        .w_full()
-        .gap(10.0)
-        .child(ui::header("If that happened", words, t))
-        .child(ui::table(&["Class", "Now", "Then", ""], rows, t))
-        .children((!outcome.unknown.is_empty()).then(|| {
-            ui::caption(
-                format!(
-                    "Nothing in the portfolio is called {}.",
-                    outcome.unknown.join(", ")
-                ),
-                t,
-            )
-        }))
 }
 
 fn go(steps: &[Step], t: &Theme, key: &str) -> El {

@@ -857,11 +857,38 @@ fn main() {
             ("counsel-halves", |s| {
                 ask_scripted(s, "What if crypto halves?")
             }),
+            ("counsel-halves-light", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // The same answer with the owner holding it on today, and with the table open.
+            ("counsel-halves-now", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.what_if_show(0, 1, true);
+            }),
+            ("counsel-halves-details", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.ask.what_if_details(0, 1);
+            }),
+            ("phone-counsel-halves", |s| {
+                s.compact = true;
+                ask_scripted(s, "What if crypto halves?");
+            }),
             ("counsel-money", |s| {
                 ask_scripted(s, "Where should €2,000 go?")
             }),
             ("counsel-allocation", |s| {
                 ask_scripted(s, "Why is my allocation off?")
+            }),
+            // The answer's own slider, dragged most of the way to target.
+            ("counsel-plan-dragged", |s| {
+                ask_scripted(s, "Why is my allocation off?");
+                s.ask.plan_set(0, 3, 0.8);
+            }),
+            ("phone-counsel-plan", |s| {
+                s.compact = true;
+                ask_scripted(s, "Why is my allocation off?");
             }),
             ("counsel-bitcoin", |s| {
                 ask_scripted(s, "How is Bitcoin doing?")
