@@ -1145,12 +1145,8 @@ impl Backend {
     }
 
     /// Write the ledger beside the history, where `seen.json` lives.
-    pub async fn save_matters(&self, ledger: &Ledger) -> BackendResult<()> {
-        let workspace = self
-            .matters_workspace()
-            .await
-            .ok_or_else(|| "a record needs a workspace".to_string())?;
-        let dir = matters_dir(&workspace);
+    pub async fn save_matters(&self, workspace: &Path, ledger: &Ledger) -> BackendResult<()> {
+        let dir = matters_dir(workspace);
         fs::create_dir_all(&dir)
             .map_err(|error| format!("couldn't create {}: {error}", dir.display()))?;
         atomic_write::write_atomic_private(&dir.join(LEDGER_FILE), write_ledger(ledger).as_bytes())
@@ -1160,17 +1156,14 @@ impl Backend {
     /// Write a signed or declined matter as a decision record, and return its path.
     pub async fn record_matter(
         &self,
+        workspace: &Path,
         matter: &Matter,
         status: Status,
         reason: Option<String>,
         date: NaiveDate,
         currency: &str,
     ) -> BackendResult<String> {
-        let workspace = self
-            .matters_workspace()
-            .await
-            .ok_or_else(|| "records need a workspace".to_string())?;
-        let dir = decisions_dir(&workspace);
+        let dir = decisions_dir(workspace);
         fs::create_dir_all(&dir)
             .map_err(|error| format!("couldn't create {}: {error}", dir.display()))?;
         let path = record_path(&dir, &matter.title, date);
@@ -1293,6 +1286,27 @@ impl State {
         prepared
     }
 
+    /// Where a decision may be written: a plaintext workspace, or nothing. An encrypted
+    /// portfolio's figures must not land on disk in plaintext (README, History).
+    fn matters_workspace(&self) -> Result<PathBuf, String> {
+        if self
+            .open
+            .file_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(".gpg"))
+        {
+            return Err(
+                "This portfolio is encrypted, so a record would put its figures on disk in                  plaintext."
+                    .to_string(),
+            );
+        }
+        self.open
+            .workspace_dir
+            .clone()
+            .map(PathBuf::from)
+            .ok_or_else(|| "Records need a workspace. This portfolio is a single file.".to_string())
+    }
+
     /// Load the decisions and the policy the plans are measured against.
     pub fn load_matters(&mut self) {
         if !self.is_workspace() {
@@ -1362,12 +1376,14 @@ impl State {
             self.matters.hold = None;
             return;
         };
-        if !self.is_workspace() {
-            self.matters.error =
-                Some("Records need a workspace. This portfolio is a single file.".to_string());
-            self.matters.hold = None;
-            return;
-        }
+        let workspace = match self.matters_workspace() {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                self.matters.error = Some(error);
+                self.matters.hold = None;
+                return;
+            }
+        };
         let today = Local::now().date_naive();
         let index = prepared
             .matters
@@ -1390,9 +1406,9 @@ impl State {
         self.run(
             move |backend| async move {
                 let path = backend
-                    .record_matter(&matter, Status::Signed, None, today, &currency)
+                    .record_matter(&workspace, &matter, Status::Signed, None, today, &currency)
                     .await?;
-                backend.save_matters(&saved).await?;
+                backend.save_matters(&workspace, &saved).await?;
                 Ok(path)
             },
             move |state, result: BackendResult<String>| match result {
@@ -1436,18 +1452,25 @@ impl State {
         ledger.record(entry(&matter, Status::Declined, today, reason.clone()));
         self.matters.ledger = ledger.clone();
         self.show_toast("Declined. We won't bring it again unless the numbers move.");
-        if !self.is_workspace() {
+        let Ok(workspace) = self.matters_workspace() else {
             return;
-        }
+        };
         let saved = ledger;
         let currency = self.currency();
         let rollback_id = id.to_string();
         self.run(
             move |backend| async move {
                 backend
-                    .record_matter(&matter, Status::Declined, reason, today, &currency)
+                    .record_matter(
+                        &workspace,
+                        &matter,
+                        Status::Declined,
+                        reason,
+                        today,
+                        &currency,
+                    )
                     .await?;
-                backend.save_matters(&saved).await?;
+                backend.save_matters(&workspace, &saved).await?;
                 Ok(())
             },
             move |state, result: BackendResult<()>| {
@@ -1483,12 +1506,12 @@ impl State {
         ledger.record(entry);
         self.matters.ledger = ledger.clone();
         self.show_toast("Set aside until tomorrow");
-        if !self.is_workspace() {
+        let Ok(workspace) = self.matters_workspace() else {
             return;
-        }
+        };
         let rollback_id = id.to_string();
         self.run(
-            move |backend| async move { backend.save_matters(&ledger).await },
+            move |backend| async move { backend.save_matters(&workspace, &ledger).await },
             move |state, result: BackendResult<()>| {
                 if let Err(error) = result {
                     state.matters.error = Some(error);
