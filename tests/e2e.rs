@@ -1345,6 +1345,69 @@ fn the_outlook_years_slider_moves_the_median_by_key() {
 }
 
 #[test]
+fn the_outlook_shock_is_picked_by_key_and_moves_the_fan() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    assert_eq!(app.rt.state.outlook.shock, 0, "none is the default");
+    let low = |app: &Harness| app.rt.state.outlook.simulated.horizon().unwrap().low;
+    let before = low(&app);
+    // Focus the control on "None", then walk to "-30%" with the arrows and pick it.
+    app.rt
+        .update(|_, tx| tx.scroll_into_view("outlook-shock-note"));
+    app.settle();
+    app.click_label("None");
+    app.press(Key::Right);
+    app.press(Key::Right);
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.outlook.shock, 30, "the third segment is 30%");
+    assert!(low(&app) < before, "a fall moves the lower band down");
+    let note = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("outlook-shock-note"))
+        .and_then(|element| element.text.clone())
+        .expect("the assumptions say what falls");
+    assert!(note.contains("falls 30% in year 2"), "{note}");
+}
+
+#[test]
+fn the_outlook_hides_money_in_privacy_mode_and_says_how_it_was_drawn() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    app.rt.update(|state, _| state.privacy = true);
+    app.settle();
+    let texts: Vec<String> = app
+        .rt
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            matches!(
+                element.key.as_deref(),
+                Some("outlook-method" | "outlook-shock-note")
+            )
+        })
+        .filter_map(|element| element.text.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("3000 paths") && text.contains("9 months")),
+        "{texts:?}"
+    );
+    for key in ["outlook-low", "outlook-median", "outlook-high"] {
+        let shown = app
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .and_then(|element| element.text.clone())
+            .expect("a figure");
+        assert!(!shown.chars().any(|c| c.is_ascii_digit()), "{key}: {shown}");
+    }
+}
+
+#[test]
 fn a_phone_measures_on_the_rail_and_a_vertical_drag_still_scrolls() {
     let mut app = Harness::phone();
     app.click(Page::Performance.key());

@@ -6,9 +6,14 @@
 
 use std::f64::consts::TAU;
 
-/// How many paths the fan is drawn from. Enough for a stable tenth and ninetieth percentile,
+/// How many paths the fan is drawn from. Enough for a steady tenth and ninetieth percentile,
 /// few enough to rebuild on a slider step without a pause.
-pub const PATHS: usize = 300;
+pub const PATHS: usize = 3_000;
+
+/// How far either side of a month the fan's edges are averaged, in months. The edges of the
+/// bands are smoothed over `2 * SMOOTHING + 1` months, so a band's edge is a curve and not a
+/// run of saw-teeth. A shock's step stays a step.
+pub const SMOOTHING: usize = 4;
 
 /// The seed every run starts from. Paths get their own streams from it, so a path never
 /// depends on the ones before it.
@@ -211,6 +216,11 @@ pub struct Outlook {
     pub reached: Option<f64>,
     /// The assumptions used, in the order the classes were given.
     pub used: Vec<Used>,
+    /// How many paths it was drawn from, and the months its edges were averaged over.
+    pub paths: usize,
+    pub smoothing: usize,
+    /// The fall the fan assumes, if any.
+    pub shock: Option<Shock>,
 }
 
 impl Outlook {
@@ -250,7 +260,7 @@ pub fn simulate(inputs: &Inputs) -> Outlook {
     let mut columns: Vec<Vec<f64>> = (0..=months).map(|_| Vec::with_capacity(PATHS)).collect();
     let mut finals = Vec::with_capacity(PATHS);
     for path in 0..PATHS {
-        let mut rng = stream(path);
+        let mut rng = Normals::new(path);
         let mut values: Vec<f64> = inputs
             .today
             .iter()
@@ -266,7 +276,7 @@ pub fn simulate(inputs: &Inputs) -> Outlook {
         for (month, column) in columns.iter_mut().enumerate().skip(1) {
             for index in 0..values.len() {
                 let (drift, sigma) = factors[index];
-                let stray = normal(&mut rng) * sigma;
+                let stray = rng.next() * sigma;
                 values[index] = (values[index] * (1.0 + drift + stray).max(0.0))
                     + monthly * weights.get(index).copied().unwrap_or(0.0);
             }
@@ -280,7 +290,7 @@ pub fn simulate(inputs: &Inputs) -> Outlook {
         finals.push(columns[months].last().copied().unwrap_or(0.0));
     }
 
-    let bands: Vec<Band> = columns
+    let mut bands: Vec<Band> = columns
         .iter_mut()
         .map(|column| {
             column.sort_by(f64::total_cmp);
@@ -291,6 +301,28 @@ pub fn simulate(inputs: &Inputs) -> Outlook {
             }
         })
         .collect();
+    // The path with no stray at all: what the bands are smoothed against.
+    let mut values: Vec<f64> = inputs
+        .today
+        .iter()
+        .map(|(_, value)| value.max(0.0))
+        .collect();
+    let mut reference = Vec::with_capacity(months + 1);
+    for month in 0..=months {
+        if month > 0 {
+            for (index, value) in values.iter_mut().enumerate() {
+                *value = *value * (1.0 + factors[index].0).max(0.0)
+                    + monthly * weights.get(index).copied().unwrap_or(0.0);
+            }
+        }
+        if shock_month == Some(month)
+            && let (Some(at), Some(fall)) = (shock_at, fall)
+        {
+            values[at] *= 1.0 - fall;
+        }
+        reference.push(values.iter().sum::<f64>());
+    }
+    smooth_edges(&mut bands, &reference);
     let reached = inputs.goal.map(|goal| {
         if finals.is_empty() {
             return 0.0;
@@ -301,6 +333,9 @@ pub fn simulate(inputs: &Inputs) -> Outlook {
         months: bands,
         reached,
         used,
+        paths: PATHS,
+        smoothing: SMOOTHING,
+        shock: shock_at.and(inputs.shock.clone()),
     }
 }
 
@@ -331,14 +366,90 @@ fn splitmix(mut value: u64) -> u64 {
     value ^ (value >> 31)
 }
 
-/// A standard normal from the path's stream, by Box–Muller.
-fn normal(rng: &mut u64) -> f64 {
-    let uniform = |rng: &mut u64| {
-        *rng = splitmix(*rng);
-        ((*rng >> 11) as f64 / (1u64 << 53) as f64).max(f64::MIN_POSITIVE)
+/// One path's stream of standard normals, by Box–Muller: each pair of uniforms gives two.
+struct Normals {
+    state: u64,
+    spare: Option<f64>,
+}
+
+impl Normals {
+    fn new(path: usize) -> Self {
+        Self {
+            state: stream(path),
+            spare: None,
+        }
+    }
+
+    fn uniform(&mut self) -> f64 {
+        self.state = splitmix(self.state);
+        ((self.state >> 11) as f64 / (1u64 << 53) as f64).max(f64::MIN_POSITIVE)
+    }
+
+    fn next(&mut self) -> f64 {
+        if let Some(spare) = self.spare.take() {
+            return spare;
+        }
+        let (first, second) = (self.uniform(), self.uniform());
+        let radius = (-2.0 * first.ln()).sqrt();
+        self.spare = Some(radius * (TAU * second).sin());
+        radius * (TAU * second).cos()
+    }
+}
+
+/// Average each band's figures with its neighbours', as multiples of `reference`: the path
+/// every class would take with no stray at all, shock and contributions included. Against that
+/// the bands are nearly flat, so averaging smooths their noise and leaves the shape, the
+/// shock's step and the steady figures alone. Past an end the window mirrors the line, so a
+/// drift does not bend at the ends. Today keeps its own figure.
+fn smooth_edges(bands: &mut [Band], reference: &[f64]) {
+    let ratios: Vec<[f64; 3]> = bands
+        .iter()
+        .zip(reference)
+        .map(|(band, reference)| {
+            let by = |value: f64| {
+                if *reference > 0.0 {
+                    value / reference
+                } else {
+                    1.0
+                }
+            };
+            [by(band.low), by(band.median), by(band.high)]
+        })
+        .collect();
+    let last = ratios.len() as isize - 1;
+    let at = |index: isize| -> [f64; 3] {
+        let (edge, mirrored) = if index < 0 {
+            (0, -index)
+        } else if index > last {
+            (last, 2 * last - index)
+        } else {
+            return ratios[index as usize];
+        };
+        let (edge, across) = (
+            ratios[edge as usize],
+            ratios[mirrored.clamp(0, last) as usize],
+        );
+        [0, 1, 2].map(|part| 2.0 * edge[part] - across[part])
     };
-    let (first, second) = (uniform(rng), uniform(rng));
-    (-2.0 * first.ln()).sqrt() * (TAU * second).cos()
+    for index in 1..bands.len() {
+        let mut sum = [0.0; 3];
+        let mut total = 0.0;
+        for offset in -(SMOOTHING as isize)..=SMOOTHING as isize {
+            let weight = (SMOOTHING + 1 - offset.unsigned_abs()) as f64;
+            let ratio = at(index as isize + offset);
+            for part in 0..3 {
+                sum[part] += ratio[part] * weight;
+            }
+            total += weight;
+        }
+        if reference[index] > 0.0 {
+            bands[index] = Band {
+                low: sum[0] / total * reference[index],
+                median: sum[1] / total * reference[index],
+                high: sum[2] / total * reference[index],
+            };
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,6 +522,46 @@ mod tests {
         let first = simulate(&inputs(&[("Stocks", 1_000.0), ("Bonds", 400.0)], 50.0, 3));
         let second = simulate(&inputs(&[("Stocks", 1_000.0), ("Bonds", 400.0)], 50.0, 3));
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_shock_moves_the_lower_band_and_is_named() {
+        let plain = inputs(&[("Stocks", 1_000.0), ("Bonds", 400.0)], 50.0, 5);
+        let mut shocked = plain.clone();
+        shocked.shock = Some(Shock {
+            asset_class: "Stocks".to_string(),
+            fall_percent: 30.0,
+            year: 2,
+        });
+        let (plain, shocked) = (simulate(&plain), simulate(&shocked));
+        assert!(shocked.horizon().unwrap().low < plain.horizon().unwrap().low);
+        assert_eq!(plain.shock, None);
+        assert_eq!(shocked.shock.as_ref().unwrap().asset_class, "Stocks");
+        // The fall is a step at the start of year 2, not blurred into the months before it.
+        let step = shocked.months[12].median / shocked.months[11].median;
+        assert!((0.8..0.9).contains(&step), "{step}");
+    }
+
+    #[test]
+    fn the_edges_are_smooth_and_the_same_every_time() {
+        let book = [("Stocks", 1_000.0), ("Bonds", 400.0)];
+        let outlook = simulate(&inputs(&book, 50.0, 10));
+        assert_eq!(outlook.paths, PATHS);
+        assert_eq!(outlook, simulate(&inputs(&book, 50.0, 10)));
+        // A saw-tooth is a second difference that swings; a smooth edge's stays small next to
+        // the edge's own steps.
+        let edge: Vec<f64> = outlook
+            .months
+            .iter()
+            .skip(12)
+            .map(|band| band.low)
+            .collect();
+        let kink = edge
+            .windows(3)
+            .map(|w| (w[2] - 2.0 * w[1] + w[0]).abs())
+            .fold(0.0, f64::max);
+        let step = edge.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f64>() / 107.0;
+        assert!(kink < step * 0.5, "{kink} against {step}");
     }
 
     #[test]

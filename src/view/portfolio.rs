@@ -1690,7 +1690,8 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     t,
                     cx,
                     "performance-chart",
-                    280.0,
+                    // Short enough on a desktop that the fan below starts on the first screen.
+                    if s.compact { 280.0 } else { 200.0 },
                 ))
                 .children(
                     history

@@ -5,11 +5,11 @@
 //! this is the bank's model, not a promise about the market.
 
 use rune::{Cursor, Cx, El, Shape, canvas, col, el, row, text};
-use rune_kit::TextInput;
+use rune_kit::{SegmentedControl, TextInput};
 
 use crate::{
     outlook::Outlook,
-    state::{State, parse_number},
+    state::{OutlookPage, State, parse_number},
     theme::{FIGURE, LEDE, LEDE_COMPACT, NUMBER, Theme},
     view::ui,
 };
@@ -42,8 +42,8 @@ pub fn section(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .child(ui::title("Where this could go", t))
                 .child(ui::caption("An assumption, not a forecast.", t)),
         )
-        .child(sentence(s, t, outlook))
         .child(fan(s, t, cx, outlook))
+        .child(sentence(s, t, outlook))
         .child(figures(s, t, outlook))
         .child(controls(s, t, cx))
         .children(goal_note(s, t, outlook))
@@ -454,11 +454,63 @@ fn assumptions(s: &State, t: &Theme, outlook: &Outlook) -> El {
     } else {
         "Assumptions, not a forecast."
     };
+    let labels: Vec<String> = OutlookPage::SHOCKS
+        .iter()
+        .map(|fall| match fall {
+            0 => "None".to_string(),
+            fall => format!("-{fall}%"),
+        })
+        .collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let selected = OutlookPage::SHOCKS
+        .iter()
+        .position(|fall| *fall == s.outlook.shock);
+    let picker = SegmentedControl::new(&labels, selected)
+        .label("Fall in year 2")
+        .fit()
+        .on_pick(|s: &mut State, index, _| set_shock(s, OutlookPage::SHOCKS[index]))
+        .build(&t.kit)
+        .key("outlook-shock");
+    let shock = match &outlook.shock {
+        None => format!(
+            "No fall assumed. Or try the biggest class falling in year {}.",
+            OutlookPage::SHOCK_YEAR
+        ),
+        Some(shock) if shock.year as usize * 12 > s.outlook.years as usize * 12 => format!(
+            "{} falls {:.0}% in year {}, past this horizon.",
+            shock.asset_class, shock.fall_percent, shock.year
+        ),
+        Some(shock) => format!(
+            "{} falls {:.0}% in year {}.",
+            shock.asset_class, shock.fall_percent, shock.year
+        ),
+    };
+    let method = format!(
+        "Drawn from {} paths, with the edges averaged over {} months.",
+        outlook.paths,
+        outlook.smoothing * 2 + 1
+    );
     col()
         .w_full()
         .gap(6.0)
         .child(ui::caption(line, t).wrap())
         .child(row().flex_wrap().gaps(6.0, 16.0).children(items))
+        .child(
+            row()
+                .center_y()
+                .w_full()
+                .flex_wrap()
+                .gaps(8.0, 16.0)
+                .child(ui::caption(shock, t).key("outlook-shock-note").wrap())
+                .child(picker),
+        )
+        .child(ui::caption(method, t).key("outlook-method").wrap())
+}
+
+/// Change the fall the fan assumes.
+pub fn set_shock(s: &mut State, fall: u32) {
+    s.outlook.shock = fall;
+    s.refresh_outlook();
 }
 
 /// Read the goal field. Anything that is not a positive number means no goal.

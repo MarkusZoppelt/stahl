@@ -728,8 +728,17 @@ pub struct OutlookPage {
     /// The goal once it reads as a number, so a view never parses text.
     pub goal_amount: Option<f64>,
     pub assumptions: outlook::Assumptions,
+    /// How far the biggest class is assumed to fall in year 2, in percent. 0 is no fall.
+    pub shock: u32,
     /// The fan for these inputs, computed when they change rather than in the view.
     pub simulated: outlook::Outlook,
+}
+
+impl OutlookPage {
+    /// The falls the page offers, in percent. The first is none.
+    pub const SHOCKS: [u32; 4] = [0, 20, 30, 50];
+    /// The year the fall happens in.
+    pub const SHOCK_YEAR: u32 = 2;
 }
 
 impl OutlookPage {
@@ -740,6 +749,7 @@ impl OutlookPage {
             goal: TextEdit::new(""),
             goal_amount: None,
             assumptions: outlook::Assumptions::default(),
+            shock: 0,
             simulated: outlook::Outlook::default(),
         }
     }
@@ -1844,6 +1854,18 @@ impl State {
     /// portfolio or one of the outlook controls changes, never from a view: the simulation is
     /// far too much work for a pointer move over the chart.
     pub fn refresh_outlook(&mut self) {
+        let shocked = self
+            .allocation
+            .iter()
+            .max_by(|a, b| a.value.total_cmp(&b.value))
+            .map(|item| item.asset_class.clone());
+        let shock = shocked
+            .filter(|_| self.outlook.shock > 0)
+            .map(|asset_class| outlook::Shock {
+                asset_class,
+                fall_percent: f64::from(self.outlook.shock),
+                year: OutlookPage::SHOCK_YEAR,
+            });
         let inputs = outlook::Inputs {
             today: self
                 .allocation
@@ -1853,7 +1875,7 @@ impl State {
             monthly: self.outlook.monthly,
             years: self.outlook.years,
             goal: self.outlook.goal_amount,
-            shock: None,
+            shock,
             assumptions: self.outlook.assumptions.clone(),
         };
         self.outlook.simulated = outlook::simulate(&inputs);

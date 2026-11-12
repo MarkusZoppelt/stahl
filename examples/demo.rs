@@ -408,6 +408,12 @@ fn main() {
                 scene(s, Page::Performance);
                 stahl::view::outlook::set_goal(s, Some(250_000.0));
             }),
+            // The same fan with the biggest class falling in year 2.
+            ("outlook-shock", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+                stahl::view::outlook::set_shock(s, 30);
+            }),
             ("outlook-light", |s| {
                 scene(s, Page::Performance);
                 stahl::view::outlook::set_goal(s, Some(250_000.0));
