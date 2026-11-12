@@ -13,7 +13,7 @@ use std::{
     future::Future,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
 };
 
 use chrono::{Datelike as _, Duration, Local, NaiveDate};
@@ -47,6 +47,7 @@ use tokio::{runtime::Handle, sync::RwLock};
 
 use crate::{
     intake::apply::{self as intake_apply, Op as IntakeOp},
+    outlook::Assumptions,
     records::{self, Record},
     statement::{Change, Contribution, Seen},
     time,
@@ -878,6 +879,8 @@ pub struct Backend {
     config: Arc<RwLock<AppConfig>>,
     /// Where to persist the config. `None` is the user's default location.
     config_path: Option<PathBuf>,
+    /// The owner's `[outlook]` assumptions, from the policy file when it has them.
+    outlook: Arc<StdRwLock<Assumptions>>,
     runtime: Handle,
 }
 
@@ -902,8 +905,25 @@ impl Backend {
             state: Arc::new(state),
             config: Arc::new(RwLock::new(config)),
             config_path,
+            outlook: Arc::new(StdRwLock::new(Assumptions::default())),
             runtime,
         }
+    }
+
+    /// The assumptions the outlook is drawn on: the policy's `[outlook]` table when it has
+    /// one, the bank's table otherwise.
+    pub fn outlook_assumptions(&self) -> Assumptions {
+        self.outlook
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn set_outlook(&self, assumptions: Assumptions) {
+        *self
+            .outlook
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = assumptions;
     }
 
     /// Run `work` on the Tokio runtime, from any executor.
@@ -1019,6 +1039,7 @@ impl Backend {
             ));
         }
         let policy_path = root.join("portfolio/policy.toml");
+        let policy_text = fs::read_to_string(&policy_path).ok();
         let policy = if policy_path.exists() {
             let policy = Policy::from_file(&policy_path.to_string_lossy())
                 .map_err(|error| format!("failed to load policy: {error:#}"))?;
@@ -1026,6 +1047,12 @@ impl Backend {
         } else {
             None
         };
+        self.set_outlook(
+            policy_text
+                .as_deref()
+                .map(Assumptions::from_policy_toml)
+                .unwrap_or_default(),
+        );
         self.state
             .load_file(&positions.to_string_lossy())
             .await
@@ -1060,6 +1087,7 @@ impl Backend {
     pub async fn load_simple_file(&self, path: String) -> BackendResult<()> {
         self.state.load_file(&path).await.map_err(report)?;
         *self.state.policy.write().await = None;
+        self.set_outlook(Assumptions::default());
         self.config.write().await.set_portfolio_file(path);
         self.save_config().await
     }
@@ -1433,6 +1461,11 @@ impl Backend {
 
     pub async fn load_policy(&self) -> BackendResult<Policy> {
         self.state.load_policy(None).await.map_err(report)?;
+        if let Some(path) = self.state.policy_path().await
+            && let Ok(text) = fs::read_to_string(&path)
+        {
+            self.set_outlook(Assumptions::from_policy_toml(&text));
+        }
         self.state
             .policy()
             .await
@@ -1445,6 +1478,7 @@ impl Backend {
             .set_policy_from_toml(toml)
             .await
             .map_err(report)?;
+        self.set_outlook(Assumptions::from_policy_toml(toml));
         self.state
             .policy()
             .await
@@ -2054,6 +2088,33 @@ mod tests {
             assert!(backend.policy().await.is_some());
             backend.load_simple_file(path).await.unwrap();
             assert!(backend.policy().await.is_none());
+        });
+    }
+
+    #[test]
+    fn the_outlook_assumptions_come_from_the_policy_and_leave_with_it() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+        let policy = Backend::policy_from_strategy("balanced-growth").unwrap();
+        let mut text = Backend::policy_to_toml(&policy).unwrap();
+        text.push_str("\n[outlook.assumptions.Stocks]\nreturn = 0.06\nvolatility = 0.18\n");
+        fs::create_dir_all(dir.path().join("portfolio")).unwrap();
+        fs::write(dir.path().join("portfolio/policy.toml"), text).unwrap();
+
+        runtime.block_on(async {
+            let workspace = dir.path().to_string_lossy().into_owned();
+            backend.load_workspace(workspace).await.unwrap();
+            let (stocks, from_policy) = backend.outlook_assumptions().for_class("Stocks");
+            assert!(from_policy);
+            assert!((stocks.annual_return - 0.06).abs() < 1e-9);
+            assert!((stocks.volatility - 0.18).abs() < 1e-9);
+            backend.load_simple_file(path).await.unwrap();
+            assert!(
+                !backend.outlook_assumptions().for_class("Stocks").1,
+                "the policy's assumptions leave with it"
+            );
         });
     }
 

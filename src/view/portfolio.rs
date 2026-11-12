@@ -16,7 +16,7 @@ use crate::{
     format, icons,
     state::{Confirm, Page, SWIPE_ACTIONS, SortBy, State, file_name, swipe_key},
     theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
-    view::{ask, charts, guide, overview, ui},
+    view::{ask, charts, guide, outlook, overview, ui},
 };
 
 fn display_name(position: &PositionDto) -> String {
@@ -1700,6 +1700,7 @@ pub fn performance(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         }),
                 ),
         )
+        .child(outlook::section(s, t, cx))
         .child(
             ui::columns(room, [4, 2, 1], 12.0)
                 .child(

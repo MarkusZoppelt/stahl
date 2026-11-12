@@ -1284,6 +1284,35 @@ fn dragging_the_chart_measures_that_span_until_escape() {
 }
 
 #[test]
+fn the_outlook_years_slider_moves_the_median_by_key() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    let median = |app: &Harness| {
+        app.rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("outlook-median"))
+            .and_then(|element| element.text.clone())
+            .expect("the outlook median")
+    };
+    let before = median(&app);
+    app.rt.update(|_, tx| tx.focus("outlook-years", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.years, 11);
+    let after = median(&app);
+    assert_ne!(before, after, "a longer horizon moves the median");
+    app.press(Key::Left);
+    assert_eq!(app.rt.state.outlook.years, 10);
+    assert_eq!(median(&app), before, "and back again");
+    // The monthly amount steps with the arrows too.
+    app.rt.update(|_, tx| tx.focus("outlook-monthly", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.monthly, 550.0);
+}
+
+#[test]
 fn a_phone_measures_on_the_rail_and_a_vertical_drag_still_scrolls() {
     let mut app = Harness::phone();
     app.click(Page::Performance.key());

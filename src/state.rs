@@ -46,6 +46,7 @@ use crate::{
         text::Sheet,
     },
     matters::MattersPage,
+    outlook,
     records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
@@ -704,6 +705,33 @@ pub struct PolicyPage {
     pub error: Option<String>,
 }
 
+/// The Performance page's outlook: how far out to look, what is added every month, and the
+/// goal the owner is aiming at. The assumptions come from the policy, or from `outlook`'s
+/// table when it has none.
+pub struct OutlookPage {
+    pub years: u32,
+    pub monthly: f64,
+    pub goal: TextEdit,
+    /// The goal once it reads as a number, so a view never parses text.
+    pub goal_amount: Option<f64>,
+    pub assumptions: outlook::Assumptions,
+    /// The fan for these inputs, computed when they change rather than in the view.
+    pub simulated: outlook::Outlook,
+}
+
+impl OutlookPage {
+    fn new() -> Self {
+        Self {
+            years: 10,
+            monthly: 500.0,
+            goal: TextEdit::new(""),
+            goal_amount: None,
+            assumptions: outlook::Assumptions::default(),
+            simulated: outlook::Outlook::default(),
+        }
+    }
+}
+
 pub struct DocumentsPage {
     pub title: TextEdit,
     pub generated: Option<GeneratedDocument>,
@@ -916,6 +944,8 @@ pub struct State {
     pub simulation: Loadable<RebalanceSimulation>,
     /// The allocation the Rebalance page is being played with.
     pub rebalance: RebalancePage,
+    /// The Performance page's fan: its horizon, its monthly amount and its goal.
+    pub outlook: OutlookPage,
     pub briefing: Loadable<Briefing>,
     /// The records room's wall, newest plate first.
     pub records: Loadable<Vec<Record>>,
@@ -1203,6 +1233,7 @@ impl State {
             review: Loadable::default(),
             simulation: Loadable::default(),
             rebalance: RebalancePage::new(),
+            outlook: OutlookPage::new(),
             briefing: Loadable::default(),
             records: Loadable::default(),
             records_unseen: 0,
@@ -1774,6 +1805,7 @@ impl State {
         self.findings = snapshot.findings;
         self.network = snapshot.network;
         self.has_policy = snapshot.has_policy;
+        self.outlook.assumptions = self.backend.outlook_assumptions();
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
@@ -1781,6 +1813,25 @@ impl State {
         self.load_record_mark();
         self.travel(past);
         self.load_days();
+    }
+
+    /// Recompute the Performance page's fan from what the page holds now. Called when the
+    /// portfolio or one of the outlook controls changes, never from a view: the simulation is
+    /// far too much work for a pointer move over the chart.
+    pub fn refresh_outlook(&mut self) {
+        let inputs = outlook::Inputs {
+            today: self
+                .allocation
+                .iter()
+                .map(|item| (item.asset_class.clone(), item.value))
+                .collect(),
+            monthly: self.outlook.monthly,
+            years: self.outlook.years,
+            goal: self.outlook.goal_amount,
+            shock: None,
+            assumptions: self.outlook.assumptions.clone(),
+        };
+        self.outlook.simulated = outlook::simulate(&inputs);
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -2571,6 +2622,7 @@ impl State {
                     state.performance = None;
                     state.findings.clear();
                     state.has_policy = false;
+                    state.refresh_outlook();
                     state.opened_another();
                     state.page = Page::Overview;
                 }
@@ -3992,6 +4044,8 @@ impl State {
                         state.has_policy = true;
                         state.show_policy(policy);
                         state.policy.message = Some("Policy loaded".to_string());
+                        state.outlook.assumptions = state.backend.outlook_assumptions();
+                        state.refresh_outlook();
                     }
                     Err(error) => state.policy.error = Some(error),
                 }
@@ -4006,6 +4060,8 @@ impl State {
                 self.has_policy = true;
                 self.policy.policy = Some(policy);
                 self.policy.message = Some(success.to_string());
+                self.outlook.assumptions = self.backend.outlook_assumptions();
+                self.refresh_outlook();
             }
             Err(error) => self.policy.error = Some(error),
         }

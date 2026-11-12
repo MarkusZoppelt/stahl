@@ -403,6 +403,17 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            // The future as a fan: the default assumptions, with a goal to aim at.
+            ("outlook", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
+            ("outlook-light", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             // The door thinking: the tumblers turn slowly and the steel breathes, as it does
             // while an answer is being composed.
             ("door-thinking", |s| {
@@ -873,6 +884,10 @@ fn main() {
             }),
             ("phone-allocation", |s| phone(s, Page::Allocation)),
             ("phone-performance", |s| phone(s, Page::Performance)),
+            ("phone-outlook", |s| {
+                phone(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
             ("phone-review", |s| phone(s, Page::Review)),
             ("phone-rebalance", |s| phone(s, Page::Rebalance)),
             ("phone-policy", |s| phone(s, Page::Policy)),
