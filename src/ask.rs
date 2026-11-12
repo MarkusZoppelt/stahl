@@ -780,11 +780,15 @@ pub fn prompt(s: &crate::state::State, table: &Table) -> String {
                 class.asset_class, class.actual_percent, class.target_percent, class.drift_percent
             ));
         }
-        for finding in &review.findings {
-            out.push_str(&format!("finding: {}. ", finding.message));
+        // The findings and the briefing are written with real money, so with amounts hidden
+        // they are left out; the classes, shares and drift above carry no amounts.
+        if !s.privacy {
+            for finding in &review.findings {
+                out.push_str(&format!("finding: {}. ", finding.message));
+            }
         }
     }
-    if let Some(briefing) = s.briefing.data.as_ref() {
+    if let Some(briefing) = s.briefing.data.as_ref().filter(|_| !s.privacy) {
         out.push_str("\n\nThe briefing Stahl wrote on this portfolio:\n");
         out.push_str(&briefing.markdown);
     }
@@ -1930,6 +1934,45 @@ mod builtin_tests {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn privacy_mode_sends_no_money_in_the_prompt() {
+        let (_runtime, _dir, mut state) = state();
+        state.load_review();
+        state.load_briefing();
+        state.settle();
+        let open = prompt(&state, &crate::facts::of(&state));
+        assert!(state.review.data.is_some() && state.briefing.data.is_some());
+        assert!(
+            open.contains("The briefing Stahl wrote"),
+            "shown when not hidden"
+        );
+
+        state.privacy = true;
+        let hidden = prompt(&state, &crate::facts::of(&state));
+        assert!(!hidden.contains('€') && !hidden.contains('$'), "{hidden}");
+        assert!(!hidden.contains("The briefing Stahl wrote"));
+        let grouped = |text: &str| {
+            text.as_bytes().windows(5).any(|w| {
+                w[0].is_ascii_digit()
+                    && (w[1] == b',' || w[1] == b'.')
+                    && w[2].is_ascii_digit()
+                    && w[3].is_ascii_digit()
+                    && w[4].is_ascii_digit()
+            })
+        };
+        assert!(
+            !grouped(&hidden),
+            "a digit group that looks like money: {hidden}"
+        );
+        let review = state.review.data.as_ref().unwrap();
+        assert!(hidden.contains("The policy review"));
+        for class in &review.allocations {
+            assert!(hidden.contains(&class.asset_class), "{}", class.asset_class);
+        }
+        assert!(hidden.contains("drift"));
+        assert!(hidden.contains("The client has hidden amounts"));
     }
 
     #[test]
