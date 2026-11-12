@@ -156,7 +156,7 @@ const SCRIPT_HALVES: &str = concat!(
     "\n",
     r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
     "\n",
-    r#"{"block":"say","text":"It would also, for once, put crypto close to where your policy wants it. An expensive way to rebalance."}"#,
+    r#"{"block":"say","text":"It would also, for once, put crypto closer to where your policy wants it. An expensive way to rebalance."}"#,
     "\n",
     r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"What is my crypto target?","ask":"What is my crypto target?"}]}"#,
     "\n",
