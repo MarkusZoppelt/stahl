@@ -1533,6 +1533,12 @@ impl State {
         }
     }
 
+    /// The touch turned into something else (a scroll, or it left the control): the hold stops
+    /// at once, nothing is signed, and there is no hint, because nothing was let go too soon.
+    pub fn cancel_hold(&mut self) {
+        self.matters.hold = None;
+    }
+
     /// The hold was completed: record the decision and stamp the card.
     pub fn sign_matter(&mut self, id: &str) {
         let prepared = self.prepared();

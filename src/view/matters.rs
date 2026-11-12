@@ -27,6 +27,8 @@ use crate::{
 
 /// The Sign control: a round steel control a finger can rest on.
 const SIGN: f32 = 58.0;
+/// How far a finger may travel (points) and still be holding Sign.
+const TOUCH_SLOP: f32 = 8.0;
 /// The seal's diameter.
 const SEAL: f32 = 40.0;
 /// The ring's stroke, and how far inside the control it sits.
@@ -287,12 +289,25 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
     } else {
         let press_id = id.clone();
         let key_id = id.clone();
+        let touch = s.compact;
         control = control
             .on_drag(
                 move |s: &mut State, drag: &mut Drag, _: &mut Tx| match drag.phase {
                     Phase::Down => s.begin_hold(&press_id, false),
-                    Phase::Up => s.release_hold(),
-                    Phase::Move => {}
+                    Phase::Move => {
+                        // A finger that travels is a scroll, not a signature; so is one that
+                        // leaves the control.
+                        if leaves(drag, touch) {
+                            s.cancel_hold();
+                        }
+                    }
+                    Phase::Up => {
+                        if drag.cancelled() || leaves(drag, touch) {
+                            s.cancel_hold();
+                        } else {
+                            s.release_hold();
+                        }
+                    }
                 },
             )
             .on_key(move |s: &mut State, event: &KeyEvent, _: &mut Tx| {
@@ -315,6 +330,13 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
             .font(k.ty.ui_medium)
             .color(if holding { t.accent } else { k.c.text_base }),
     )
+}
+
+/// Whether a press on the Sign control has stopped being a hold: it left the control, or, on a
+/// touch screen, travelled past the slop at which Rune itself calls a touch a drag.
+fn leaves(drag: &Drag, touch: bool) -> bool {
+    let outside = drag.x < 0.0 || drag.y < 0.0 || drag.x > drag.w || drag.y > drag.h;
+    outside || (touch && drag.dx.hypot(drag.dy) > TOUCH_SLOP)
 }
 
 /// Return or Space, the keyboard's way to hold the Sign control.

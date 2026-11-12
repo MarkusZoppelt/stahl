@@ -4851,3 +4851,91 @@ fn a_pdf_dropped_on_the_window_opens_the_sheet_with_its_reason() {
             .is_some_and(|r| r.problem.is_some())
     );
 }
+
+// --- Signing on a phone ---
+
+impl Harness {
+    /// A finger down on `key`, held for `seconds` of real frames, moved to `(dx, dy)` away in
+    /// ten steps over that time when given, then lifted.
+    fn touch_sign(&mut self, key: &str, seconds: f64, away: Option<(f32, f32)>) {
+        self.tap(key);
+        let (x, y) = self.rt.find(key).expect("Sign is on the page");
+        let frames = (seconds * 60.0).round() as usize;
+        let mut time = 0.0;
+        self.rt.touch(1, TouchPhase::Started, x, y, time);
+        let (mut at_x, mut at_y) = (x, y);
+        for frame in 0..frames {
+            time += 1.0 / 60.0;
+            if let Some((dx, dy)) = away
+                && frame % (frames / 10).max(1) == 0
+            {
+                (at_x, at_y) = (at_x + dx / 10.0, at_y + dy / 10.0);
+                self.rt.touch(1, TouchPhase::Moved, at_x, at_y, time);
+            }
+            self.rt.frame(1.0 / 60.0);
+        }
+        self.rt.touch(1, TouchPhase::Ended, at_x, at_y, time + 0.3);
+        self.rt.frame(1.0 / 60.0);
+        self.rt.state.settle();
+    }
+}
+
+#[test]
+fn on_a_phone_a_drag_from_sign_signs_nothing() {
+    let mut app = Harness::phone();
+    app.touch_sign("matter-sign-rebalance", 1.5, Some((0.0, -120.0)));
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "a drag is a scroll, not a signature"
+    );
+    assert!(app.rt.state.matters.hold.is_none(), "the hold stopped");
+    assert!(!app.exists("matter-seal"));
+    assert!(decision_files(&app).is_empty());
+}
+
+#[test]
+fn on_a_phone_the_hold_stops_showing_the_moment_the_touch_travels() {
+    let mut app = Harness::phone();
+    app.tap("matter-sign-rebalance");
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(
+        app.rt.state.matters.holding("rebalance"),
+        "a hold shows while the finger rests"
+    );
+    app.rt.touch(1, TouchPhase::Moved, x, y - 30.0, 0.4);
+    app.rt.frame(1.0 / 60.0);
+    assert!(!app.rt.state.matters.holding("rebalance"));
+}
+
+#[test]
+fn on_a_phone_a_still_hold_signs_once() {
+    let mut app = Harness::phone();
+    app.touch_sign("matter-sign-rebalance", 1.2, None);
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "signed once");
+    assert_eq!(ledger.entries[0].status, stahl::matters::Status::Signed);
+    assert_eq!(decision_files(&app).len(), 1);
+}
+
+#[test]
+fn on_a_phone_a_press_released_outside_signs_nothing() {
+    let mut app = Harness::phone();
+    app.tap("matter-sign-rebalance");
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_move(x + 80.0, y);
+    for _ in 0..80 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x + 80.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(app.rt.state.matters.hold.is_none());
+}
