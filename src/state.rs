@@ -43,6 +43,7 @@ use crate::{
         self,
         apply::{self as intake_apply, Choice},
         reconcile::{self, Bought, Holding, Ledger},
+        rules::SetAside,
         text::Sheet,
     },
     matters::MattersPage,
@@ -482,6 +483,8 @@ pub struct IntakeReview {
     pub problem: Option<String>,
     /// One decision per proposal in `ledger`.
     pub decided: Vec<Decision>,
+    /// The lines the reader set aside, and why. Nothing is recorded from them.
+    pub aside: Vec<SetAside>,
     /// A change is being written, so a second press mustn't start another.
     pub busy: bool,
 }
@@ -494,6 +497,7 @@ impl IntakeReview {
             ledger: None,
             problem: Some(why),
             decided: Vec::new(),
+            aside: Vec::new(),
             busy: false,
         }
     }
@@ -2179,6 +2183,7 @@ impl State {
                 IntakeReview {
                     file,
                     decided: vec![Decision::Pending; ledger.proposals.len()],
+                    aside: reading.aside,
                     sheet: Some(sheet),
                     ledger: Some(ledger),
                     problem: None,

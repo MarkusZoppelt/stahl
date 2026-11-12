@@ -628,6 +628,8 @@ impl Entry {
 pub enum Aside {
     /// A row that isn't a trade: a dividend, a deposit, a fee. Holds the row's word for it.
     NotATrade(String),
+    /// A trade taken back (a Storno, a reversal). Holds the row's word for it.
+    Cancelled(String),
     /// A total or a subtotal.
     Total,
     /// Couldn't be read with certainty, and why.
@@ -713,6 +715,44 @@ const NOT_TRADES: [&str; 30] = [
     "reinvestment",
 ];
 
+/// Words for a trade taken back. Such a row undoes another; it is not a trade of its own.
+const CANCELS: [&str; 9] = [
+    "storno",
+    "storniert",
+    "stornierung",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "cancellation",
+    "reversal",
+    "reversed",
+];
+
+/// Words for a row that changes a holding's count without being bought or sold.
+const CHANGES_A_COUNT: [&str; 7] = [
+    "transfer",
+    "uebertrag",
+    "split",
+    "einbuchung",
+    "ausbuchung",
+    "corporate action",
+    "kapitalmassnahme",
+];
+
+/// Whether `word` is a kind that moves a count by hand-made changes: a transfer or a split.
+pub fn changes_a_count(word: &str) -> bool {
+    let folded = fold(word);
+    CHANGES_A_COUNT
+        .iter()
+        .any(|each| folded == *each || folded.contains(each))
+}
+
+/// Whether `word` is a cancellation or a reversal.
+pub fn is_cancellation(word: &str) -> bool {
+    let folded = fold(word);
+    folded.split(' ').any(|part| CANCELS.contains(&part))
+}
+
 /// What a row's word for its kind means. `Err` holds the word when it is something other than
 /// a trade, and `None` when the word is not known.
 pub fn kind_of(word: &str) -> Option<Result<Kind, String>> {
@@ -721,8 +761,11 @@ pub fn kind_of(word: &str) -> Option<Result<Kind, String>> {
         list.iter()
             .any(|each| folded == *each || folded.split(' ').any(|part| part == *each))
     };
+    // A cancellation first: "Storno Kauf" holds a word for a purchase, and is not one.
+    if has(&CANCELS) {
+        Some(Err(word.trim().to_string()))
     // "Verkauf" holds "kauf", so sales are looked for first.
-    if has(&SELL) {
+    } else if has(&SELL) {
         Some(Ok(Kind::Sell))
     } else if has(&BUY) {
         Some(Ok(Kind::Buy))
@@ -887,6 +930,7 @@ fn entry(record: &Record, mapping: &Mapping, shape: Shape) -> Result<Option<Entr
     let word_kind = match &kind_word {
         Some(word) => match kind_of(&word.text) {
             Some(Ok(kind)) => Some(kind),
+            Some(Err(word)) if is_cancellation(&word) => return Err(Aside::Cancelled(word)),
             Some(Err(word)) => return Err(Aside::NotATrade(word)),
             None => {
                 return Err(unsure(format!(

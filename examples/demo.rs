@@ -569,6 +569,15 @@ fn main() {
                 scene(s, Page::Holdings);
                 intake(s, "statement.pdf");
             }),
+            // A file with lines the reader would not guess at: counted, and each given its reason.
+            ("intake-aside", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "set-aside.csv");
+            }),
+            ("phone-intake-aside", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "set-aside.csv");
+            }),
             ("phone-intake-review", |s| {
                 phone(s, Page::Holdings);
                 intake(s, "de-transactions.csv");

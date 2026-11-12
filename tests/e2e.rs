@@ -4709,3 +4709,32 @@ fn an_unreadable_ledger_is_reported_and_survives_a_decision() {
     assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
     assert!(app.rt.state.matters.ledger.entries.is_empty());
 }
+
+#[test]
+fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "set-aside.csv");
+    let review = app.rt.state.intake.as_ref().expect("the sheet is up");
+    assert_eq!(review.aside.len(), 4, "{:?}", review.aside);
+    assert!(app.exists("intake-aside"));
+    assert!(app.has_text("Four lines were set aside, and nothing was taken from them."));
+    assert!(app.has_text("yours to make by hand"));
+    assert!(app.exists("intake-aside-3"), "each line is listed");
+    assert!(app.has_text("“Storno Kauf” takes a trade back"));
+    assert!(app.has_text("“Übertrag” changes a count"));
+    assert!(app.has_text("“Umtausch” isn't a kind of trade we know"));
+    assert!(
+        app.exists("intake-accept-all"),
+        "the good rows are still on offer"
+    );
+
+    app.click("intake-accept-all");
+    let after = counts(&app);
+    assert_ne!(after, before, "the good rows were recorded");
+    let gold = |list: &[(String, f64)]| list.iter().map(|(_, count)| count).sum::<f64>();
+    // Only the one purchase of GLD and the one of TLT or SPY changed anything: the Storno,
+    // the transfer and the unknown kind moved no count.
+    assert!(gold(&after) - gold(&before) <= 3.0 + 1e-9);
+}
