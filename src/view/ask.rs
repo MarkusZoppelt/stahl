@@ -349,7 +349,8 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
                 .font(QUESTION)
                 .color(t.kit.c.text_muted)
                 .wrap()
-                .selectable(true),
+                .selectable(true)
+                .transition(ui::arrive()),
         )
         .children(blocks);
     let current = index + 1 == s.ask.turns.len();
@@ -433,7 +434,7 @@ fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
         ),
         ask::Phase::Streaming => None,
         ask::Phase::Done if turn.blocks.is_empty() => {
-            Some(ui::caption("There was nothing to show for that.", t))
+            Some(ui::caption("There was nothing in that answer to show.", t))
         }
         ask::Phase::Done => None,
     }

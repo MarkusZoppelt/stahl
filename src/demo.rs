@@ -202,7 +202,7 @@ const SCRIPT_BITCOIN: &str = concat!(
 
 /// What the demo says when the question is outside what it was written for.
 const SCRIPT_ELSE: &str = concat!(
-    r#"{"block":"say","text":"That one needs a model. This portfolio can answer what changed, where new money goes, and what a shock would leave. Add a model in Settings; a local one keeps everything on this computer."}"#,
+    r#"{"block":"say","text":"That one needs a model. Stahl can still tell you what changed, where new money would go, and what a shock would leave. Add a model in Settings; a local one keeps everything on this computer."}"#,
     "\n",
     r#"{"block":"figures","ids":["total","today.change"]}"#,
     "\n",

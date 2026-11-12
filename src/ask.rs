@@ -604,8 +604,8 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
 
     // Nothing this portfolio can work out on its own.
     blocks.push(Block::Say {
-        text: "That one needs a model. This portfolio can answer what it holds, how it moved, \
-               and what needs a look. Add a model in Settings to ask anything; a local one keeps \
+        text: "That one needs a model. Stahl can still tell you what the portfolio holds, how it \
+               moved, and what needs a look. Add a model in Settings to ask anything; a local one keeps \
                everything on this computer."
             .to_string(),
     });
