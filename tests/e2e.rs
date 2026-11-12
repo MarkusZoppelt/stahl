@@ -29,6 +29,7 @@ use stahl::{
     app,
     backend::{Backend, Period},
     demo::{self, FakeReleases},
+    intake::reconcile::Change,
     state::{Command, Confirm, Page, PendingOpen, PickKind, State, UpdatePhase},
     update::{self, Installation, Updater},
     view::guide,
@@ -422,27 +423,38 @@ fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
 
     app.click("intake-accept-all");
     assert!(
-        app.rt.state.intake.is_none(),
-        "taking everything puts the sheet away"
+        app.rt.state.intake.is_some(),
+        "a doubted change, the new holding, stays in front of the owner"
     );
     assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
     assert!(app.rt.state.intake_undo.is_some());
     assert!(app.exists("toast"));
     let after = counts(&app);
     assert_ne!(before, after, "the positions changed");
-    assert!(
+    let on_record = |app: &Harness| {
         app.rt
             .state
             .positions
             .iter()
-            .any(|position| position.ticker.as_deref() == Some("NGSC")),
-        "the holding the file added is on record"
-    );
+            .any(|position| position.ticker.as_deref() == Some("NGSC"))
+    };
+    assert!(!on_record(&app), "a new holding is never taken unseen");
+    assert!(app.has_text("filed under Stocks"));
+    let review = app.rt.state.intake.as_ref().unwrap();
+    let ledger = review.ledger.as_ref().unwrap();
+    let new = ledger
+        .proposals
+        .iter()
+        .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
+    assert!(on_record(&app), "taken by hand, it is on record");
 
+    // Undo takes back the last import only: the new holding, not the batch before it.
     app.click_label("Undo");
-    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
     assert!(app.rt.state.intake_undo.is_none(), "one undo only");
-    assert_eq!(counts(&app), before, "the positions are as they were");
+    assert!(!on_record(&app), "the new holding is taken back");
+    assert_eq!(counts(&app), after, "the batch before it stays");
 }
 
 #[test]
@@ -473,6 +485,21 @@ fn the_same_broker_file_twice_proposes_nothing_the_second_time() {
     let path = dropped(&mut app, "de-transactions.csv");
     app.click("intake-accept-all");
     assert!(app.rt.state.dirty);
+    // The new holding is doubted, so it was left for the owner; take it by hand.
+    let new = app
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.as_ref())
+        .and_then(|ledger| {
+            ledger
+                .proposals
+                .iter()
+                .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        })
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
 
     app.rt.drop_files(vec![path], Some((660.0, 430.0)));
     app.settle();

@@ -257,6 +257,17 @@ pub fn apply(json: &str, ops: &[Op]) -> Result<String, String> {
                 amount,
                 purchases,
             } => {
+                let on_record = positions.iter().any(|position| {
+                    position
+                        .get("Ticker")
+                        .and_then(Value::as_str)
+                        .is_some_and(|own| own.trim().eq_ignore_ascii_case(ticker.trim()))
+                });
+                if on_record {
+                    return Err(format!(
+                        "{ticker} is already on record, so it wasn't added a second time."
+                    ));
+                }
                 let mut map = Map::new();
                 if let Some(name) = name {
                     map.insert("Name".into(), Value::String(name.clone()));

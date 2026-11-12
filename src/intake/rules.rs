@@ -653,6 +653,9 @@ pub enum Shape {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
     pub shape: Shape,
+    /// The table doesn't say which shape it is (no kind column, no negative quantity, no header
+    /// like Bestand), so `shape` is a guess and nothing read under it is for Accept all.
+    pub guessed: bool,
     pub entries: Vec<Entry>,
     pub aside: Vec<SetAside>,
     /// The date a holdings list is as of, when it says.
@@ -862,6 +865,53 @@ fn figure_at(
     )))
 }
 
+/// Headers that say a quantity is what is held, not what was traded.
+const HELD_HEADERS: [&str; 9] = [
+    "bestand",
+    "holding",
+    "holdings",
+    "position",
+    "positions",
+    "shares held",
+    "quantity held",
+    "balance",
+    "depotbestand",
+];
+
+/// Whether the table lists trades or what is held, and whether that is a guess. Evidence for
+/// trades: a kind column, or a negative quantity. Evidence for holdings: a quantity header that
+/// says so, or no dates at all. A table with dates and neither is read as before, and flagged.
+fn shape_of(sheet: &Sheet, mapping: &Mapping, dates_differ: bool) -> (Shape, bool) {
+    if mapping.has(Role::Kind) {
+        return (Shape::Transactions, false);
+    }
+    let quantity = mapping.column(Role::Quantity);
+    let negative = quantity.is_some_and(|column| {
+        body(sheet, mapping)
+            .filter_map(|record| record.cell(column.index))
+            .any(|cell| {
+                let text = cell.text.trim();
+                text.starts_with('-') || (text.starts_with('(') && text.ends_with(')'))
+            })
+    });
+    if negative {
+        return (Shape::Transactions, false);
+    }
+    let says_held = quantity.is_some_and(|column| {
+        let folded = fold(&column.header);
+        HELD_HEADERS.contains(&folded.as_str())
+    });
+    if says_held || !mapping.has(Role::Date) {
+        return (Shape::Holdings, false);
+    }
+    let shape = if dates_differ {
+        Shape::Transactions
+    } else {
+        Shape::Holdings
+    };
+    (shape, true)
+}
+
 /// Read the table's rows under `mapping`. Every value in an entry is copied from a cell; a row
 /// that can't be read that way is set aside, with the reason.
 pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
@@ -875,11 +925,7 @@ pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
         })
         .unwrap_or_default();
     let dates_differ = dates.windows(2).any(|pair| pair[0] != pair[1]);
-    let shape = if mapping.has(Role::Kind) || dates_differ {
-        Shape::Transactions
-    } else {
-        Shape::Holdings
-    };
+    let (shape, guessed) = shape_of(sheet, mapping, dates_differ);
     let as_of = (shape == Shape::Holdings)
         .then(|| dates.first().copied())
         .flatten();
@@ -903,6 +949,7 @@ pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
     }
     Reading {
         shape,
+        guessed,
         entries,
         aside,
         as_of,

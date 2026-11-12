@@ -2159,6 +2159,8 @@ impl State {
         if !self.has_portfolio() || self.open.parse_error.is_some() {
             return;
         }
+        // A file is compared with the positions as they are today, not a day travelled to.
+        self.return_to_today();
         self.intake_undo = None;
         let file = path.to_string_lossy().into_owned();
         let name = file_name(&file).to_string();
@@ -2331,7 +2333,21 @@ impl State {
                                 }
                             }
                         }
-                        if close {
+                        // Accept all puts the sheet away only when nothing is left that the
+                        // owner could still take: a doubted change stays in front of them.
+                        let waiting = state.intake.as_ref().is_some_and(|review| {
+                            review.ledger.as_ref().is_some_and(|ledger| {
+                                ledger
+                                    .proposals
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(index, proposal)| {
+                                        proposal.ready
+                                            && review.decided.get(index) == Some(&Decision::Pending)
+                                    })
+                            })
+                        });
+                        if close && !waiting {
                             state.intake = None;
                         }
                         state.intake_undo = Some(IntakeUndo {

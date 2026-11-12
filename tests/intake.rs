@@ -405,3 +405,75 @@ fn files_that_cannot_be_read_say_why() {
     assert!(unreadable("not-a-table.txt").starts_with("There is no table"));
     assert!(unreadable("bank-account.csv").starts_with("This looks like an account statement"));
 }
+
+#[test]
+fn a_sign_or_a_header_is_evidence_of_the_shape_and_nothing_else_is() {
+    // One day's trades with a sale in them: the sign says they are trades.
+    let (reading, _) = read("signed-one-day.csv");
+    assert_eq!(reading.shape, Shape::Transactions);
+    assert!(!reading.guessed);
+
+    // A header saying Bestand is evidence of holdings, whatever the dates do.
+    let (reading, _) = read("dated-bestand.csv");
+    assert_eq!(reading.shape, Shape::Holdings);
+    assert!(!reading.guessed);
+
+    // Dates, no kind, no sign and no such header: a guess, and it is said.
+    let (reading, _) = read("dated-holdings.csv");
+    assert!(reading.guessed);
+    let ledger = reconcile(&reading, &holdings(demo::POSITIONS));
+    assert!(!ledger.proposals.is_empty());
+    for proposal in &ledger.proposals {
+        assert!(!proposal.in_all, "a guessed shape is not for Accept all");
+        assert!(
+            proposal
+                .doubts
+                .iter()
+                .any(|doubt| doubt.contains("whether it is a list of trades")),
+            "{:?}",
+            proposal.doubts
+        );
+    }
+}
+
+#[test]
+fn trades_on_an_amount_only_holding_and_a_defaulted_class_are_doubts() {
+    let json = r#"[{"Id": "pos_spy", "Name": "S&P 500", "AssetClass": "Stocks", "Ticker": "SPY", "Amount": 80.0}]"#;
+    let (reading, _) = read("de-transactions.csv");
+    let ledger = reconcile(&reading, &holdings(json));
+    let spy = ledger
+        .proposals
+        .iter()
+        .find(|proposal| matches!(&proposal.change, Change::Trades { opening: true, .. }))
+        .expect("an opening amount");
+    assert!(!spy.in_all);
+    assert!(spy.ready, "it can still be taken one at a time");
+    assert!(spy.doubts.iter().any(|doubt| doubt.contains("twice")));
+
+    let newcomer = ledger
+        .proposals
+        .iter()
+        .find(|proposal| matches!(&proposal.change, Change::Add { .. }))
+        .expect("a new holding");
+    assert!(!newcomer.in_all);
+    assert!(
+        newcomer
+            .doubts
+            .iter()
+            .any(|doubt| doubt.contains("filed under Stocks"))
+    );
+}
+
+#[test]
+fn adding_a_ticker_already_on_record_is_refused() {
+    let json = r#"[{"Id": "pos_spy", "Ticker": "SPY", "Amount": 80.0}]"#;
+    let add = apply::Op::Add {
+        name: None,
+        ticker: "spy".into(),
+        class: "Stocks".into(),
+        amount: 1.0,
+        purchases: Vec::new(),
+    };
+    let error = apply::apply(json, &[add]).unwrap_err();
+    assert!(error.contains("already on record"), "{error}");
+}
