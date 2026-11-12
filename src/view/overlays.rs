@@ -48,7 +48,7 @@ pub fn build(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
     if let Some((message, _)) = &s.toast {
         let mut toast = Toast::new("toast", message.clone()).icon(&t.kit, &icons::CHECK_CIRCLE);
         // An import can be put back for a few seconds, from the toast that says it landed.
-        if s.intake_undo.is_some() {
+        if !s.intake_undo.is_empty() {
             toast = toast.action(&t.kit, "Undo", false, |s: &mut State, _: &mut Tx| {
                 s.undo_intake();
             });

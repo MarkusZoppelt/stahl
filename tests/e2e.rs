@@ -427,7 +427,7 @@ fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
         "a doubted change, the new holding, stays in front of the owner"
     );
     assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
-    assert!(app.rt.state.intake_undo.is_some());
+    assert!(!app.rt.state.intake_undo.is_empty());
     assert!(app.exists("toast"));
     let after = counts(&app);
     assert_ne!(before, after, "the positions changed");
@@ -452,9 +452,14 @@ fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
 
     // Undo takes back the last import only: the new holding, not the batch before it.
     app.click_label("Undo");
-    assert!(app.rt.state.intake_undo.is_none(), "one undo only");
     assert!(!on_record(&app), "the new holding is taken back");
     assert_eq!(counts(&app), after, "the batch before it stays");
+    // Two imports, undone in order.
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+    app.click_label("Undo");
+    assert!(app.rt.state.intake_undo.is_empty());
+    assert_eq!(counts(&app), before, "the positions are as they were");
+    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
 }
 
 #[test]
@@ -471,7 +476,7 @@ fn one_row_can_be_accepted_on_its_own() {
     assert!(app.has_text("Recorded"), "the row says what happened to it");
     assert!(app.rt.state.dirty);
     assert_ne!(counts(&app), before, "that one change is on record");
-    assert!(app.rt.state.intake_undo.is_some());
+    assert!(!app.rt.state.intake_undo.is_empty());
 
     app.click("intake-leave-1");
     assert!(!app.exists("intake-row-1"), "a row left is not asked again");
@@ -4764,4 +4769,63 @@ fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
     // Only the one purchase of GLD and the one of TLT or SPY changed anything: the Storno,
     // the transfer and the unknown kind moved no count.
     assert!(gold(&after) - gold(&before) <= 3.0 + 1e-9);
+}
+
+#[test]
+fn an_undo_after_an_unrelated_edit_does_nothing_and_loses_nothing() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit made inside the six seconds, without a toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click_label("Undo");
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert!(
+        app.has_text("can't be undone"),
+        "it says why instead of reverting"
+    );
+    assert!(app.rt.state.dirty);
+    assert_eq!(counts(&app), edited, "the edit and the import both stay");
+}
+
+#[test]
+fn a_pdf_dropped_on_the_window_opens_the_sheet_with_its_reason() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    let file = app.rt.state.open.file_path.clone();
+    let folder = app.rt.state.open.workspace_dir.clone();
+    dropped(&mut app, "statement.pdf");
+    let review = app.rt.state.intake.as_ref().expect("the sheet opens");
+    assert!(
+        review
+            .problem
+            .as_deref()
+            .is_some_and(|why| why.contains("PDF"))
+    );
+    assert!(!app.rt.state.dirty);
+    assert_eq!(counts(&app), before, "nothing was opened in its place");
+    assert_eq!(app.rt.state.open.file_path, file, "the same file is open");
+    assert_eq!(app.rt.state.open.workspace_dir, folder);
+
+    app.click("intake-cancel");
+    dropped(&mut app, "workbook.xlsx");
+    assert!(
+        app.rt
+            .state
+            .intake
+            .as_ref()
+            .is_some_and(|r| r.problem.is_some())
+    );
 }

@@ -22,6 +22,9 @@ use std::mem;
 use rules::{Mapping, Reading};
 use text::{NotText, Sheet};
 
+/// The most rows a table may have to be reviewed here.
+pub const MAX_ROWS: usize = 5_000;
+
 /// What was made of a file.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
@@ -107,6 +110,12 @@ pub fn understand(bytes: &[u8]) -> Outcome {
                 .to_string(),
         );
     };
+    if sheet.records.len() > MAX_ROWS {
+        return Outcome::Unreadable(format!(
+            "This table has {} rows, far more than a broker's export, so it wasn't read.",
+            sheet.records.len()
+        ));
+    }
     let mapping = rules::map(&sheet);
     // Money and no securities: an account statement, not a broker's export. There is nothing
     // in it to map by hand.

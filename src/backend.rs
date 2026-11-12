@@ -32,7 +32,7 @@ use portfolio_rs::{
     policy::{self, Policy},
     position::parse_purchase_date,
     review::Review,
-    services::atomic_write,
+    services::{atomic_write, portfolio_loader::check_positions},
     simulate::RebalanceSimulation,
     state::{
         AllocationItemDto, AppConfigDto, AppState, CreatePositionRequest, GeneratedDocument,
@@ -1440,17 +1440,39 @@ impl Backend {
 
     /// Write approved changes from a broker's file into the positions, and hand back the
     /// positions as they were, so the owner can undo them.
-    pub async fn apply_intake(&self, ops: Vec<IntakeOp>) -> BackendResult<String> {
+    ///
+    /// The result is checked before it replaces anything: positions that `portfolio_rs` could
+    /// not read back would leave a document that doesn't parse. Returns the positions from
+    /// before and the positions as the import left them.
+    pub async fn apply_intake(&self, ops: Vec<IntakeOp>) -> BackendResult<(String, String)> {
         let before = self.state.positions_json.read().await.clone();
         let after = intake_apply::apply(&before, &ops)?;
+        check_positions("positions.json", &after).map_err(|error| {
+            format!(
+                "This import would leave positions that can't be read ({}), so nothing was \
+                 changed.",
+                error.reason
+            )
+        })?;
         self.state.set_positions_json(after).await;
-        Ok(before)
+        let left = self.state.positions_json.read().await.clone();
+        Ok((before, left))
     }
 
-    /// Put the positions back as they were before an import.
-    pub async fn restore_positions(&self, json: String) -> BackendResult<()> {
+    /// Put the positions back as they were before an import, if they are still as that import
+    /// left them. Returns the positions as they are now. Anything edited since is not lost: the
+    /// undo refuses instead.
+    pub async fn restore_positions(&self, json: String, left: &str) -> BackendResult<String> {
+        let current = self.state.positions_json.read().await.clone();
+        if !same_positions(&current, left) {
+            return Err(
+                "The positions have changed since that import, so it can't be undone \
+                        without losing the change."
+                    .to_string(),
+            );
+        }
         self.state.set_positions_json(json).await;
-        Ok(())
+        Ok(self.state.positions_json.read().await.clone())
     }
 
     // --- Policy ---
@@ -1655,6 +1677,17 @@ impl Backend {
             Some(path) => Ok(path.to_string_lossy().into_owned()),
             None => config_path().map_err(report),
         }
+    }
+}
+
+/// Whether two positions texts say the same, whatever their spacing.
+fn same_positions(a: &str, b: &str) -> bool {
+    match (
+        serde_json::from_str::<serde_json::Value>(a),
+        serde_json::from_str::<serde_json::Value>(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

@@ -477,3 +477,29 @@ fn adding_a_ticker_already_on_record_is_refused() {
     let error = apply::apply(json, &[add]).unwrap_err();
     assert!(error.contains("already on record"), "{error}");
 }
+
+#[test]
+fn a_figure_too_large_for_the_positions_is_refused() {
+    let json = r#"[{"Id": "pos_spy", "Ticker": "SPY", "Amount": 80.0}]"#;
+    let add = apply::Op::Add {
+        name: None,
+        ticker: "HUGE".into(),
+        class: "Stocks".into(),
+        amount: 7.9e28,
+        purchases: Vec::new(),
+    };
+    let error = apply::apply(json, &[add]).unwrap_err();
+    assert!(error.contains("too large"), "{error}");
+}
+
+#[test]
+fn a_file_with_too_many_rows_is_not_read() {
+    let mut text = String::from("Date;Type;Ticker;Quantity;Price\n");
+    for _ in 0..intake::MAX_ROWS + 1 {
+        text.push_str("2026-11-04;Kauf;GLD;1;199,90\n");
+    }
+    match intake::understand(text.as_bytes()) {
+        Outcome::Unreadable(why) => assert!(why.contains("rows"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+}

@@ -558,6 +558,13 @@ fn main() {
                 scene(s, Page::Holdings);
                 intake(s, "de-transactions.csv");
             }),
+            // One change taken: the toast says so, and offers to put it back for a few seconds.
+            ("intake-undo", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.accept_intake(0);
+                s.settle();
+            }),
             ("intake-review-light", |s| {
                 scene(s, Page::Holdings);
                 intake(s, "de-transactions.csv");
