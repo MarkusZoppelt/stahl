@@ -76,10 +76,10 @@ const THINKING_TURN: f32 = 9.0;
 
 /// The light's colour when nothing has moved: steel blue.
 const STEEL: [f32; 3] = [0.72, 0.82, 0.92];
-/// The faintest warm teal, for a day that is up.
-const TEAL: [f32; 3] = [0.66, 0.88, 0.80];
-/// The faintest red, for a day that is down.
-const RED: [f32; 3] = [0.94, 0.74, 0.71];
+/// A cool teal, for a day that is up: enough to see on the wall, never enough to read as green.
+const TEAL: [f32; 3] = [0.40, 0.95, 0.80];
+/// A low red, for a day that is down: a warm cast, not an alarm.
+const RED: [f32; 3] = [1.0, 0.52, 0.48];
 
 /// A slot of `size` points that the compositor paints the door into. It draws nothing itself:
 /// the effect keeps the slot's place, rect, clip and opacity. `turns` is how far the tumblers
@@ -1401,27 +1401,58 @@ fn sd_round(p: vec2f, half: vec2f, r: f32) -> f32 {
     return length(max(q, vec2f(0.0))) + min(max(q.x, q.y), 0.0) - r;
 }
 
+// How much light a lamp hanging `height` points off the wall gives the point `d` points along
+// the wall from under it: the cosine over the distance squared, which makes a pool with an edge
+// rather than a wash.
+fn lamp(d: vec2f, height: f32) -> f32 {
+    let q = d / height;
+    return pow(1.0 / (1.0 + dot(q, q)), 1.5);
+}
+
+// How far the lamp hangs off the wall, in points.
+fn lamp_height() -> f32 { return max(u.window.y * 0.62, 420.0); }
+
+// The pool of light on the wall, 0 to 1: 1 right under the lamp, and nothing at the corner
+// furthest from where the lamp rests, so the far wall keeps the room's own dark.
+fn pool(p: vec2f) -> f32 {
+    let h = lamp_height();
+    let rest = vec2f(u.window.x * 0.5, -u.window.y * 0.22);
+    let far = lamp(vec2f(0.0, u.window.y) - rest, h);
+    return max(lamp(p - u.light, h) - far, 0.0) / (1.0 - far);
+}
+
 // The pool of light on the wall. `p` is in window points.
 fn room(p: vec2f) -> vec4f {
     let win = u.window;
     let dark = u.flags.x > 0.5;
-    // Wider than tall, so the light spreads across the page as a ceiling light would.
-    let rx = max(win.x * 0.70, 460.0);
-    let ry = max(win.y * 0.85, 400.0);
-    let q = (p - u.light) / vec2f(rx, ry);
-    let r = length(q);
-    let fall = exp(-1.6 * r * r);
+    let fall = pool(p);
     let m = clamp(u.gain, 0.0, 1.0);
     var lit: f32;
     var shade: f32;
+    // The edge of the pane facing the lamp catches it, as the rim of each of the door's rings
+    // does: a hairline of light along the top that runs out down the sides.
+    var rim = 0.0;
+    if (u.radius > 0.5) {
+        let half = u.rect.zw * 0.5;
+        let local = p - (u.rect.xy + half);
+        let sd = sd_round(local, half, u.radius);
+        let edge = exp(-pow((sd + 0.75) / 0.9, 2.0));
+        let normal = normalize(sign(local) * max(abs(local) - half + vec2f(u.radius), vec2f(0.0))
+            + vec2f(0.0, -1e-3));
+        let toward = normalize(u.light - p);
+        rim = edge * pow(max(dot(normal, toward), 0.0), 2.0) * (0.35 + 0.65 * fall);
+    }
     if (dark) {
-        // A faint cool pool, and the far wall a shade darker than the near one.
-        lit = (0.055 + 0.040 * m) * fall;
-        shade = 0.035 * smoothstep(0.7, 1.7, r);
+        // A cool pool from above that you can see, and the far wall left as dark as the room.
+        lit = (0.10 + 0.03 * m) * fall;
+        shade = 0.0;
+        rim *= 0.42;
     } else {
-        // Light falling on paper: a warm lift, and a barely-there shade away from it.
-        lit = (0.34 + 0.14 * m) * fall;
-        shade = 0.020 * smoothstep(0.8, 1.8, r);
+        // A desk lamp on paper: brighter under it, and the paper toward the far corners a few
+        // shades darker.
+        lit = (0.62 + 0.10 * m) * fall;
+        shade = 0.014 * pow(1.0 - fall, 2.0);
+        rim *= 0.55;
     }
     // A refresh's pulse: one soft ring leaving the door and crossing the wall, once.
     var ring = 0.0;
@@ -1435,10 +1466,10 @@ fn room(p: vec2f) -> vec4f {
     }
     // A static half-LSB dither: soft gradients must not band on an 8-bit target.
     let grain = (hash2(floor(p * u.scale)) - 0.5) / 255.0;
-    let alpha = clamp(lit + shade + ring + grain, 0.0, 1.0);
+    let alpha = clamp(lit + shade + ring + rim + grain, 0.0, 1.0);
     // On paper the day's colour is a hint: the light is warm white with a trace of it.
-    let tint = select(mix(u.color.rgb, vec3f(1.0, 0.995, 0.98), 0.80), u.color.rgb, dark);
-    let rgb = tint * lit + vec3f(0.86, 0.93, 1.0) * ring;
+    let tint = select(mix(u.color.rgb, vec3f(0.996, 0.984, 0.945), 0.94), u.color.rgb, dark);
+    let rgb = tint * lit + vec3f(0.86, 0.93, 1.0) * (ring + rim);
     if (alpha <= 0.0001) { return vec4f(0.0); }
     return encode_out(rgb / alpha, alpha);
 }

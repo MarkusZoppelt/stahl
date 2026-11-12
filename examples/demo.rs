@@ -55,6 +55,14 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
+    /// Today's move set to `percent`, with the amount it means, for the room's light.
+    fn day(s: &mut State, percent: f64) {
+        if let Some(summary) = s.summary.as_mut() {
+            let before = summary.total_value / (1.0 + percent / 100.0);
+            summary.day_change = summary.total_value - before;
+            summary.day_change_percent = percent;
+        }
+    }
     /// The plate the wall has at its top, if any.
     fn newest_plate(s: &State) -> Option<String> {
         s.records
@@ -648,6 +656,16 @@ fn main() {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // The room's light on a day that is down, and on one that didn't move: the demo's
+            // prices are fixtures, so the day's move is set on the summary the light reads.
+            ("overview-down-day", |s| {
+                scene(s, Page::Overview);
+                day(s, -0.9);
+            }),
+            ("overview-flat-day", |s| {
+                scene(s, Page::Overview);
+                day(s, 0.0);
             }),
             // Launched into a portfolio: the opening has already played, and a refresh turns the
             // mark's tumblers once, so the frames from 0.05 s to 1.2 s show them turning.
