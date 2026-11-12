@@ -342,10 +342,17 @@ fn wash(change: Option<f64>, largest: f64, up: Color, down: Color) -> Option<Col
 /// this a tile with no change would read as a gain.
 const NEUTRAL_STRENGTH: f32 = 0.8;
 
+/// The loss colour is less saturated than the gain's and its steel is paler, so at the same
+/// strength a fall reads as grey-violet beside a gain's teal. This evens them out.
+const LOSS_BOOST: f32 = 1.6;
+
 /// The tint a steel tile takes: its wash, or, with no change or none known, plain grey steel.
-fn plate_tint(wash: Option<Color>) -> ([f32; 3], f32) {
+fn plate_tint(wash: Option<Color>, loss: bool) -> ([f32; 3], f32) {
     match wash {
-        Some(c) => ([c.r, c.g, c.b].map(srgb_encode), c.a * 1.6),
+        Some(c) => (
+            [c.r, c.g, c.b].map(srgb_encode),
+            c.a * 1.6 * if loss { LOSS_BOOST } else { 1.0 },
+        ),
         None => ([0.5; 3], NEUTRAL_STRENGTH),
     }
 }
@@ -486,7 +493,7 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
             let wash = wash(change, largest, t.up, t.down);
             let steel = s.shaders.then(|| {
                 let plate = Plate::new(if t.dark { 0.18 } else { 0.86 });
-                let (rgb, strength) = plate_tint(wash);
+                let (rgb, strength) = plate_tint(wash, change.is_some_and(|change| change < 0.0));
                 ui::steel(s, plate.tint(rgb, strength), 8.0)
             });
             let tile = el()
@@ -849,13 +856,13 @@ mod tests {
             b: 0.2,
             a: 1.0,
         };
-        let neutral = plate_tint(None);
-        assert_eq!(plate_tint(wash(Some(0.0), 2.0, up, down)), neutral);
-        assert_eq!(plate_tint(wash(None, 2.0, up, down)), neutral);
+        let neutral = plate_tint(None, false);
+        assert_eq!(plate_tint(wash(Some(0.0), 2.0, up, down), false), neutral);
+        assert_eq!(plate_tint(wash(None, 2.0, up, down), false), neutral);
         assert_eq!(neutral.0[0], neutral.0[1], "plain steel has no hue");
         assert_eq!(neutral.0[1], neutral.0[2], "plain steel has no hue");
-        assert_ne!(plate_tint(wash(Some(0.5), 2.0, up, down)), neutral);
-        assert_ne!(plate_tint(wash(Some(-0.5), 2.0, up, down)), neutral);
+        assert_ne!(plate_tint(wash(Some(0.5), 2.0, up, down), false), neutral);
+        assert_ne!(plate_tint(wash(Some(-0.5), 2.0, up, down), true), neutral);
     }
 
     #[test]
