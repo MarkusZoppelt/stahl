@@ -165,7 +165,13 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
                 s.open_dropped(&path);
             }
         })
-        .on_drop_hover(|s: &mut State, over, _| s.drop_hover = over);
+        .on_drop_hover(|s: &mut State, over, _| s.drop_hover = over)
+        // A hold needs someone holding: a window that is no longer in front signs nothing.
+        .on_window_focus(|s: &mut State, focused, _| {
+            if !focused {
+                s.cancel_hold();
+            }
+        });
     let body = if s.drop_hover {
         body.border(2.0, t.accent)
     } else {

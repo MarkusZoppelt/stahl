@@ -1469,7 +1469,7 @@ impl State {
                 tx.wake_at(started + RECORD_ARRIVAL_FOR);
             }
         }
-        // A hold on a Sign control fills its ring, and completes or lets go on the clock.
+        // A hold on a Sign control fills its ring; only letting go after its time signs.
         changed |= self.matters_tick();
         if self
             .toast
@@ -2738,6 +2738,7 @@ impl State {
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
+        self.cancel_hold();
         if page != self.page {
             self.previous_page = self.page;
         }
@@ -3307,6 +3308,7 @@ impl State {
     }
 
     pub fn open_palette(&mut self) {
+        self.cancel_hold();
         let mut query = TextEdit::new("");
         query.focused = true;
         self.palette = Some(Palette { query, selected: 0 });

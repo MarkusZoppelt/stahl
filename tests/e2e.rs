@@ -4634,6 +4634,12 @@ fn the_keyboard_holds_the_same_way() {
     for _ in 0..75 {
         app.rt.frame(1.0 / 60.0);
     }
+    // The clock alone never signs; letting go after the hold time does.
+    app.rt.key_up(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
     app.settle();
     assert_eq!(
         app.rt
@@ -5001,4 +5007,120 @@ fn on_a_phone_a_press_released_outside_signs_nothing() {
     app.rt.state.settle();
     assert!(app.rt.state.matters.ledger.entries.is_empty());
     assert!(app.rt.state.matters.hold.is_none());
+}
+
+// --- A hold signs only while something is holding it ---
+
+fn nothing_signed(app: &Harness) {
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "nothing is on the ledger"
+    );
+    assert!(decision_files(app).is_empty(), "no decision file");
+}
+
+fn frames(app: &mut Harness, seconds: f64) {
+    for _ in 0..((seconds * 60.0).round() as usize) {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.state.settle();
+}
+
+#[test]
+fn a_key_hold_that_loses_focus_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    frames(&mut app, 1.5);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_up_after_tabbing_away_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    assert!(
+        app.rt.state.matters.hold.is_none(),
+        "another key ends the hold"
+    );
+    frames(&mut app, 1.5);
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_pointer_hold_does_not_survive_navigating_away() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    frames(&mut app, 0.3);
+    assert!(app.rt.state.matters.holding("rebalance"));
+    app.rt.update(|s, _| s.navigate(Page::Holdings));
+    frames(&mut app, 1.5);
+    assert!(app.rt.state.matters.hold.is_none());
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_hold_ends_when_the_palette_opens_or_the_window_loses_focus() {
+    for blur in [false, true] {
+        let mut app = Harness::boot_tall(true);
+        let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+        app.rt.pointer_move(x, y);
+        app.rt.frame(1.0 / 60.0);
+        app.rt.pointer_down(x, y);
+        frames(&mut app, 0.3);
+        if blur {
+            app.rt.window_focus(false);
+        } else {
+            app.rt.update(|s, _| s.open_palette());
+        }
+        frames(&mut app, 1.5);
+        assert!(app.rt.state.matters.hold.is_none(), "blur: {blur}");
+        nothing_signed(&app);
+    }
+}
+
+#[test]
+fn at_a_wide_size_a_finger_that_travels_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x + 5.0, y + 5.0, 0.1);
+    app.rt.touch(1, TouchPhase::Moved, x + 9.0, y + 9.0, 0.2);
+    frames(&mut app, 1.5);
+    app.rt.touch(1, TouchPhase::Ended, x + 9.0, y + 9.0, 1.8);
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_held_for_its_time_and_released_signs() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    frames(&mut app, 1.2);
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "the clock alone signs nothing"
+    );
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    assert_eq!(app.rt.state.matters.ledger.entries.len(), 1);
+    assert_eq!(decision_files(&app).len(), 1);
 }

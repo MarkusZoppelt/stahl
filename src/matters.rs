@@ -1523,13 +1523,17 @@ impl State {
         }
     }
 
-    /// Let go. Before the hold is complete, nothing is signed and the card springs back.
+    /// Let go. Before the hold is complete, nothing is signed and the card springs back. A hold
+    /// that has lasted its time signs here, on the release, and nowhere else: the clock alone
+    /// never completes one, so a release that never arrives signs nothing.
     pub fn release_hold(&mut self) {
         let Some(hold) = self.matters.hold.take() else {
             return;
         };
         if self.now - hold.started < HOLD {
             self.matters.hint = Some((hold.id, self.now));
+        } else {
+            self.sign_matter(&hold.id);
         }
     }
 
@@ -1537,6 +1541,18 @@ impl State {
     /// at once, nothing is signed, and there is no hint, because nothing was let go too soon.
     pub fn cancel_hold(&mut self) {
         self.matters.hold = None;
+    }
+
+    /// Whether something floats over the page and has the owner's attention.
+    fn covered(&self) -> bool {
+        self.palette.is_some()
+            || self.form.is_some()
+            || self.confirm.is_some()
+            || self.new_workspace.is_some()
+            || self.intake.is_some()
+            || self.consent.is_some()
+            || self.guide
+            || self.record_plate.is_some()
     }
 
     /// The hold was completed: record the decision and stamp the card.
@@ -1727,14 +1743,13 @@ impl State {
     /// enough. True while something on screen is still moving.
     pub fn matters_tick(&mut self) -> bool {
         let mut changed = false;
-        if let Some(hold) = self.matters.hold.clone() {
-            if self.now - hold.started >= HOLD {
-                self.sign_matter(&hold.id);
-                changed = true;
-            } else {
-                // A frame for the ring to fill.
-                changed = true;
+        if self.matters.hold.is_some() {
+            if self.covered() {
+                // A sheet, the palette or a dialog took the owner's attention: no hold goes on.
+                self.matters.hold = None;
             }
+            // A frame for the ring to fill, or to show that it let go. The clock never signs.
+            changed = true;
         }
         if let Some(stamp) = &self.matters.stamp {
             if self.now - stamp.started >= BREATH {
