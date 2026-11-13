@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use chrono::NaiveDate;
 
 use super::{
-    rules::{Dated, Entry, Figure, Reading, Shape, Text},
+    rules::{Aside, Dated, Entry, Figure, Reading, Shape, Text},
     text::fold,
 };
 
@@ -134,6 +134,15 @@ impl Trade {
             .as_ref()
             .filter(|_| !self.price_left_out)
             .map(|price| price.value)
+    }
+
+    /// The fees that would be recorded: none when the price was left out, because fees in the
+    /// file's currency beside no price would read as the holding's.
+    pub fn recorded_fees(&self) -> Option<f64> {
+        self.fees
+            .as_ref()
+            .filter(|_| !self.price_left_out)
+            .map(|fees| fees.value)
     }
 }
 
@@ -641,6 +650,48 @@ pub fn reconcile(reading: &Reading, holdings: &[Holding]) -> Ledger {
                 .to_string(),
         );
     }
+    // A cancellation says a trade was taken back, not which. None is guessed at or removed:
+    // every proposal for that security is doubted and left out of Accept all.
+    for set in &reading.aside {
+        let Aside::Cancelled(word, of) = &set.why else {
+            continue;
+        };
+        let wanted: Vec<String> = of.iter().map(|each| fold(each)).collect();
+        for proposal in &mut proposals {
+            let lines = proposal.change.lines();
+            let touched = !lines.is_empty()
+                && (wanted.is_empty()
+                    || reading
+                        .entries
+                        .iter()
+                        .filter(|entry| lines.contains(&entry.line))
+                        .any(|entry| {
+                            [&entry.ticker, &entry.isin, &entry.name]
+                                .into_iter()
+                                .flatten()
+                                .any(|text| wanted.contains(&fold(&text.text)))
+                        }));
+            if !touched {
+                continue;
+            }
+            proposal.doubts.push(if wanted.is_empty() {
+                format!(
+                    "Line {} of the file is “{word}”, which takes a trade back and names no \
+                     security. We can't tell which trade it cancels, so check this against \
+                     your broker.",
+                    set.line + 1
+                )
+            } else {
+                format!(
+                    "Line {} of the file is “{word}”, which takes back a trade of this \
+                     security. We can't tell which, so none was removed; check this against \
+                     your broker.",
+                    set.line + 1
+                )
+            });
+            proposal.in_all = false;
+        }
+    }
     if reading.guessed {
         let said = match reading.shape {
             Shape::Transactions => "a list of trades",
@@ -739,7 +790,7 @@ fn trades_for(
             })
             .unwrap_or_default();
         doubts.push(format!(
-            "The file prices this in {file}, and the holding is quoted in {}. The price is left out rather than converted.",
+            "The file prices this in {file}, and the holding is quoted in {}. The price is left out rather than converted, and so are the fees.",
             holding.currency.as_deref().unwrap_or("")
         ));
     }

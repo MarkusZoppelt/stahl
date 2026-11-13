@@ -2435,7 +2435,7 @@ impl State {
         };
         self.run(
             move |backend| async move {
-                let now = backend
+                backend
                     .restore_positions(undo.json.clone(), &undo.left)
                     .await?;
                 let open = backend.open_document().await;
@@ -2444,20 +2444,18 @@ impl State {
                 } else {
                     None
                 };
-                Ok((undo, now, open, snapshot, backend.config().await))
+                Ok((undo, open, snapshot, backend.config().await))
             },
             |state, result| match result {
-                Ok((undo, now, open, snapshot, config)) => {
+                Ok((undo, open, snapshot, config)) => {
                     state.open = open;
                     state.config = Some(config);
                     if let Some(snapshot) = snapshot {
                         state.apply_snapshot(snapshot);
                     }
                     state.dirty = undo.dirty;
-                    // The import before this one now left the positions as they are.
-                    if let Some(earlier) = state.intake_undo.last_mut() {
-                        earlier.left = now;
-                    }
+                    // The import before this one keeps what it left: if anything was edited
+                    // between the two, its undo must see that and refuse.
                     if let Some(review) = &mut state.intake
                         && review.serial == undo.serial
                     {

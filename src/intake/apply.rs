@@ -87,7 +87,7 @@ pub fn op(proposal: &Proposal, choice: &Choice) -> Option<Op> {
                 date: trade.date.as_ref().map(|date| date.date),
                 quantity: trade.quantity.value,
                 price: trade.recorded_price(),
-                fees: trade.fees.as_ref().map(|fees| fees.value),
+                fees: trade.recorded_fees(),
             })
             .collect()
     };
