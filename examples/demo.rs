@@ -507,7 +507,7 @@ fn main() {
                 scene(s, Page::Settings);
                 s.settings
                     .provider_url
-                    .replace_text("http://api.example.com/v1");
+                    .replace_text("http://evil.example#@localhost/v1");
                 s.settings.model.replace_text("gpt-4o-mini");
                 s.save_settings();
                 s.settle();

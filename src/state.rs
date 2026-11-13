@@ -3406,6 +3406,8 @@ impl State {
         // A provider on this machine never leaves it. Any other host is asked about once.
         if let crate::ask::Source::Http { model, host } = source
             && !crate::ask::is_local_host(&host)
+            // An address that can't be used is refused at send, with a sentence, not asked about.
+            && !host.is_empty()
             && !self.backend.consented_hosts().contains(&host)
         {
             let body = self.consent_text(&request);
