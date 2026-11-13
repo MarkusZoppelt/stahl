@@ -813,7 +813,7 @@ impl Ledger {
 
     /// Keep one entry per matter id: the latest decision replaces the one before it.
     pub fn record(&mut self, entry: Entry) {
-        self.version = 1;
+        self.version = self.version.max(1);
         self.entries.retain(|each| each.id != entry.id);
         self.entries.push(entry);
     }
@@ -911,8 +911,20 @@ fn settled(entry: &Entry, matter: &Matter) -> bool {
         })
 }
 
+/// The newest shape of the file this Stahl knows how to read and write.
+const LEDGER_VERSION: u32 = 1;
+
 fn read_ledger(text: &str) -> Result<Ledger, String> {
-    serde_json::from_str(text).map_err(|error| error.to_string())
+    let ledger: Ledger = serde_json::from_str(text).map_err(|error| error.to_string())?;
+    // A later Stahl wrote this. Reading it as version one could drop what it added, and the
+    // next decision would write that loss back.
+    if ledger.version > LEDGER_VERSION {
+        return Err(format!(
+            "it is version {}, written by a newer Stahl than this one",
+            ledger.version
+        ));
+    }
+    Ok(ledger)
 }
 
 /// What the ledger file held, when it was read.
@@ -936,12 +948,17 @@ fn unreadable(path: &Path, why: &str) -> String {
 /// reported, never replaced.
 pub fn load_ledger(workspace: &Path) -> LedgerRead {
     let path = matters_dir(workspace).join(LEDGER_FILE);
+    let mut path = path;
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
         // Before the ledger moved, it sat beside the history, inside the workspace.
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            match fs::read_to_string(workspace.join("portfolio/history/main").join(LEDGER_FILE)) {
-                Ok(text) => text,
+            let old = workspace.join("portfolio/history/main").join(LEDGER_FILE);
+            match fs::read_to_string(&old) {
+                Ok(text) => {
+                    path = old;
+                    text
+                }
                 Err(_) => return LedgerRead::default(),
             }
         }
@@ -964,8 +981,10 @@ pub fn load_ledger(workspace: &Path) -> LedgerRead {
     }
 }
 
-fn write_ledger(ledger: &Ledger) -> String {
-    serde_json::to_string_pretty(ledger).unwrap_or_default() + "\n"
+fn write_ledger(ledger: &Ledger) -> Result<String, String> {
+    serde_json::to_string_pretty(ledger)
+        .map(|text| text + "\n")
+        .map_err(|error| format!("couldn't encode the decision ledger: {error}"))
 }
 
 /// The day a postponed matter comes back.
@@ -1163,6 +1182,9 @@ pub fn record_markdown(
 
 // --- The backend's side ---
 
+/// Held by `decide` from the read of the ledger to its write.
+static DECIDING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 impl Backend {
     /// The workspace's directory, when one is open.
     async fn matters_workspace(&self) -> Option<PathBuf> {
@@ -1197,12 +1219,17 @@ impl Backend {
         entry: Entry,
         record: Option<RecordRequest>,
     ) -> BackendResult<Ledger> {
+        // One decision at a time, from reading the ledger to writing it: two made close together
+        // would otherwise both read the same file, and the later write would drop the earlier.
+        let _one_at_a_time = DECIDING.lock().await;
         let read = load_ledger(workspace);
         if let Some(problem) = read.problem {
             return Err(format!("Nothing was written. {problem}"));
         }
         let mut ledger = read.ledger;
         ledger.record(entry);
+        let text =
+            write_ledger(&ledger).map_err(|error| format!("Nothing was written: {error}"))?;
         let written = match &record {
             Some(request) => Some(
                 self.record_matter(
@@ -1221,11 +1248,8 @@ impl Backend {
         let saved = fs::create_dir_all(&dir)
             .map_err(|error| format!("couldn't create {}: {error}", dir.display()))
             .and_then(|()| {
-                atomic_write::write_atomic_private(
-                    &dir.join(LEDGER_FILE),
-                    write_ledger(&ledger).as_bytes(),
-                )
-                .map_err(|error| format!("couldn't save the decision ledger: {error}"))
+                atomic_write::write_atomic_private(&dir.join(LEDGER_FILE), text.as_bytes())
+                    .map_err(|error| format!("couldn't save the decision ledger: {error}"))
             });
         if let Err(error) = saved {
             // The record without its ledger entry would be listed as decided when it isn't.
@@ -1474,6 +1498,12 @@ impl State {
             .ok_or_else(|| "Records need a workspace. This portfolio is a single file.".to_string())
     }
 
+    /// Whether `workspace` is still the one open: a decision written for another one has nothing
+    /// to say about this one.
+    fn still_open(&self, workspace: &Path) -> bool {
+        self.matters_workspace().is_ok_and(|open| open == workspace)
+    }
+
     /// Load the decisions and the policy the plans are measured against.
     pub fn load_matters(&mut self) {
         if !self.is_workspace() {
@@ -1608,9 +1638,12 @@ impl State {
             currency,
         };
         let id = id.to_string();
+        let opened = workspace.clone();
         self.run(
             move |backend| async move { backend.decide(&workspace, entry, Some(request)).await },
             move |state, result: BackendResult<Ledger>| match result {
+                // Another workspace was opened meanwhile; its own load reads its own file.
+                _ if !state.still_open(&opened) => {}
                 Ok(ledger) => {
                     state.matters.error = None;
                     state.matters.ledger = ledger;
@@ -1668,9 +1701,12 @@ impl State {
             currency: self.currency(),
         };
         let id = id.to_string();
+        let opened = workspace.clone();
         self.run(
             move |backend| async move { backend.decide(&workspace, entry, Some(request)).await },
             move |state, result: BackendResult<Ledger>| match result {
+                // Another workspace was opened meanwhile; its own load reads its own file.
+                _ if !state.still_open(&opened) => {}
                 Ok(ledger) => {
                     state.matters.error = None;
                     state.matters.ledger = ledger;
@@ -1712,9 +1748,11 @@ impl State {
         };
         self.show_toast("Set aside until tomorrow");
         let id = id.to_string();
+        let opened = workspace.clone();
         self.run(
             move |backend| async move { backend.decide(&workspace, entry, None).await },
             move |state, result: BackendResult<Ledger>| match result {
+                _ if !state.still_open(&opened) => {}
                 Ok(ledger) => {
                     state.matters.error = None;
                     state.matters.ledger = ledger;
@@ -2213,7 +2251,7 @@ mod tests {
         ledger.record(entry(matter, Status::Signed, today, None));
         assert_eq!(ledger.entries.len(), 1);
         assert_eq!(ledger.entries[0].status, Status::Signed);
-        let text = write_ledger(&ledger);
+        let text = write_ledger(&ledger).unwrap();
         assert!(text.contains("\"id\": \"rebalance\""));
         assert_eq!(read_ledger(&text), Ok(ledger));
         assert!(read_ledger("not json").is_err());
@@ -2408,12 +2446,49 @@ mod tests {
         let entry = entry(&matter, Status::Signed, Local::now().date_naive(), None);
         assert!(!entry.figures.contains_key("class:Odd"));
         assert!(
-            read_ledger(&write_ledger(&Ledger {
-                version: 1,
-                entries: vec![entry]
-            }))
+            read_ledger(
+                &write_ledger(&Ledger {
+                    version: 1,
+                    entries: vec![entry]
+                })
+                .unwrap()
+            )
             .is_ok()
         );
+    }
+
+    /// Restores `PORTFOLIO_RS_DATA_DIR` when dropped, and keeps two tests that set it apart.
+    struct DataDir {
+        before: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DataDir {
+        /// Point the variable at `dir`, which is a scratch directory, so a test that reads it
+        /// meanwhile finds somewhere harmless.
+        fn set(dir: &Path) -> Self {
+            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let before = env::var_os("PORTFOLIO_RS_DATA_DIR");
+            // SAFETY: held under a lock, undone on drop, and the value is a scratch directory.
+            unsafe { env::set_var("PORTFOLIO_RS_DATA_DIR", dir) };
+            Self {
+                before,
+                _guard: guard,
+            }
+        }
+    }
+
+    impl Drop for DataDir {
+        fn drop(&mut self) {
+            // SAFETY: as in `set`.
+            unsafe {
+                match &self.before {
+                    Some(value) => env::set_var("PORTFOLIO_RS_DATA_DIR", value),
+                    None => env::remove_var("PORTFOLIO_RS_DATA_DIR"),
+                }
+            }
+        }
     }
 
     #[test]
@@ -2422,6 +2497,9 @@ mod tests {
         let (matter, entry) = sample();
         let first = scratch("first");
         let second = scratch("second");
+        // Both workspaces share the one place the environment names for history.
+        let shared = scratch("shared");
+        let _data_dir = DataDir::set(&shared);
         assert!(matters_dir(&first).starts_with(&first));
         assert_ne!(matters_dir(&first), matters_dir(&second));
         let backend = backend(&first, &runtime);
@@ -2431,6 +2509,96 @@ mod tests {
         assert_eq!(load_ledger(&first).ledger.entries.len(), 1);
         assert!(load_ledger(&second).ledger.entries.is_empty());
         assert!(decisions(&second).is_empty());
+        assert!(
+            !shared.join(LEDGER_FILE).exists() && !shared.join("history/main").exists(),
+            "nothing went to the environment's directory"
+        );
+    }
+
+    #[test]
+    fn decisions_made_close_together_both_end_up_in_the_file() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (matter, entry) = sample();
+        for round in 0..40 {
+            let dir = scratch(&format!("serial-{round}"));
+            let backend = backend(&dir, &runtime);
+            let mut other = entry.clone();
+            other.id = "other".to_string();
+            let (a, b) = runtime.block_on(async {
+                let first = {
+                    let (backend, dir, entry) = (backend.clone(), dir.clone(), entry.clone());
+                    let request = request(&matter);
+                    backend
+                        .clone()
+                        .run(async move { backend.decide(&dir, entry, Some(request)).await })
+                };
+                let second = {
+                    let (backend, dir) = (backend.clone(), dir.clone());
+                    let other = other.clone();
+                    backend
+                        .clone()
+                        .run(async move { backend.decide(&dir, other, None).await })
+                };
+                (first.await, second.await)
+            });
+            a.unwrap();
+            b.unwrap();
+            let ids: Vec<_> = load_ledger(&dir)
+                .ledger
+                .entries
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect();
+            assert_eq!(ids.len(), 2, "round {round}: {ids:?}");
+            assert!(ids.contains(&entry.id) && ids.contains(&"other".to_string()));
+        }
+    }
+
+    #[test]
+    fn a_ledger_from_a_newer_version_is_kept_and_never_lowered() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (matter, entry) = sample();
+        let dir = scratch("newer");
+        let path = dir.join("portfolio/matters.json");
+        let text = r#"{"version":2,"entries":[{"id":"x","kind":"rebalance","status":"signed","at":"2026-01-01","policy":"P"}]}"#;
+        fs::write(&path, text).unwrap();
+        let read = load_ledger(&dir);
+        let problem = read.problem.expect("a newer ledger is reported");
+        assert!(problem.contains("version 2"), "{problem}");
+        let error = runtime
+            .block_on(backend(&dir, &runtime).decide(&dir, entry, Some(request(&matter))))
+            .expect_err("refused");
+        assert!(error.starts_with("Nothing was written"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text, "byte for byte");
+        assert!(decisions(&dir).is_empty());
+        let mut ledger = Ledger {
+            version: 2,
+            entries: Vec::new(),
+        };
+        ledger.record(sample().1);
+        assert_eq!(ledger.version, 2, "recording never lowers a version");
+    }
+
+    #[test]
+    fn an_unreadable_old_ledger_is_named_by_its_old_path() {
+        let dir = scratch("old-path");
+        let old = dir.join("portfolio/history/main");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join(LEDGER_FILE), "{ oops").unwrap();
+        let problem = load_ledger(&dir).problem.expect("reported");
+        assert!(
+            problem.contains(&old.join(LEDGER_FILE).display().to_string()),
+            "{problem}"
+        );
+        assert!(
+            !problem.contains(
+                &dir.join("portfolio")
+                    .join(LEDGER_FILE)
+                    .display()
+                    .to_string()
+            ),
+            "{problem}"
+        );
     }
 
     #[cfg(unix)]

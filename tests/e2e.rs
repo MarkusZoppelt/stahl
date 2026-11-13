@@ -5124,3 +5124,31 @@ fn a_key_held_for_its_time_and_released_signs() {
     assert_eq!(app.rt.state.matters.ledger.entries.len(), 1);
     assert_eq!(decision_files(&app).len(), 1);
 }
+
+// --- A decision belongs to the workspace it was made in ---
+
+#[test]
+fn a_decision_finished_after_a_workspace_switch_changes_nothing_in_state() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.matters.decisions_loaded = true;
+    app.rt.state.sign_matter("rebalance");
+    // Another workspace is opened before the write comes back.
+    app.rt.state.open.workspace_dir = Some(
+        app.dir
+            .path()
+            .join("elsewhere")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    app.rt.state.toast = None;
+    app.rt.state.settle();
+    assert!(
+        app.rt.state.toast.is_none(),
+        "no 'Recorded' for the wrong workspace"
+    );
+    assert!(
+        app.rt.state.matters.decisions_loaded,
+        "the other workspace's records were not marked stale"
+    );
+    assert!(app.rt.state.matters.error.is_none());
+}
