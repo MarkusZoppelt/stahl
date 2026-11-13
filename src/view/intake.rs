@@ -268,7 +268,7 @@ pub fn reason(why: &Aside, privacy: bool) -> String {
              holding."
         ),
         Aside::NotATrade(word) => format!("“{word}” is not a purchase or a sale."),
-        Aside::Cancelled(word) => {
+        Aside::Cancelled(word, _) => {
             format!("“{word}” takes a trade back, so it is not read as a purchase or a sale.")
         }
         Aside::Total => "A total, not a trade.".to_string(),

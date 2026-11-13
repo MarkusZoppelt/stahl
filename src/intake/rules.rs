@@ -628,8 +628,9 @@ impl Entry {
 pub enum Aside {
     /// A row that isn't a trade: a dividend, a deposit, a fee. Holds the row's word for it.
     NotATrade(String),
-    /// A trade taken back (a Storno, a reversal). Holds the row's word for it.
-    Cancelled(String),
+    /// A trade taken back (a Storno, a reversal). Holds the row's word for it, and the ticker,
+    /// ISIN and name the row gives for its security, as written (none when it names none).
+    Cancelled(String, Vec<String>),
     /// A total or a subtotal.
     Total,
     /// Couldn't be read with certainty, and why.
@@ -977,7 +978,14 @@ fn entry(record: &Record, mapping: &Mapping, shape: Shape) -> Result<Option<Entr
     let word_kind = match &kind_word {
         Some(word) => match kind_of(&word.text) {
             Some(Ok(kind)) => Some(kind),
-            Some(Err(word)) if is_cancellation(&word) => return Err(Aside::Cancelled(word)),
+            Some(Err(word)) if is_cancellation(&word) => {
+                let of = [Role::Ticker, Role::Isin, Role::Name]
+                    .into_iter()
+                    .filter_map(|role| text_at(record, mapping, role))
+                    .map(|text| text.text)
+                    .collect();
+                return Err(Aside::Cancelled(word, of));
+            }
             Some(Err(word)) => return Err(Aside::NotATrade(word)),
             None => {
                 return Err(unsure(format!(

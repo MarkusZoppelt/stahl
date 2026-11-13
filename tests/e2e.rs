@@ -4856,10 +4856,106 @@ fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
     app.click("intake-accept-all");
     let after = counts(&app);
     assert_ne!(after, before, "the good rows were recorded");
-    let gold = |list: &[(String, f64)]| list.iter().map(|(_, count)| count).sum::<f64>();
-    // Only the one purchase of GLD and the one of TLT or SPY changed anything: the Storno,
-    // the transfer and the unknown kind moved no count.
-    assert!(gold(&after) - gold(&before) <= 3.0 + 1e-9);
+    // The Storno takes a GLD trade back and doesn't say which, so every GLD proposal is doubted
+    // and kept out of Accept all: GLD's count does not move.
+    let gld = |app: &Harness| {
+        app.rt
+            .state
+            .positions
+            .iter()
+            .filter(|position| position.ticker.as_deref() == Some("GLD"))
+            .map(|position| position.amount)
+            .sum::<f64>()
+    };
+    let mut fresh = Harness::boot(true, None);
+    let gld_before = gld(&fresh);
+    dropped(&mut fresh, "set-aside.csv");
+    fresh.click("intake-accept-all");
+    assert_eq!(
+        gld(&fresh),
+        gld_before,
+        "the cancelled purchase isn't taken"
+    );
+    let review = fresh.rt.state.intake.as_ref().expect("the sheet stays up");
+    let ledger = review.ledger.as_ref().unwrap();
+    let proposal = ledger
+        .proposals
+        .iter()
+        .find(|proposal| {
+            matches!(&proposal.change, Change::Trades { holding, .. }
+                if holding.ticker.as_deref() == Some("GLD"))
+        })
+        .expect("the GLD proposal is still listed");
+    assert!(!proposal.in_all);
+    assert!(
+        proposal
+            .doubts
+            .iter()
+            .any(|doubt| doubt.contains("Line 6") && doubt.contains("Storno Kauf"))
+    );
+    assert!(fresh.has_text("takes back a trade of this security"));
+}
+
+#[test]
+fn a_second_undo_past_an_edit_is_refused_and_the_edit_stays() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit between the two imports, with no toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click("intake-accept-1");
+    assert_eq!(app.rt.state.intake_undo.len(), 2);
+    assert_ne!(counts(&app), edited, "the second import changed something");
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert_eq!(counts(&app), edited, "the second import is taken back");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert_eq!(counts(&app), edited, "the edit and the first import stay");
+}
+
+#[test]
+fn a_file_dropped_on_a_past_day_is_compared_with_today() {
+    let mut today = Harness::boot(true, None);
+    dropped(&mut today, "de-transactions.csv");
+    let expected = today
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+
+    let mut past = Harness::boot(true, None);
+    past.rt.state.travel(Some(10));
+    past.settle();
+    assert!(past.rt.state.in_past());
+    dropped(&mut past, "de-transactions.csv");
+    assert!(!past.rt.state.in_past(), "opening a file returns to today");
+    let got = past
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+    assert_eq!(got, expected, "the proposals match today's holdings");
 }
 
 #[test]
