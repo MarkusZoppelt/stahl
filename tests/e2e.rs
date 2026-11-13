@@ -3674,14 +3674,21 @@ fn the_first_sentence_arrives_word_by_word() {
         later.split_whitespace().count() > words,
         "more words have arrived: {early:?} then {later:?}"
     );
-    assert!(
-        "Since Saturday you are up €291.41. Bitcoin did most of the work, which will surprise nobody."
-            .starts_with(&later),
-        "what is shown is the sentence from its start: {later:?}"
-    );
-    // And it finishes.
+    // And it finishes, as the sentence that was arriving from its start. The day it names is
+    // the last one looked at, so it moves with the calendar.
     app.settle();
-    assert!(app.has_text("which will surprise nobody"));
+    let finished = sentence(&app);
+    assert!(
+        finished.starts_with(&later),
+        "what is shown is the sentence from its start: {later:?} then {finished:?}"
+    );
+    assert!(
+        finished.starts_with("Since ")
+            && finished.ends_with(
+                " you are up €291.41. Bitcoin did most of the work, which will surprise nobody."
+            ),
+        "{finished:?}"
+    );
 }
 
 #[test]
