@@ -183,6 +183,9 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              # reqwest's TLS reads the system's CA certificates when a client is built, and the
+              # Linux sandbox has none; the provider tests build one.
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             }
           );
         };

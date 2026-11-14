@@ -139,7 +139,7 @@ pub fn figures(s: &State, query: &str) -> Vec<Answer> {
 /// Today's change of a set of positions, in percent of what they were worth yesterday. A position
 /// without a ticker (cash) doesn't move. One with a ticker but no change leaves the set unknown,
 /// rather than a number invented from the rest. A set with nothing priced has no today's change.
-fn change_of<'a>(positions: impl IntoIterator<Item = &'a PositionDto>) -> Option<f64> {
+pub fn change_of<'a>(positions: impl IntoIterator<Item = &'a PositionDto>) -> Option<f64> {
     let mut now = 0.0;
     let mut before = 0.0;
     let mut priced = false;

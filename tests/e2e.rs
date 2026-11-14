@@ -203,6 +203,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         app.click(page.key());
@@ -1010,6 +1011,7 @@ fn every_empty_page_says_what_belongs_there() {
         ),
         (Page::Review, "No policy yet", "review-set-policy"),
         (Page::Rebalance, "No policy yet", "rebalance-set-policy"),
+        (Page::Records, "The room is empty", "records-empty-add"),
     ] {
         app.click(page.key());
         assert_eq!(app.rt.state.page, page);
@@ -2802,6 +2804,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         let tabbed = [Page::Overview, Page::Holdings, Page::Performance].contains(&page);
@@ -3564,4 +3567,378 @@ fn the_door_can_be_turned_by_hand_and_by_the_keyboard() {
         "a keyboard reaches the dial: {}",
         cold.rt.state.dial_hand
     );
+}
+
+// --- Counsel ---
+
+#[test]
+fn counsel_answers_a_typed_question_with_blocks() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert!(app.has_text("What would you like to know?"));
+
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    let turn = &app.rt.state.ask.turns[0];
+    assert_eq!(turn.question, "What changed this month?");
+    assert_eq!(turn.phase, stahl::ask::Phase::Done);
+    assert!(
+        turn.blocks.len() >= 4,
+        "the answer is made of several blocks: {:?}",
+        turn.blocks
+    );
+    assert!(
+        app.has_text("Bitcoin did most of the work"),
+        "the first sentence is on the page"
+    );
+    assert!(app.exists("ask-0-2-chart"), "the chart block is drawn");
+    assert!(
+        app.has_text("€107,400.00"),
+        "the figure block shows the app's own total"
+    );
+    assert!(!app.rt.state.thinking(), "nothing is still in flight");
+}
+
+#[test]
+fn thinking_is_true_from_sending_until_the_answer_finishes() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How is Bitcoin doing?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.rt.state.thinking(), "the app says it is working");
+    assert!(app.exists("ask-stop"), "there is a way to stop it");
+    app.settle();
+    app.settle();
+    assert!(!app.rt.state.thinking());
+    assert!(
+        app.exists("ask-send"),
+        "the input asks again when it is done"
+    );
+}
+
+#[test]
+fn escape_stops_an_answer_in_flight() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(app.rt.state.ask.streaming, "the first block has landed");
+    let shown = app.rt.state.ask.turns[0].blocks.len();
+    assert!((1..5).contains(&shown), "the answer was still arriving");
+
+    app.press(Key::Escape);
+    assert_eq!(app.rt.state.ask.turns[0].phase, stahl::ask::Phase::Stopped);
+    assert!(!app.rt.state.thinking());
+    assert!(app.has_text("Stopped. Ask again whenever you like."));
+    // Nothing else arrives after the stop.
+    let stopped = app.rt.state.ask.turns[0].blocks.len();
+    for _ in 0..90 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(app.rt.state.ask.turns[0].blocks.len(), stopped);
+}
+
+/// A model that writes a figure itself, to check what the page does with it.
+struct MadeUp;
+
+impl stahl::ask::Model for MadeUp {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is 31.4% of the portfolio."}"#.to_string(),
+        )
+    }
+}
+
+/// A model that only quotes the fact table.
+struct Computed;
+
+impl stahl::ask::Model for Computed {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is {class.crypto.share} of the portfolio."}"#
+                .to_string(),
+        )
+    }
+}
+
+#[test]
+fn a_figure_the_model_made_up_is_marked_unverified() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    let help = |app: &Harness, key: &str| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .and_then(|element| element.help.clone())
+            .unwrap_or_default()
+    };
+
+    app.rt.state.model = Arc::new(MadeUp);
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 31.4% of the portfolio."));
+    assert!(
+        help(&app, "ask-0-0-say").contains("Stahl didn't compute"),
+        "the invented figure is marked unverified"
+    );
+
+    app.rt.state.model = Arc::new(Computed);
+    app.click("ask-input");
+    app.type_text("And again?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 25.1% of the portfolio."));
+    assert!(
+        help(&app, "ask-1-0-say").is_empty(),
+        "a figure from the fact table is not marked"
+    );
+}
+
+#[test]
+fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend
+    );
+    assert!(
+        (app.rt.state.rebalance.fraction - 0.5).abs() < 1e-9,
+        "half the way, as the answer said"
+    );
+    assert!(app.has_text("Go 50% of the way"));
+}
+
+#[test]
+fn the_palette_asks_counsel_what_was_typed() {
+    let mut app = Harness::boot(true, None);
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(
+        app.has_text("Ask counsel: what changed this month?"),
+        "the typed question is the first row"
+    );
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin did most of the work"));
+}
+
+#[test]
+fn the_overview_line_asks_what_was_typed_there() {
+    let mut app = Harness::boot(true, None);
+    app.click("overview-ask");
+    app.type_text("How is Bitcoin doing?");
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin is €27,000.00"));
+}
+
+#[test]
+fn a_suggested_question_on_the_overview_asks_it() {
+    let mut app = Harness::boot(true, None);
+    assert!(app.exists("overview-ask-0"));
+    app.click("overview-ask-0");
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "Why is Crypto off its target?"
+    );
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Because prices moved and you did not."));
+}
+
+#[test]
+fn a_question_to_a_provider_asks_before_it_goes() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("https://api.example.com/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(app.rt.state.consent.is_some(), "the prompt asks first");
+    assert!(app.exists("consent-panel"));
+    assert!(app.has_text("api.example.com"));
+
+    app.click("consent-show");
+    assert!(
+        app.has_text("You are Counsel"),
+        "the exact system prompt is shown"
+    );
+    assert!(app.has_text("\"stream\": true"));
+
+    app.click("consent-cancel");
+    assert!(app.rt.state.consent.is_none());
+    assert_eq!(
+        app.rt.state.ask.input.text, "What changed this month?",
+        "the question goes back in the input"
+    );
+    assert!(app.rt.state.ask.turns.is_empty(), "nothing was sent");
+    assert!(
+        !app.dir.path().join("ask-consent.json").exists(),
+        "nothing was remembered"
+    );
+}
+
+#[test]
+fn a_question_to_this_computer_needs_no_prompt() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://127.0.0.1:11434/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    assert!(
+        app.has_text("on this computer"),
+        "the line under the input says where it goes"
+    );
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(
+        app.rt.state.consent.is_none(),
+        "a provider on this machine is not asked about"
+    );
+    // It goes straight out: nothing to allow, and a turn is on its way.
+    app.settle();
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "What changed this month?"
+    );
+}
+
+#[test]
+fn without_a_model_the_app_answers_what_it_knows() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is €27,000.00"));
+    assert!(app.has_text("or 25.1% of the portfolio"));
+    assert!(
+        !app.has_text("needs a model"),
+        "a figure the app knows needs no model"
+    );
+    assert!(app.exists("ask-0-1-figure-0"), "the figures are drawn");
+}
+
+#[test]
+fn without_a_model_an_unknown_question_says_how_to_get_one() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Should I buy a house?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("needs a model"));
+    assert!(app.has_text("local one keeps everything on this computer"));
+    app.click("ask-0-1-go-0");
+    assert_eq!(app.rt.state.page, Page::Settings);
+}
+
+#[test]
+fn a_new_record_marks_the_sidebar_until_the_wall_is_seen() {
+    let mut app = Harness::boot(true, None);
+    assert!(
+        app.rt.state.records_unseen > 0,
+        "a portfolio with history has plates the owner has not been shown"
+    );
+    let seen = app
+        .dir
+        .path()
+        .join("portfolio/portfolio/history/main/records-seen.json");
+    assert!(
+        !seen.exists(),
+        "nothing is written before the wall is opened"
+    );
+
+    app.click("nav-records");
+    assert_eq!(app.rt.state.page, Page::Records);
+    assert_eq!(app.rt.state.records_unseen, 0, "the mark goes once seen");
+    assert!(
+        app.rt.state.record_arrival.is_some(),
+        "the newest plate is set onto the wall once"
+    );
+    assert!(app.has_text("newest first"));
+
+    // What was shown is remembered beside the history, by id, with no amounts in it.
+    let written = fs::read_to_string(&seen).unwrap();
+    assert!(written.contains(":begins"), "{written}");
+    assert!(!written.contains('\u{20ac}'), "{written}");
+
+    // Coming back, the wall is simply there: no second ceremony, no mark.
+    app.click(Page::Overview.key());
+    app.click("nav-records");
+    assert_eq!(app.rt.state.records_unseen, 0);
+    assert!(app.rt.state.record_arrival.is_none());
+}
+
+#[test]
+fn a_plate_opens_to_its_moment_and_closes() {
+    let mut app = Harness::boot(true, None);
+    app.click("nav-records");
+    let plates = app.rt.state.records.data.clone().expect("the wall");
+    assert!(plates.len() >= 2, "the demo has a wall: {}", plates.len());
+    let id = plates[0].id.clone();
+
+    app.click(&format!("plate-{id}"));
+    assert_eq!(app.rt.state.record_plate.as_deref(), Some(id.as_str()));
+    assert!(app.exists("record-back"), "a way back to the wall");
+    assert!(app.exists("record-chart"), "the moment, on the chart");
+
+    app.press(Key::Escape);
+    assert!(app.rt.state.record_plate.is_none());
+    assert!(app.exists(&format!("plate-{id}")), "the plate is back");
 }
