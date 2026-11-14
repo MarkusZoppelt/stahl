@@ -3304,6 +3304,41 @@ fn the_door_opens_once_from_welcome_and_a_refresh_does_not_replay_it() {
 }
 
 #[test]
+fn the_door_counts_what_the_page_asks() {
+    let mut app = Harness::boot_tall(true);
+    let label = |app: &Harness| element(app, "door-sidebar").label;
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("Stahl Capital. 1 thing needs attention")
+    );
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    for _ in 0..150 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
+    );
+    assert!(!app.exists("door-attention-sidebar"));
+    assert!(app.has_text("Nothing needs your signature today."));
+}
+
+#[test]
+fn the_mark_stays_until_both_plans_are_decided() {
+    let mut app = Harness::boot_tall(true);
+    let one = Some("Stahl Capital. 1 thing needs attention");
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    assert_eq!(element(&app, "door-sidebar").label.as_deref(), one);
+    app.click("matter-postpone-cash-place");
+    assert_eq!(
+        element(&app, "door-sidebar").label.as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
+    );
+}
+
+#[test]
 fn launched_into_a_portfolio_opens_the_door_once_and_marks_what_needs_attention() {
     use portfolio_rs::mcp::dto::{Category, Finding, Severity};
 
