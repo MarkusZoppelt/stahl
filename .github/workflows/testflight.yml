@@ -2,7 +2,7 @@ name: TestFlight
 
 # Every push to main becomes a TestFlight build of the iPhone and iPad app (ios/testflight.sh).
 # The certificate, profile and API key live only in a keychain and files made for this job and
-# deleted after it. A run without the secrets (a fork) builds nothing and says so.
+# deleted after it. A fork without the secrets builds nothing and says so; here a missing secret fails the run.
 on:
   push:
     branches: [main]
@@ -20,24 +20,30 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 90
     env:
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
-      DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
-      DISTRIBUTION_CER: ${{ secrets.DISTRIBUTION_CER }}
-      APPSTORE_PROFILE: ${{ secrets.APPSTORE_PROFILE }}
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
       CARGO_TARGET_DIR: ${{ github.workspace }}/ios/rust/target
     steps:
       - uses: actions/checkout@v7
 
       - name: check the secrets are there
         id: secrets
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          DISTRIBUTION_CER: ${{ secrets.DISTRIBUTION_CER }}
+          APPSTORE_PROFILE: ${{ secrets.APPSTORE_PROFILE }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          REPO: ${{ github.repository }}
         run: |
           for name in APPLE_TEAM_ID DEVELOPER_ID_P12 DEVELOPER_ID_P12_PASSWORD DISTRIBUTION_CER \
             APPSTORE_PROFILE ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
             if [ -z "${!name}" ]; then
+              if [ "$REPO" = MarkusZoppelt/stahl ]; then
+                echo "::error::$name isn't set"
+                exit 1
+              fi
               echo "::notice::$name isn't set, so there is no TestFlight build"
               echo "go=false" >> "$GITHUB_OUTPUT"
               exit 0
@@ -63,6 +69,12 @@ jobs:
 
       - name: put the signing material in a throwaway keychain
         if: steps.secrets.outputs.go == 'true'
+        env:
+          DEVELOPER_ID_P12: ${{ secrets.DEVELOPER_ID_P12 }}
+          DEVELOPER_ID_P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+          DISTRIBUTION_CER: ${{ secrets.DISTRIBUTION_CER }}
+          APPSTORE_PROFILE: ${{ secrets.APPSTORE_PROFILE }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
         run: |
           keychain="$RUNNER_TEMP/signing.keychain-db"
           password=$(openssl rand -hex 24)
@@ -90,6 +102,9 @@ jobs:
       - name: build, sign and upload to TestFlight
         if: steps.secrets.outputs.go == 'true'
         env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           STAHL_PROFILE_FILE: ${{ runner.temp }}/profile.mobileprovision
           ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: ios/testflight.sh --upload "$APPLE_TEAM_ID" "$GITHUB_RUN_NUMBER"

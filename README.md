@@ -103,7 +103,8 @@ Without them, a pull request or a manual run still builds, ad-hoc signed.
 
 Every push to `main` also builds the iPhone and iPad app and uploads it to TestFlight
 (`.github/workflows/testflight.yml`), signed with the Apple Distribution certificate:
-`DISTRIBUTION_P12`, `DISTRIBUTION_P12_PASSWORD`, `APPLE_TEAM_ID` and the same API key.
+`DEVELOPER_ID_P12` and `DEVELOPER_ID_P12_PASSWORD` (the same private key), `DISTRIBUTION_CER`,
+`APPSTORE_PROFILE`, `APPLE_TEAM_ID` and the same API key. A missing one fails the run.
 
 ## License
 
