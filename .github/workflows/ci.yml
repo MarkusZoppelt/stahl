@@ -11,6 +11,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  secrets:
+    name: no secrets in the repo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: gitleaks (the whole history)
+        run: nix run nixpkgs#gitleaks -- git --no-banner --redact --exit-code 1 .
+
+      - name: no signing files tracked
+        run: |
+          if git ls-files | grep -iE '\.(p8|p12|pfx|pem|key|cer|mobileprovision|provisionprofile|keychain(-db)?)$|AuthKey_'; then
+            echo "signing material is tracked; remove it and rotate it"; exit 1
+          fi
+
   nix:
     name: nix flake check (${{ matrix.system }})
     strategy:

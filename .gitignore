@@ -6,3 +6,18 @@
 .DS_Store
 .env
 .env.local
+
+# Signing material never enters the repo: certificates, keys, profiles, keychains.
+*.p8
+*.p12
+*.pfx
+*.pem
+*.key
+*.cer
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+AuthKey_*
+private_keys/
+APPLE.md
