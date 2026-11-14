@@ -5,7 +5,12 @@
 //! cargo run --example demo
 //! cargo run --example demo -- --snap holdings.png --scene holdings --at 2
 //! cargo run --example demo -- --list-scenes
+//! cargo run --example demo -- --skip-opening
 //! ```
+//!
+//! `--skip-opening` starts on the open portfolio, with its door already played. The landing
+//! page's tour passes it, because that page has its own door. `--ai` turns AI features on,
+//! which that tour also passes: Counsel and its suggestions are where the script points.
 
 use std::{env, fs, path::Path, process, time::SystemTime};
 

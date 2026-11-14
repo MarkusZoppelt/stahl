@@ -7,8 +7,8 @@
 # ffmpeg and cwebp come from nixpkgs, so nothing beyond Nix is needed.
 set -euo pipefail
 
-if ! command -v ffmpeg >/dev/null || ! command -v cwebp >/dev/null; then
-  exec nix shell nixpkgs#ffmpeg nixpkgs#libwebp --command "$0" "$@"
+if ! command -v ffmpeg >/dev/null || ! command -v cwebp >/dev/null || ! command -v faketime >/dev/null; then
+  exec nix shell nixpkgs#ffmpeg nixpkgs#libwebp nixpkgs#libfaketime --command "$0" "$@"
 fi
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,11 +24,17 @@ export TMPDIR="$work"
 
 size=1320x860
 
+# The made-up portfolio's "today" is this afternoon, so a later run draws the same day and the
+# same clock. AI features are off unless asked; the page shows them on.
+run() { # demo arguments...
+  faketime '2026-11-12 20:49:00' "$demo" --ai "$@"
+}
+
 # A still at 2x, as WebP. Text stays sharp at the size the page shows it.
 still() { # name [demo arguments...]
   local name=$1
   shift
-  "$demo" --snap "$work/$name.png" --size "$size" "$@" 2>/dev/null
+  run --snap "$work/$name.png" --size "$size" "$@" 2>/dev/null
   cwebp -quiet -q 86 -m 6 -resize 1980 0 "$work/$name.png" -o "$media/$name.webp"
 }
 
@@ -41,7 +47,7 @@ hidden() { # name nav-key
   { "t": 3.0, "type": "mark", "name": "end" }
 ]
 EOF
-  "$demo" --snap "$work/$1-hidden.png" --size "$size" --script "$work/$2.json" --at 3 2>/dev/null
+  run --snap "$work/$1-hidden.png" --size "$size" --script "$work/$2.json" --at 3 2>/dev/null
   cwebp -quiet -q 80 -m 6 -resize 1980 0 "$work/$1-hidden.png" -o "$media/$1-hidden.webp"
 }
 
@@ -56,8 +62,10 @@ for page in overview holdings allocation performance review rebalance policy bri
 done
 
 # The tour: real input replayed headless, every frame from the renderer. Keycaps and press ripples
-# are Rune's own overlays. Encoded twice, because the renderer's encoder aims at quality, not size.
-"$demo" --size "$size" --scale 1.5 --fps 60 --script "$media/tour.json" \
+# are Rune's own overlays. `--skip-opening` starts on the Overview: the page has its own door, and
+# this recording must not play the app's. `--ai` comes from `run`, with the stills. Encoded twice,
+# because the renderer's encoder aims at quality, not size.
+run --skip-opening --size "$size" --scale 1.5 --fps 60 --script "$media/tour.json" \
   --video "$work/tour.mp4" --duration auto --keys bottom-right --pointer 2>/dev/null
 ffmpeg -hide_banner -loglevel error -y -i "$work/tour.mp4" \
   -c:v libx264 -preset veryslow -crf 25 -pix_fmt yuv420p -movflags +faststart -an "$media/tour.mp4"

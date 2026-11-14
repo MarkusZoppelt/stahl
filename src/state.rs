@@ -880,6 +880,9 @@ pub struct State {
     /// The opening has played for the portfolio now open: it never replays on a refresh or a page
     /// change.
     opening_seen: bool,
+    /// The opening door is waived for this whole run, including while no portfolio is open yet.
+    /// A recording that should start on the page sets this. The running app never does.
+    opening_waived: bool,
     /// The door's opening, while it is playing.
     pub opening: Option<Opening>,
     /// Show the welcome screen until this time even with a portfolio open, so a scene can paint
@@ -1209,6 +1212,7 @@ impl State {
             high_day: None,
             shader_view: false,
             opening_seen: false,
+            opening_waived: false,
             opening: None,
             hold_welcome_until: None,
             welcome_door: None,
@@ -1740,6 +1744,12 @@ impl State {
     /// middle. Once per opened portfolio: a refresh, a page change or a redraw never comes
     /// through here again. Returns whether anything changed.
     fn opening_arrives(&mut self, now: f64, from_welcome: bool, tx: &mut Tx) -> bool {
+        // A recording asked to start on the page. This comes before the reset below: with no
+        // portfolio open yet, that reset forgets a one-shot skip.
+        if self.opening_waived {
+            self.opening_seen = true;
+            return self.opening.take().is_some();
+        }
         if !self.shell_showing() {
             if !self.has_portfolio() {
                 self.opening_seen = false;
@@ -1775,6 +1785,15 @@ impl State {
 
     /// Scenes only: the app has already opened this portfolio, so a scene can show it at rest.
     pub fn skip_opening(&mut self) {
+        self.opening_seen = true;
+        self.opening = None;
+    }
+
+    /// Don't play the opening door on this run. It holds through the moment before a portfolio
+    /// has loaded, which is when [`Self::skip_opening`] would be forgotten. The demo's
+    /// `--skip-opening` uses this so a recording can start on the page.
+    pub fn waive_opening(&mut self) {
+        self.opening_waived = true;
         self.opening_seen = true;
         self.opening = None;
     }

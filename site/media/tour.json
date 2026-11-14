@@ -1,8 +1,9 @@
 [
   { "t": 0.0, "type": "mark", "name": "overview" },
-  { "t": 2.7, "type": "move", "x": 360, "y": 392 },
-  { "t": 3.3, "type": "move", "x": 555, "y": 392 },
-  { "t": 3.9, "type": "move", "x": 770, "y": 392 },
+  { "t": 1.8, "type": "scroll", "x": 700, "y": 500, "dy": -500, "dur": 0.5 },
+  { "t": 2.7, "type": "move", "x": 360, "y": 574 },
+  { "t": 3.3, "type": "move", "x": 555, "y": 574 },
+  { "t": 3.9, "type": "move", "x": 770, "y": 574 },
 
   { "t": 4.6, "type": "mark", "name": "holdings" },
   { "t": 4.6, "type": "tap", "key": "nav-holdings" },

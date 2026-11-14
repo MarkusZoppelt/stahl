@@ -3433,6 +3433,39 @@ fn the_door_opens_once_from_welcome_and_a_refresh_does_not_replay_it() {
 }
 
 #[test]
+fn waiving_the_opening_never_plays_the_door() {
+    offline();
+    let tokio = Tokio::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("portfolio");
+    demo::seed_workspace(&root);
+    let workspace = root.to_string_lossy().into_owned();
+    let backend = demo::backend(dir.path(), Some(&root), tokio.handle().clone());
+    let mut rt = app::headless(backend, None, (1320.0, 860.0));
+    assert!(
+        rt.state.opening.is_none() && rt.state.door_arrivals == 0,
+        "startup has not played the door yet"
+    );
+    rt.state.waive_opening();
+    // Back on the welcome screen, where a one-shot skip is forgotten, then open again.
+    rt.update(|state, _| state.reset());
+    rt.state.settle();
+    rt.frame(1.0 / 60.0);
+    rt.update(|state, _| state.load_workspace(workspace));
+    rt.state.settle();
+    for _ in 0..8 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(rt.state.has_portfolio(), "the portfolio is open");
+    assert_eq!(rt.state.page, Page::Overview);
+    assert!(rt.state.opening.is_none(), "the opening door stays waived");
+    assert_eq!(
+        rt.state.door_arrivals, 0,
+        "the dial does not turn for an opening"
+    );
+}
+
+#[test]
 fn the_door_counts_what_the_page_asks() {
     let mut app = Harness::boot_tall(true);
     let label = |app: &Harness| element(app, "door-sidebar").label;

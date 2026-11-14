@@ -222,17 +222,41 @@ pub fn run(
 }
 
 /// [`run`] with named states to render, for `examples/demo.rs`.
+///
+/// `--skip-opening` and `--ai` are the demo's own flags, taken out before Rune sees the
+/// arguments. `--skip-opening` shows the portfolio at rest, its opening door already played.
+/// `--ai` turns AI features on. The landing page's tour passes both: the page has its own door,
+/// and Counsel is where the script points.
 pub fn run_with_scenes(
     backend: Backend,
     rune_args: Vec<String>,
     scenes: &'static [Scene],
 ) -> Result<(), String> {
+    let mut skip_opening = false;
+    let mut ai = false;
+    let mut kept = Vec::with_capacity(rune_args.len());
+    for arg in rune_args {
+        if arg == "--skip-opening" {
+            skip_opening = true;
+        } else if arg == "--ai" {
+            ai = true;
+        } else {
+            kept.push(arg);
+        }
+    }
     let spec = AppSpec { scenes, ..spec() };
     launch(
         with_menus(configured(spec, move || {
-            State::new(backend, None).with_model(Arc::new(demo::ScriptedModel))
+            let mut state = State::new(backend, None).with_model(Arc::new(demo::ScriptedModel));
+            if skip_opening {
+                state.waive_opening();
+            }
+            if ai {
+                state.set_ai(true);
+            }
+            state
         }))
-        .args(rune_args),
+        .args(kept),
     )
 }
 
