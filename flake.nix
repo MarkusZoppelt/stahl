@@ -54,16 +54,35 @@
           libxcb
         ];
 
+        # The app embeds its fonts and its mark.
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          name = "source";
+          filter = path: type:
+            (craneLib.filterCargoSources path type)
+            || (pkgs.lib.hasInfix "/assets/" path
+              && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null));
+        };
+
+        # rune-fx reads Rune's shaders from its sibling crate (`../../rune/src/*.wgsl`), but crane
+        # vendors each crate of a git checkout on its own. Put Rune's `src` where rune-fx looks.
+        cargoVendorDir = let
+          vendored = craneLib.vendorCargoDeps {inherit src;};
+        in
+          pkgs.runCommand "vendor-cargo-deps-rune-shaders" {} ''
+            cp -rL ${vendored} $out
+            chmod -R u+w $out
+            substituteInPlace $out/config.toml --replace-quiet ${vendored} $out
+            for fx in $out/*/rune-fx-*; do
+              checkout=$(dirname "$fx")
+              rune=$(find "$checkout" -maxdepth 1 -type d -name 'rune-[0-9]*' | head -n 1)
+              mkdir -p "$checkout/rune"
+              cp -r "$rune/src" "$checkout/rune/src"
+            done
+          '';
+
         commonArgs = {
-          # The app embeds its fonts and its mark.
-          src = pkgs.lib.cleanSourceWith {
-            src = ./.;
-            name = "source";
-            filter = path: type:
-              (craneLib.filterCargoSources path type)
-              || (pkgs.lib.hasInfix "/assets/" path
-                && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null));
-          };
+          inherit src cargoVendorDir;
           strictDeps = true;
 
           nativeBuildInputs = with pkgs;
