@@ -1,6 +1,6 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::{env, mem, path::Path};
+use std::{env, fs, io::Read, mem, path::Path};
 
 use rune::{
     Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
@@ -27,6 +27,7 @@ pub mod guide;
 mod insights;
 mod intake;
 pub mod matters;
+pub mod outlook;
 mod overlays;
 mod overview;
 pub mod past;
@@ -191,11 +192,36 @@ fn drops_work() -> bool {
         && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
 }
 
-/// Whether a dropped file is a broker's export, which goes to the review sheet.
+/// Whether a dropped file goes to the review sheet rather than opening as a portfolio. Decided
+/// by what is in it, not what it is called: a PDF, a workbook or a `.txt` export reaches the
+/// sheet, which says why it can't read one. Only a folder, an encrypted file or positions JSON
+/// opens as a portfolio.
 fn is_broker_file(path: &Path) -> bool {
-    path.extension()
+    if path.is_dir() {
+        return false;
+    }
+    let mut start = [0u8; 512];
+    let read = fs::File::open(path)
+        .and_then(|mut file| file.read(&mut start))
+        .unwrap_or(0);
+    let start = &start[..read];
+    if start.starts_with(b"%PDF")
+        || start.starts_with(b"PK\x03\x04")
+        || start.starts_with(&[0xd0, 0xcf, 0x11, 0xe0])
+    {
+        return true;
+    }
+    // Positions are JSON, or encrypted (`-----BEGIN PGP` armour, or binary packets).
+    let start = start.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(start);
+    let json = start
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| matches!(byte, b'[' | b'{'));
+    let gpg = path
+        .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "csv" | "tsv"))
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gpg"));
+    !(json || gpg)
 }
 
 fn welcome(s: &State, t: &Theme) -> El {

@@ -5,7 +5,7 @@
 //! the portfolio can only ever be one Stahl computed. Anything else the model writes with digits
 //! is shown as unverified.
 
-use std::{collections::VecDeque, mem};
+use std::{collections::VecDeque, mem, time::Duration};
 
 use rune::TextEdit;
 use serde::{Deserialize, Serialize};
@@ -780,11 +780,15 @@ pub fn prompt(s: &crate::state::State, table: &Table) -> String {
                 class.asset_class, class.actual_percent, class.target_percent, class.drift_percent
             ));
         }
-        for finding in &review.findings {
-            out.push_str(&format!("finding: {}. ", finding.message));
+        // The findings and the briefing are written with real money, so with amounts hidden
+        // they are left out; the classes, shares and drift above carry no amounts.
+        if !s.privacy {
+            for finding in &review.findings {
+                out.push_str(&format!("finding: {}. ", finding.message));
+            }
         }
     }
-    if let Some(briefing) = s.briefing.data.as_ref() {
+    if let Some(briefing) = s.briefing.data.as_ref().filter(|_| !s.privacy) {
         out.push_str("\n\nThe briefing Stahl wrote on this portfolio:\n");
         out.push_str(&briefing.markdown);
     }
@@ -807,7 +811,32 @@ pub struct Http {
     pub model: String,
     /// Just the host, for the line under the input and the consent question.
     pub host: String,
+    /// How long the provider may stay silent, connecting or between chunks, before the turn fails.
+    patience: Duration,
     runtime: tokio::runtime::Handle,
+}
+
+/// What the provider may go without saying a word.
+const PATIENCE: Duration = Duration::from_secs(120);
+
+/// Why a provider address can't be used, in a sentence, or `None` if it can. A provider away
+/// from this machine must be `https`, so the key and the holdings never travel in the clear.
+pub fn provider_problem(url: &str) -> Option<String> {
+    let url = url.trim();
+    let host = host_of(url);
+    match url
+        .split_once("://")
+        .map(|(scheme, _)| scheme.to_lowercase())
+    {
+        Some(scheme) if scheme == "https" => None,
+        Some(scheme) if scheme == "http" => (!is_local_host(&host)).then(|| {
+            format!(
+                "{host} would be reached without encryption. Use an https address; plain http is \
+                 for providers on this computer."
+            )
+        }),
+        _ => Some("The provider address should start with https://.".to_string()),
+    }
 }
 
 impl Http {
@@ -824,8 +853,16 @@ impl Http {
             key,
             model: model.into(),
             host,
+            patience: PATIENCE,
             runtime,
         }
+    }
+
+    /// The same provider, with less patience.
+    #[cfg(test)]
+    fn impatient(mut self, patience: Duration) -> Http {
+        self.patience = patience;
+        self
     }
 
     /// The model as the interface names it.
@@ -874,7 +911,17 @@ impl Http {
     async fn stream(self, request: Request, out: tokio::sync::mpsc::UnboundedSender<Event>) {
         let body = Http::body(&request, &self.model);
         let mut cancel = request.cancel.map(Box::pin);
-        let client = match reqwest::Client::builder().build() {
+        if let Some(problem) = provider_problem(&self.url) {
+            let _ = out.send(Event::Failed(problem));
+            return;
+        }
+        // No redirects: the key and the holdings go to the host that was allowed, and no other.
+        let client = match reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(self.patience)
+            .read_timeout(self.patience)
+            .build()
+        {
             Ok(client) => client,
             Err(error) => {
                 let _ = out.send(Event::Failed(format!(
@@ -905,6 +952,11 @@ impl Http {
                         "Stahl couldn't reach {}. Check the address in Settings.",
                         self.host
                     )
+                } else if error.is_timeout() {
+                    format!(
+                        "{} didn't answer in time. Try again in a moment.",
+                        self.host
+                    )
                 } else {
                     format!("The request to {} failed: {error}", self.host)
                 }));
@@ -914,6 +966,11 @@ impl Http {
         if !response.status().is_success() {
             let status = response.status();
             let _ = out.send(Event::Failed(match status.as_u16() {
+                300..=399 => format!(
+                    "{} sent Stahl to another address, which Stahl won't follow. Check the \
+                     address in Settings.",
+                    self.host
+                ),
                 401 | 403 => "The provider refused the key. Check it in Settings.".to_string(),
                 404 => "The provider has no such address or model. Check Settings.".to_string(),
                 429 => "The provider is busy. Try again in a moment.".to_string(),
@@ -986,9 +1043,14 @@ impl Http {
                     let _ = out.send(Event::Done);
                     return;
                 }
-                Err(_) => {
+                Err(error) => {
                     let _ = out.send(Event::Failed(
-                        "The connection closed before the answer was finished.".to_string(),
+                        if error.is_timeout() {
+                            "The provider went quiet before the answer was finished."
+                        } else {
+                            "The connection closed before the answer was finished."
+                        }
+                        .to_string(),
                     ));
                     return;
                 }
@@ -1005,6 +1067,7 @@ impl Model for Http {
             key: self.key.clone(),
             model: self.model.clone(),
             host: self.host.clone(),
+            patience: self.patience,
             runtime: self.runtime.clone(),
         };
         self.runtime
@@ -1845,6 +1908,79 @@ mod provider_tests {
     }
 
     #[test]
+    fn a_provider_that_stalls_fails_after_the_patience_runs_out() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = runtime.spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let http = Http::new(
+            format!("http://{address}/v1"),
+            None,
+            "a-model",
+            runtime.handle().clone(),
+        )
+        .impatient(Duration::from_millis(200));
+        let events = collect(&runtime, http.ask(request()));
+        held.abort();
+        assert!(
+            matches!(events.as_slice(), [Event::Failed(text)] if text.contains("in time")),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed_and_the_key_stays_home() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (elsewhere, other) = runtime.block_on(fake_provider("{}", "application/json"));
+        let target = elsewhere.clone();
+        let (url, seen) = runtime.block_on(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let seen = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0u8; 8192];
+                let _ = socket.read(&mut buffer).await.unwrap();
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {target}/chat/completions\r\nContent-Length: 0\r\n\r\n"
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            });
+            (format!("http://{address}/v1"), seen)
+        });
+        let http = Http::new(
+            url,
+            Some("sk-test".to_string()),
+            "a-model",
+            runtime.handle().clone(),
+        );
+        let events = collect(&runtime, http.ask(request()));
+        runtime.block_on(seen).unwrap();
+        assert!(
+            matches!(events.as_slice(), [Event::Failed(text)] if text.contains("another address")),
+            "{events:?}"
+        );
+        assert!(
+            !other.is_finished(),
+            "the redirect target was never contacted"
+        );
+        other.abort();
+    }
+
+    #[test]
+    fn a_remote_provider_needs_https_and_a_local_one_does_not() {
+        assert_eq!(provider_problem("https://api.example.com/v1"), None);
+        assert_eq!(provider_problem("http://localhost:11434/v1"), None);
+        assert_eq!(provider_problem("http://127.0.0.1:8080"), None);
+        assert_eq!(provider_problem("http://[::1]:8080/v1"), None);
+        let refused = provider_problem("http://example.com/v1").unwrap();
+        assert!(refused.contains("example.com") && refused.contains("https"));
+        assert!(provider_problem("example.com/v1").is_some());
+    }
+
+    #[test]
     fn stopping_drops_the_request() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
@@ -1930,6 +2066,45 @@ mod builtin_tests {
             })
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    #[test]
+    fn privacy_mode_sends_no_money_in_the_prompt() {
+        let (_runtime, _dir, mut state) = state();
+        state.load_review();
+        state.load_briefing();
+        state.settle();
+        let open = prompt(&state, &crate::facts::of(&state));
+        assert!(state.review.data.is_some() && state.briefing.data.is_some());
+        assert!(
+            open.contains("The briefing Stahl wrote"),
+            "shown when not hidden"
+        );
+
+        state.privacy = true;
+        let hidden = prompt(&state, &crate::facts::of(&state));
+        assert!(!hidden.contains('€') && !hidden.contains('$'), "{hidden}");
+        assert!(!hidden.contains("The briefing Stahl wrote"));
+        let grouped = |text: &str| {
+            text.as_bytes().windows(5).any(|w| {
+                w[0].is_ascii_digit()
+                    && (w[1] == b',' || w[1] == b'.')
+                    && w[2].is_ascii_digit()
+                    && w[3].is_ascii_digit()
+                    && w[4].is_ascii_digit()
+            })
+        };
+        assert!(
+            !grouped(&hidden),
+            "a digit group that looks like money: {hidden}"
+        );
+        let review = state.review.data.as_ref().unwrap();
+        assert!(hidden.contains("The policy review"));
+        for class in &review.allocations {
+            assert!(hidden.contains(&class.asset_class), "{}", class.asset_class);
+        }
+        assert!(hidden.contains("drift"));
+        assert!(hidden.contains("The client has hidden amounts"));
     }
 
     #[test]

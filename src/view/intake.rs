@@ -9,6 +9,7 @@ use crate::{
     intake::{
         self,
         reconcile::{Change, Ledger, Proposal, Trade},
+        rules::{self, Aside, SetAside},
         text::Sheet,
     },
     state::{Decision, IntakeReview, State},
@@ -51,6 +52,15 @@ pub fn sheet(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
             for note in &ledger.notes {
                 body = body.child(ui::caption(note.clone(), t).wrap());
             }
+            if let Some(said) = set_aside(&review.aside) {
+                body = body.child(
+                    text(said)
+                        .font(k.ty.ui)
+                        .color(t.warn)
+                        .wrap()
+                        .key("intake-aside"),
+                );
+            }
         }
         (None, None) => {}
     }
@@ -64,6 +74,7 @@ pub fn sheet(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
         .transition(ui::float_in())
         .child(col().w_full().padding(20.0).child(body));
 
+    let listed = review.ledger.is_some() && !review.aside.is_empty();
     let shown = review.ledger.as_ref().map_or(0, |ledger| {
         ledger
             .proposals
@@ -79,7 +90,7 @@ pub fn sheet(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
     if let Some(rows) = review
         .ledger
         .as_ref()
-        .filter(|_| shown > 0)
+        .filter(|_| shown > 0 || listed)
         .map(|ledger| rows(s, review, ledger, t))
     {
         panel = panel.child(ui::rule(t)).child(
@@ -186,7 +197,111 @@ fn rows(s: &State, review: &IntakeReview, ledger: &Ledger, t: &Theme) -> El {
         list = list.child(one_row(s, review, index, proposal, decision, t));
         shown += 1;
     }
+    if !review.aside.is_empty() {
+        if shown > 0 {
+            list = list.child(ui::rule(t));
+        }
+        list = list.child(
+            col()
+                .key("intake-aside-list")
+                .w_full()
+                .gap(8.0)
+                .padding(12.0)
+                .child(ui::caption("Set aside, and not recorded", t))
+                .children(
+                    review
+                        .aside
+                        .iter()
+                        .take(ASIDE_SHOWN)
+                        .enumerate()
+                        .map(|(index, aside)| aside_row(s, review, index, aside, t)),
+                )
+                .children((review.aside.len() > ASIDE_SHOWN).then(|| {
+                    ui::caption(
+                        format!("and {} more lines", review.aside.len() - ASIDE_SHOWN),
+                        t,
+                    )
+                })),
+        );
+    }
     list
+}
+
+/// How many set-aside lines the sheet lists before it says how many more there are.
+const ASIDE_SHOWN: usize = 12;
+
+fn aside_row(s: &State, review: &IntakeReview, index: usize, aside: &SetAside, t: &Theme) -> El {
+    let k = &t.kit;
+    let line = review
+        .sheet
+        .as_ref()
+        .and_then(|sheet| sheet.lines.get(aside.line))
+        .filter(|_| !s.privacy)
+        .map_or_else(
+            || format!("line {}", aside.line + 1),
+            |text| format!("line {}: {}", aside.line + 1, text.trim()),
+        );
+    col()
+        .key(format!("intake-aside-{index}"))
+        .w_full()
+        .gap(3.0)
+        .child(
+            text(reason(&aside.why, s.privacy))
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_base)
+                .wrap(),
+        )
+        .child(
+            text(line)
+                .font(k.ty.mono.lh(14.0))
+                .color(k.c.text_faint)
+                .truncate_middle(),
+        )
+}
+
+/// Why a line was set aside, in words. With amounts hidden, what quotes the file's cells is
+/// not repeated.
+pub fn reason(why: &Aside, privacy: bool) -> String {
+    match why {
+        Aside::NotATrade(word) if rules::changes_a_count(word) => format!(
+            "“{word}” changes a count without a purchase or a sale. Make it by hand in the \
+             holding."
+        ),
+        Aside::NotATrade(word) => format!("“{word}” is not a purchase or a sale."),
+        Aside::Cancelled(word) => {
+            format!("“{word}” takes a trade back, so it is not read as a purchase or a sale.")
+        }
+        Aside::Total => "A total, not a trade.".to_string(),
+        Aside::Unsure(_) if privacy => "This line couldn't be read with certainty.".to_string(),
+        Aside::Unsure(why) => why.clone(),
+    }
+}
+
+/// The lines left out, counted in one sentence. `None` when nothing was.
+pub fn set_aside(aside: &[SetAside]) -> Option<String> {
+    if aside.is_empty() {
+        return None;
+    }
+    let by_hand = aside
+        .iter()
+        .filter(|each| matches!(&each.why, Aside::NotATrade(word) if rules::changes_a_count(word)))
+        .count();
+    let mut said = if aside.len() == 1 {
+        "One line was set aside, and nothing was taken from it.".to_string()
+    } else {
+        format!(
+            "{} lines were set aside, and nothing was taken from them.",
+            capitalise(&number_word(aside.len()))
+        )
+    };
+    if by_hand > 0 {
+        said.push_str(if by_hand == 1 {
+            " A transfer or a split changes a count, and is yours to make by hand."
+        } else {
+            " Transfers and splits change a count, and are yours to make by hand."
+        });
+    }
+    Some(said)
 }
 
 fn one_row(

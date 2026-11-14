@@ -29,6 +29,7 @@ use stahl::{
     app,
     backend::{Backend, Period},
     demo::{self, FakeReleases},
+    intake::reconcile::Change,
     state::{Command, Confirm, Page, PendingOpen, PickKind, State, UpdatePhase},
     update::{self, Installation, Updater},
     view::guide,
@@ -422,27 +423,43 @@ fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
 
     app.click("intake-accept-all");
     assert!(
-        app.rt.state.intake.is_none(),
-        "taking everything puts the sheet away"
+        app.rt.state.intake.is_some(),
+        "a doubted change, the new holding, stays in front of the owner"
     );
     assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
-    assert!(app.rt.state.intake_undo.is_some());
+    assert!(!app.rt.state.intake_undo.is_empty());
     assert!(app.exists("toast"));
     let after = counts(&app);
     assert_ne!(before, after, "the positions changed");
-    assert!(
+    let on_record = |app: &Harness| {
         app.rt
             .state
             .positions
             .iter()
-            .any(|position| position.ticker.as_deref() == Some("NGSC")),
-        "the holding the file added is on record"
-    );
+            .any(|position| position.ticker.as_deref() == Some("NGSC"))
+    };
+    assert!(!on_record(&app), "a new holding is never taken unseen");
+    assert!(app.has_text("filed under Stocks"));
+    let review = app.rt.state.intake.as_ref().unwrap();
+    let ledger = review.ledger.as_ref().unwrap();
+    let new = ledger
+        .proposals
+        .iter()
+        .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
+    assert!(on_record(&app), "taken by hand, it is on record");
 
+    // Undo takes back the last import only: the new holding, not the batch before it.
     app.click_label("Undo");
-    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
-    assert!(app.rt.state.intake_undo.is_none(), "one undo only");
+    assert!(!on_record(&app), "the new holding is taken back");
+    assert_eq!(counts(&app), after, "the batch before it stays");
+    // Two imports, undone in order.
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+    app.click_label("Undo");
+    assert!(app.rt.state.intake_undo.is_empty());
     assert_eq!(counts(&app), before, "the positions are as they were");
+    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
 }
 
 #[test]
@@ -459,7 +476,7 @@ fn one_row_can_be_accepted_on_its_own() {
     assert!(app.has_text("Recorded"), "the row says what happened to it");
     assert!(app.rt.state.dirty);
     assert_ne!(counts(&app), before, "that one change is on record");
-    assert!(app.rt.state.intake_undo.is_some());
+    assert!(!app.rt.state.intake_undo.is_empty());
 
     app.click("intake-leave-1");
     assert!(!app.exists("intake-row-1"), "a row left is not asked again");
@@ -473,6 +490,21 @@ fn the_same_broker_file_twice_proposes_nothing_the_second_time() {
     let path = dropped(&mut app, "de-transactions.csv");
     app.click("intake-accept-all");
     assert!(app.rt.state.dirty);
+    // The new holding is doubted, so it was left for the owner; take it by hand.
+    let new = app
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.as_ref())
+        .and_then(|ledger| {
+            ledger
+                .proposals
+                .iter()
+                .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        })
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
 
     app.rt.drop_files(vec![path], Some((660.0, 430.0)));
     app.settle();
@@ -1281,6 +1313,35 @@ fn dragging_the_chart_measures_that_span_until_escape() {
         app.rt.state.measure.span.is_some(),
         "shift and an arrow measures"
     );
+}
+
+#[test]
+fn the_outlook_years_slider_moves_the_median_by_key() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    let median = |app: &Harness| {
+        app.rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("outlook-median"))
+            .and_then(|element| element.text.clone())
+            .expect("the outlook median")
+    };
+    let before = median(&app);
+    app.rt.update(|_, tx| tx.focus("outlook-years", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.years, 11);
+    let after = median(&app);
+    assert_ne!(before, after, "a longer horizon moves the median");
+    app.press(Key::Left);
+    assert_eq!(app.rt.state.outlook.years, 10);
+    assert_eq!(median(&app), before, "and back again");
+    // The monthly amount steps with the arrows too.
+    app.rt.update(|_, tx| tx.focus("outlook-monthly", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.monthly, 550.0);
 }
 
 #[test]
@@ -4063,6 +4124,10 @@ fn a_question_to_a_provider_asks_before_it_goes() {
     assert!(app.rt.state.consent.is_some(), "the prompt asks first");
     assert!(app.exists("consent-panel"));
     assert!(app.has_text("api.example.com"));
+    assert!(
+        app.has_text("Authorization header"),
+        "the key is not in the body, so the sheet says where it goes"
+    );
 
     app.click("consent-show");
     assert!(
@@ -4081,6 +4146,24 @@ fn a_question_to_a_provider_asks_before_it_goes() {
     assert!(
         !app.dir.path().join("ask-consent.json").exists(),
         "nothing was remembered"
+    );
+}
+
+#[test]
+fn a_remote_provider_must_be_https() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://example.com/v1");
+    app.click("settings-save");
+    app.settle();
+    let error = app.rt.state.settings.error.clone().expect("refused");
+    assert!(error.contains("https"), "{error}");
+    assert!(app.has_text("example.com would be reached without encryption"));
+    assert_eq!(
+        app.rt.state.backend.llm_now().map(|llm| llm.url),
+        None,
+        "nothing was saved"
     );
 }
 
@@ -4566,5 +4649,183 @@ fn reduced_motion_asks_plainly_instead_of_holding() {
             .first()
             .map(|entry| entry.status),
         Some(stahl::matters::Status::Signed)
+    );
+}
+
+#[test]
+fn no_matter_can_be_signed_on_a_day_in_the_past() {
+    let mut app = Harness::boot_tall(true);
+    assert!(app.exists("matter-sign-rebalance"), "today it can be");
+    app.rt.state.travel(Some(10));
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.rt.state.in_past());
+    assert!(!app.exists("matter-rebalance"), "no card on a past day");
+    assert!(!app.exists("matter-sign-rebalance"));
+    assert!(app.exists("matters-withheld"));
+    assert!(app.has_text("Decisions are signed on today's figures"));
+    // Even a hold that somehow completes records nothing.
+    app.rt.state.sign_matter("rebalance");
+    app.settle();
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(decision_files(&app).is_empty());
+
+    app.rt.state.travel(None);
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(
+        app.exists("matter-sign-rebalance"),
+        "back today, it returns"
+    );
+}
+
+#[test]
+fn a_record_signed_in_privacy_mode_is_written_with_real_amounts() {
+    let mut app = Harness::boot_tall(true);
+    app.click("privacy");
+    assert!(app.rt.state.privacy);
+    assert!(
+        !app.has_text("€"),
+        "the card hides its amounts while privacy is on"
+    );
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        written.contains('€'),
+        "the record has its money:\n{written}"
+    );
+    assert!(
+        !written.contains("••"),
+        "no masks in the record:\n{written}"
+    );
+}
+
+#[test]
+fn declining_in_an_encrypted_portfolio_says_it_is_not_kept() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.open.file_path = Some("portfolio.json.gpg".to_string());
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    let toast = toast.expect("a toast");
+    assert!(toast.contains("this session only"), "{toast}");
+    assert!(!toast.contains("won't bring it again"), "{toast}");
+    assert!(decision_files(&app).is_empty());
+
+    app.click("matter-postpone-cash-place");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    assert!(toast.unwrap().contains("this session only"));
+}
+
+#[test]
+fn an_unreadable_ledger_is_reported_and_survives_a_decision() {
+    let mut app = Harness::boot_tall(true);
+    let path = app.dir.path().join("portfolio/portfolio/matters.json");
+    fs::write(&path, "{ not a ledger").unwrap();
+    app.rt.state.load_matters();
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.exists("matters-ledger-problem"));
+    assert!(app.has_text("can't be read"));
+
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    app.settle();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(decision_files(&app).is_empty(), "no record was written");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(app.has_text("Nothing was written."));
+
+    app.click("matter-postpone-cash-place");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+}
+
+#[test]
+fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "set-aside.csv");
+    let review = app.rt.state.intake.as_ref().expect("the sheet is up");
+    assert_eq!(review.aside.len(), 4, "{:?}", review.aside);
+    assert!(app.exists("intake-aside"));
+    assert!(app.has_text("Four lines were set aside, and nothing was taken from them."));
+    assert!(app.has_text("yours to make by hand"));
+    assert!(app.exists("intake-aside-3"), "each line is listed");
+    assert!(app.has_text("“Storno Kauf” takes a trade back"));
+    assert!(app.has_text("“Übertrag” changes a count"));
+    assert!(app.has_text("“Umtausch” isn't a kind of trade we know"));
+    assert!(
+        app.exists("intake-accept-all"),
+        "the good rows are still on offer"
+    );
+
+    app.click("intake-accept-all");
+    let after = counts(&app);
+    assert_ne!(after, before, "the good rows were recorded");
+    let gold = |list: &[(String, f64)]| list.iter().map(|(_, count)| count).sum::<f64>();
+    // Only the one purchase of GLD and the one of TLT or SPY changed anything: the Storno,
+    // the transfer and the unknown kind moved no count.
+    assert!(gold(&after) - gold(&before) <= 3.0 + 1e-9);
+}
+
+#[test]
+fn an_undo_after_an_unrelated_edit_does_nothing_and_loses_nothing() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit made inside the six seconds, without a toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click_label("Undo");
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert!(
+        app.has_text("can't be undone"),
+        "it says why instead of reverting"
+    );
+    assert!(app.rt.state.dirty);
+    assert_eq!(counts(&app), edited, "the edit and the import both stay");
+}
+
+#[test]
+fn a_pdf_dropped_on_the_window_opens_the_sheet_with_its_reason() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    let file = app.rt.state.open.file_path.clone();
+    let folder = app.rt.state.open.workspace_dir.clone();
+    dropped(&mut app, "statement.pdf");
+    let review = app.rt.state.intake.as_ref().expect("the sheet opens");
+    assert!(
+        review
+            .problem
+            .as_deref()
+            .is_some_and(|why| why.contains("PDF"))
+    );
+    assert!(!app.rt.state.dirty);
+    assert_eq!(counts(&app), before, "nothing was opened in its place");
+    assert_eq!(app.rt.state.open.file_path, file, "the same file is open");
+    assert_eq!(app.rt.state.open.workspace_dir, folder);
+
+    app.click("intake-cancel");
+    dropped(&mut app, "workbook.xlsx");
+    assert!(
+        app.rt
+            .state
+            .intake
+            .as_ref()
+            .is_some_and(|r| r.problem.is_some())
     );
 }

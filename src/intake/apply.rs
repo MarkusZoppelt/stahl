@@ -141,7 +141,14 @@ pub fn op(proposal: &Proposal, choice: &Choice) -> Option<Op> {
     }
 }
 
+/// The largest figure written. `portfolio_rs` reads its numbers as decimals, which stop near
+/// 7.9e28; nothing a broker lists comes near this.
+const MOST: f64 = 1e12;
+
 fn number(value: f64) -> Result<Value, String> {
+    if value.abs() > MOST {
+        return Err(format!("{value} is too large to record."));
+    }
     Number::from_f64(value)
         .map(Value::Number)
         .ok_or_else(|| format!("{value} can't be written as a number"))
@@ -257,6 +264,17 @@ pub fn apply(json: &str, ops: &[Op]) -> Result<String, String> {
                 amount,
                 purchases,
             } => {
+                let on_record = positions.iter().any(|position| {
+                    position
+                        .get("Ticker")
+                        .and_then(Value::as_str)
+                        .is_some_and(|own| own.trim().eq_ignore_ascii_case(ticker.trim()))
+                });
+                if on_record {
+                    return Err(format!(
+                        "{ticker} is already on record, so it wasn't added a second time."
+                    ));
+                }
                 let mut map = Map::new();
                 if let Some(name) = name {
                     map.insert("Name".into(), Value::String(name.clone()));

@@ -539,7 +539,13 @@ pub fn reconcile(reading: &Reading, holdings: &[Holding]) -> Ledger {
                 }
                 if newcomer.ticker.is_none() {
                     doubts.push(
-                        "The file gives no ticker, and prices are looked up by ticker. Add one to record it."
+                        "The file gives no ticker, and prices are looked up by ticker, so this can't be recorded from here. Add it by hand in Holdings."
+                            .to_string(),
+                    );
+                }
+                if newcomer.class.is_none() {
+                    doubts.push(
+                        "The file gives no asset class, so this would be filed under Stocks."
                             .to_string(),
                     );
                 }
@@ -635,6 +641,22 @@ pub fn reconcile(reading: &Reading, holdings: &[Holding]) -> Ledger {
                 .to_string(),
         );
     }
+    if reading.guessed {
+        let said = match reading.shape {
+            Shape::Transactions => "a list of trades",
+            Shape::Holdings => "a list of what is held",
+        };
+        for proposal in &mut proposals {
+            if matches!(proposal.change, Change::Missing { .. }) {
+                continue;
+            }
+            proposal.doubts.push(format!(
+                "Nothing in the file says whether it is a list of trades or of what is held. We \
+                 read it as {said}; check that before recording."
+            ));
+            proposal.in_all = false;
+        }
+    }
     Ledger {
         proposals,
         agreed,
@@ -658,10 +680,10 @@ fn repeats(trades: &[Trade]) -> usize {
 
 fn repeated_doubt(count: usize) -> String {
     if count == 1 {
-        "One trade appears twice in the file, on the same day at the same price. Untick it if it is the same trade.".to_string()
+        "One trade appears twice in the file, on the same day at the same price. If it is the same trade, leave this change and make it by hand.".to_string()
     } else {
         format!(
-            "{count} trades repeat others in the file, on the same day at the same price. Untick any that are the same trade."
+            "{count} trades repeat others in the file, on the same day at the same price. If some are the same trade, leave this change and make it by hand."
         )
     }
 }
@@ -733,8 +755,15 @@ fn trades_for(
         ready = false;
     }
     fresh.sort_by_key(|trade| trade.date.as_ref().map(|date| date.date));
+    if opening {
+        doubts.push(
+            "Your record holds an amount for this and no purchases. If that amount already \
+             includes these trades, recording them would count them twice."
+                .to_string(),
+        );
+    }
     let certain = matched.by.certain();
-    let in_all = ready && certain && repeated == 0;
+    let in_all = ready && certain && repeated == 0 && !opening;
     (
         Some(Proposal {
             change: Change::Trades {

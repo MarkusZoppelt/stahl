@@ -403,6 +403,17 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            // The future as a fan: the default assumptions, with a goal to aim at.
+            ("outlook", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
+            ("outlook-light", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             // The door thinking: the tumblers turn slowly and the steel breathes, as it does
             // while an answer is being composed.
             ("door-thinking", |s| {
@@ -485,6 +496,16 @@ fn main() {
             ("briefing", |s| scene(s, Page::Briefing)),
             ("health", |s| scene(s, Page::Health)),
             ("settings", |s| scene(s, Page::Settings)),
+            // A provider away from this machine over plain http is refused with a sentence.
+            ("settings-refused", |s| {
+                scene(s, Page::Settings);
+                s.settings
+                    .provider_url
+                    .replace_text("http://api.example.com/v1");
+                s.settings.model.replace_text("gpt-4o-mini");
+                s.save_settings();
+                s.settle();
+            }),
             ("palette", |s| {
                 scene(s, Page::Overview);
                 s.open_palette();
@@ -537,6 +558,13 @@ fn main() {
                 scene(s, Page::Holdings);
                 intake(s, "de-transactions.csv");
             }),
+            // One change taken: the toast says so, and offers to put it back for a few seconds.
+            ("intake-undo", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.accept_intake(0);
+                s.settle();
+            }),
             ("intake-review-light", |s| {
                 scene(s, Page::Holdings);
                 intake(s, "de-transactions.csv");
@@ -547,6 +575,15 @@ fn main() {
             ("intake-unreadable", |s| {
                 scene(s, Page::Holdings);
                 intake(s, "statement.pdf");
+            }),
+            // A file with lines the reader would not guess at: counted, and each given its reason.
+            ("intake-aside", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "set-aside.csv");
+            }),
+            ("phone-intake-aside", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "set-aside.csv");
             }),
             ("phone-intake-review", |s| {
                 phone(s, Page::Holdings);
@@ -693,6 +730,23 @@ fn main() {
             // What the bank has prepared: a matter to sign, the plan behind it, and the seal.
             ("matters-expanded", |s| {
                 scene(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            // On a past day nothing can be signed, and the section says why.
+            ("matters-past", |s| past_scene(s, Page::Overview)),
+            // A ledger that can't be read is kept and reported, and nothing is written over it.
+            ("matters-ledger", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                if let Some(dir) = s.open.workspace_dir.clone() {
+                    fs::write(
+                        Path::new(&dir).join("portfolio/matters.json"),
+                        "{ \"entries\": [ oops",
+                    )
+                    .ok();
+                }
+                s.load_matters();
+                s.settle();
                 s.matters.expanded = first_matter(s);
             }),
             ("matters-light", |s| {
@@ -873,6 +927,10 @@ fn main() {
             }),
             ("phone-allocation", |s| phone(s, Page::Allocation)),
             ("phone-performance", |s| phone(s, Page::Performance)),
+            ("phone-outlook", |s| {
+                phone(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
             ("phone-review", |s| phone(s, Page::Review)),
             ("phone-rebalance", |s| phone(s, Page::Rebalance)),
             ("phone-policy", |s| phone(s, Page::Policy)),

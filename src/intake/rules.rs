@@ -628,6 +628,8 @@ impl Entry {
 pub enum Aside {
     /// A row that isn't a trade: a dividend, a deposit, a fee. Holds the row's word for it.
     NotATrade(String),
+    /// A trade taken back (a Storno, a reversal). Holds the row's word for it.
+    Cancelled(String),
     /// A total or a subtotal.
     Total,
     /// Couldn't be read with certainty, and why.
@@ -651,6 +653,9 @@ pub enum Shape {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reading {
     pub shape: Shape,
+    /// The table doesn't say which shape it is (no kind column, no negative quantity, no header
+    /// like Bestand), so `shape` is a guess and nothing read under it is for Accept all.
+    pub guessed: bool,
     pub entries: Vec<Entry>,
     pub aside: Vec<SetAside>,
     /// The date a holdings list is as of, when it says.
@@ -713,6 +718,44 @@ const NOT_TRADES: [&str; 30] = [
     "reinvestment",
 ];
 
+/// Words for a trade taken back. Such a row undoes another; it is not a trade of its own.
+const CANCELS: [&str; 9] = [
+    "storno",
+    "storniert",
+    "stornierung",
+    "cancel",
+    "cancelled",
+    "canceled",
+    "cancellation",
+    "reversal",
+    "reversed",
+];
+
+/// Words for a row that changes a holding's count without being bought or sold.
+const CHANGES_A_COUNT: [&str; 7] = [
+    "transfer",
+    "uebertrag",
+    "split",
+    "einbuchung",
+    "ausbuchung",
+    "corporate action",
+    "kapitalmassnahme",
+];
+
+/// Whether `word` is a kind that moves a count by hand-made changes: a transfer or a split.
+pub fn changes_a_count(word: &str) -> bool {
+    let folded = fold(word);
+    CHANGES_A_COUNT
+        .iter()
+        .any(|each| folded == *each || folded.contains(each))
+}
+
+/// Whether `word` is a cancellation or a reversal.
+pub fn is_cancellation(word: &str) -> bool {
+    let folded = fold(word);
+    folded.split(' ').any(|part| CANCELS.contains(&part))
+}
+
 /// What a row's word for its kind means. `Err` holds the word when it is something other than
 /// a trade, and `None` when the word is not known.
 pub fn kind_of(word: &str) -> Option<Result<Kind, String>> {
@@ -721,8 +764,11 @@ pub fn kind_of(word: &str) -> Option<Result<Kind, String>> {
         list.iter()
             .any(|each| folded == *each || folded.split(' ').any(|part| part == *each))
     };
+    // A cancellation first: "Storno Kauf" holds a word for a purchase, and is not one.
+    if has(&CANCELS) {
+        Some(Err(word.trim().to_string()))
     // "Verkauf" holds "kauf", so sales are looked for first.
-    if has(&SELL) {
+    } else if has(&SELL) {
         Some(Ok(Kind::Sell))
     } else if has(&BUY) {
         Some(Ok(Kind::Buy))
@@ -819,6 +865,53 @@ fn figure_at(
     )))
 }
 
+/// Headers that say a quantity is what is held, not what was traded.
+const HELD_HEADERS: [&str; 9] = [
+    "bestand",
+    "holding",
+    "holdings",
+    "position",
+    "positions",
+    "shares held",
+    "quantity held",
+    "balance",
+    "depotbestand",
+];
+
+/// Whether the table lists trades or what is held, and whether that is a guess. Evidence for
+/// trades: a kind column, or a negative quantity. Evidence for holdings: a quantity header that
+/// says so, or no dates at all. A table with dates and neither is read as before, and flagged.
+fn shape_of(sheet: &Sheet, mapping: &Mapping, dates_differ: bool) -> (Shape, bool) {
+    if mapping.has(Role::Kind) {
+        return (Shape::Transactions, false);
+    }
+    let quantity = mapping.column(Role::Quantity);
+    let negative = quantity.is_some_and(|column| {
+        body(sheet, mapping)
+            .filter_map(|record| record.cell(column.index))
+            .any(|cell| {
+                let text = cell.text.trim();
+                text.starts_with('-') || (text.starts_with('(') && text.ends_with(')'))
+            })
+    });
+    if negative {
+        return (Shape::Transactions, false);
+    }
+    let says_held = quantity.is_some_and(|column| {
+        let folded = fold(&column.header);
+        HELD_HEADERS.contains(&folded.as_str())
+    });
+    if says_held || !mapping.has(Role::Date) {
+        return (Shape::Holdings, false);
+    }
+    let shape = if dates_differ {
+        Shape::Transactions
+    } else {
+        Shape::Holdings
+    };
+    (shape, true)
+}
+
 /// Read the table's rows under `mapping`. Every value in an entry is copied from a cell; a row
 /// that can't be read that way is set aside, with the reason.
 pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
@@ -832,11 +925,7 @@ pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
         })
         .unwrap_or_default();
     let dates_differ = dates.windows(2).any(|pair| pair[0] != pair[1]);
-    let shape = if mapping.has(Role::Kind) || dates_differ {
-        Shape::Transactions
-    } else {
-        Shape::Holdings
-    };
+    let (shape, guessed) = shape_of(sheet, mapping, dates_differ);
     let as_of = (shape == Shape::Holdings)
         .then(|| dates.first().copied())
         .flatten();
@@ -860,6 +949,7 @@ pub fn read(sheet: &Sheet, mapping: &Mapping) -> Reading {
     }
     Reading {
         shape,
+        guessed,
         entries,
         aside,
         as_of,
@@ -887,6 +977,7 @@ fn entry(record: &Record, mapping: &Mapping, shape: Shape) -> Result<Option<Entr
     let word_kind = match &kind_word {
         Some(word) => match kind_of(&word.text) {
             Some(Ok(kind)) => Some(kind),
+            Some(Err(word)) if is_cancellation(&word) => return Err(Aside::Cancelled(word)),
             Some(Err(word)) => return Err(Aside::NotATrade(word)),
             None => {
                 return Err(unsure(format!(

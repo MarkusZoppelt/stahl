@@ -623,6 +623,7 @@ impl State {
             }
             self.time.at = None;
             self.place_head();
+            self.refresh_outlook();
             return;
         }
         let index = index.expect("checked above");
@@ -656,6 +657,7 @@ impl State {
         }
         self.time.at = Some(index);
         self.place_head();
+        self.refresh_outlook();
     }
 
     /// Move `steps` recorded days through time: negative is back. Stops at the first recorded

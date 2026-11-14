@@ -48,7 +48,7 @@ pub fn build(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
     if let Some((message, _)) = &s.toast {
         let mut toast = Toast::new("toast", message.clone()).icon(&t.kit, &icons::CHECK_CIRCLE);
         // An import can be put back for a few seconds, from the toast that says it landed.
-        if s.intake_undo.is_some() {
+        if !s.intake_undo.is_empty() {
             toast = toast.action(&t.kit, "Undo", false, |s: &mut State, _: &mut Tx| {
                 s.undo_intake();
             });
@@ -936,7 +936,8 @@ fn consent(s: &State, t: &Theme, layer: &mut Vec<El>) {
     let host = consent.host.clone();
     let explanation = format!(
         "Your question, your holdings and what they are worth, and your policy will go to {} at \
-         {}. Stahl sends nothing else, and only when you ask a question.",
+         {}. Stahl sends nothing else, and only when you ask a question. Your key travels in \
+         the Authorization header, which is not part of the text below.",
         consent.model, host
     );
     let shown = consent.show;

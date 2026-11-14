@@ -6,7 +6,9 @@
 
 use std::{
     collections::HashMap,
-    fs, mem,
+    fs,
+    io::Read,
+    mem,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -43,9 +45,11 @@ use crate::{
         self,
         apply::{self as intake_apply, Choice},
         reconcile::{self, Bought, Holding, Ledger},
+        rules::SetAside,
         text::Sheet,
     },
     matters::MattersPage,
+    outlook,
     records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
@@ -481,6 +485,10 @@ pub struct IntakeReview {
     pub problem: Option<String>,
     /// One decision per proposal in `ledger`.
     pub decided: Vec<Decision>,
+    /// The lines the reader set aside, and why. Nothing is recorded from them.
+    pub aside: Vec<SetAside>,
+    /// Which sheet this is, so an undo only puts back rows of the sheet that took them.
+    pub serial: u64,
     /// A change is being written, so a second press mustn't start another.
     pub busy: bool,
 }
@@ -493,6 +501,8 @@ impl IntakeReview {
             ledger: None,
             problem: Some(why),
             decided: Vec::new(),
+            aside: Vec::new(),
+            serial: 0,
             busy: false,
         }
     }
@@ -500,9 +510,13 @@ impl IntakeReview {
 
 /// The positions as they were before an import, so the toast's Undo can put them back.
 pub struct IntakeUndo {
+    /// The positions before the import.
     json: String,
+    /// The positions as the import left them. The undo only applies while they still are.
+    left: String,
     dirty: bool,
-    /// The proposals it took, to put them back to undecided.
+    /// The sheet it took proposals from, and which, to put them back to undecided.
+    serial: u64,
     taken: Vec<usize>,
 }
 
@@ -704,6 +718,33 @@ pub struct PolicyPage {
     pub error: Option<String>,
 }
 
+/// The Performance page's outlook: how far out to look, what is added every month, and the
+/// goal the owner is aiming at. The assumptions come from the policy, or from `outlook`'s
+/// table when it has none.
+pub struct OutlookPage {
+    pub years: u32,
+    pub monthly: f64,
+    pub goal: TextEdit,
+    /// The goal once it reads as a number, so a view never parses text.
+    pub goal_amount: Option<f64>,
+    pub assumptions: outlook::Assumptions,
+    /// The fan for these inputs, computed when they change rather than in the view.
+    pub simulated: outlook::Outlook,
+}
+
+impl OutlookPage {
+    fn new() -> Self {
+        Self {
+            years: 10,
+            monthly: 500.0,
+            goal: TextEdit::new(""),
+            goal_amount: None,
+            assumptions: outlook::Assumptions::default(),
+            simulated: outlook::Outlook::default(),
+        }
+    }
+}
+
 pub struct DocumentsPage {
     pub title: TextEdit,
     pub generated: Option<GeneratedDocument>,
@@ -874,8 +915,10 @@ pub struct State {
     pub form: Option<PositionForm>,
     /// A broker's file waiting for the owner's approval.
     pub intake: Option<IntakeReview>,
-    /// The positions from before the last import, while its Undo is offered.
-    pub intake_undo: Option<IntakeUndo>,
+    /// The imports whose Undo is offered, oldest first. The last is undone first.
+    pub intake_undo: Vec<IntakeUndo>,
+    /// Counts the sheets opened, so an undo knows which sheet's rows it put back.
+    intake_serial: u64,
     pub new_workspace: Option<NewWorkspaceForm>,
     pub guide: bool,
     /// Set when a folder was opened and it is not a workspace. The previous portfolio stays in
@@ -916,6 +959,8 @@ pub struct State {
     pub simulation: Loadable<RebalanceSimulation>,
     /// The allocation the Rebalance page is being played with.
     pub rebalance: RebalancePage,
+    /// The Performance page's fan: its horizon, its monthly amount and its goal.
+    pub outlook: OutlookPage,
     pub briefing: Loadable<Briefing>,
     /// The records room's wall, newest plate first.
     pub records: Loadable<Vec<Record>>,
@@ -1174,7 +1219,8 @@ impl State {
             palette: None,
             form: None,
             intake: None,
-            intake_undo: None,
+            intake_undo: Vec::new(),
+            intake_serial: 0,
             new_workspace: None,
             guide: false,
             folder_prompt: None,
@@ -1203,6 +1249,7 @@ impl State {
             review: Loadable::default(),
             simulation: Loadable::default(),
             rebalance: RebalancePage::new(),
+            outlook: OutlookPage::new(),
             briefing: Loadable::default(),
             records: Loadable::default(),
             records_unseen: 0,
@@ -1420,7 +1467,7 @@ impl State {
             .is_some_and(|(_, shown)| shown.elapsed() >= self.toast_for())
         {
             self.toast = None;
-            self.intake_undo = None;
+            self.intake_undo.clear();
             changed = true;
         }
         // A save or revert asked for from the unsaved-changes dialog finishes in `drain`, above.
@@ -1444,7 +1491,7 @@ impl State {
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>) {
-        self.intake_undo = None;
+        self.intake_undo.clear();
         self.show_undo_toast(message);
     }
 
@@ -1456,7 +1503,7 @@ impl State {
 
     /// How long the toast stays: an Undo is worth more than a word of confirmation.
     fn toast_for(&self) -> Duration {
-        if self.intake_undo.is_some() {
+        if !self.intake_undo.is_empty() {
             UNDO_FOR
         } else {
             TOAST_FOR
@@ -1603,6 +1650,15 @@ impl State {
             format::HIDDEN.to_string()
         } else {
             format::signed_currency(value, &self.currency())
+        }
+    }
+
+    /// Money to the nearest thousand, for ranges where cents are noise.
+    pub fn money_thousands(&self, value: f64) -> String {
+        if self.privacy {
+            format::HIDDEN.to_string()
+        } else {
+            format::currency_thousands(value, &self.currency())
         }
     }
 
@@ -1774,6 +1830,7 @@ impl State {
         self.findings = snapshot.findings;
         self.network = snapshot.network;
         self.has_policy = snapshot.has_policy;
+        self.outlook.assumptions = self.backend.outlook_assumptions();
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
@@ -1781,6 +1838,25 @@ impl State {
         self.load_record_mark();
         self.travel(past);
         self.load_days();
+    }
+
+    /// Recompute the Performance page's fan from what the page holds now. Called when the
+    /// portfolio or one of the outlook controls changes, never from a view: the simulation is
+    /// far too much work for a pointer move over the chart.
+    pub fn refresh_outlook(&mut self) {
+        let inputs = outlook::Inputs {
+            today: self
+                .allocation
+                .iter()
+                .map(|item| (item.asset_class.clone(), item.value))
+                .collect(),
+            monthly: self.outlook.monthly,
+            years: self.outlook.years,
+            goal: self.outlook.goal_amount,
+            shock: None,
+            assumptions: self.outlook.assumptions.clone(),
+        };
+        self.outlook.simulated = outlook::simulate(&inputs);
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -2018,7 +2094,7 @@ impl State {
         self.dirty = false;
         self.form = None;
         self.intake = None;
-        self.intake_undo = None;
+        self.intake_undo.clear();
         self.folder_prompt = None;
         self.selected = None;
         self.inspector.set_open(false);
@@ -2095,38 +2171,59 @@ impl State {
         if !self.has_portfolio() || self.open.parse_error.is_some() {
             return;
         }
-        self.intake_undo = None;
+        // A file is compared with the positions as they are today, not a day travelled to.
+        self.return_to_today();
         let file = path.to_string_lossy().into_owned();
         let name = file_name(&file).to_string();
+        let holdings = self.intake_holdings();
         self.run(
             move |_backend| async move {
-                fs::read(&file).map_err(|error| format!("This file can't be read: {error}"))
+                // At most one byte more than the largest file read, so a huge file is refused
+                // without being loaded. The reading happens here, off the UI thread.
+                let mut bytes = Vec::new();
+                fs::File::open(&file)
+                    .and_then(|handle| {
+                        handle
+                            .take(intake::text::MAX_BYTES as u64 + 1)
+                            .read_to_end(&mut bytes)
+                    })
+                    .map_err(|error| format!("This file can't be read: {error}"))?;
+                let outcome = intake::understand(&bytes);
+                let ledger = match &outcome {
+                    intake::Outcome::Read { reading, .. } => {
+                        Some(reconcile::reconcile(reading, &holdings))
+                    }
+                    _ => None,
+                };
+                Ok((outcome, ledger))
             },
             move |state, result| match result {
-                Ok(bytes) => state.read_intake(name, &bytes),
+                Ok((outcome, ledger)) => state.read_intake(name, outcome, ledger),
                 Err(error) => state.intake = Some(IntakeReview::problem(name, error)),
             },
         );
     }
 
-    /// What was made of a file's bytes, compared with the positions on record.
-    fn read_intake(&mut self, file: String, bytes: &[u8]) {
-        let review = match intake::understand(bytes) {
-            intake::Outcome::Read { sheet, reading, .. } => {
-                let ledger = reconcile::reconcile(&reading, &self.intake_holdings());
+    /// What was made of a file, compared with the positions on record.
+    fn read_intake(&mut self, file: String, outcome: intake::Outcome, ledger: Option<Ledger>) {
+        self.intake_serial += 1;
+        let serial = self.intake_serial;
+        let review = match (outcome, ledger) {
+            (intake::Outcome::Read { sheet, reading, .. }, Some(ledger)) => {
                 // The sheet is over Holdings: what the file changes is in the table behind it.
                 self.navigate(Page::Holdings);
                 IntakeReview {
                     file,
                     decided: vec![Decision::Pending; ledger.proposals.len()],
+                    aside: reading.aside,
                     sheet: Some(sheet),
                     ledger: Some(ledger),
                     problem: None,
+                    serial,
                     busy: false,
                 }
             }
-            intake::Outcome::Unreadable(why) => IntakeReview::problem(file, why),
-            intake::Outcome::Unmapped { missing, .. } => IntakeReview::problem(
+            (intake::Outcome::Unmapped { missing, .. }, _) => IntakeReview::problem(
                 file,
                 format!(
                     "This table can be read, but nothing in it says {}. A different export from \
@@ -2134,6 +2231,10 @@ impl State {
                     intake::spoken(&missing)
                 ),
             ),
+            (intake::Outcome::Unreadable(why), _) => IntakeReview::problem(file, why),
+            (intake::Outcome::Read { .. }, None) => {
+                IntakeReview::problem(file, "This file can't be compared.".to_string())
+            }
         };
         self.intake = Some(review);
     }
@@ -2236,23 +2337,24 @@ impl State {
         review.busy = true;
         let was_dirty = self.dirty;
         let count = taken.len();
+        let serial = review.serial;
         self.run(
             move |backend| async move {
-                let before = backend.apply_intake(ops).await?;
+                let (before, left) = backend.apply_intake(ops).await?;
                 let open = backend.open_document().await;
                 let snapshot = if open.parse_error.is_none() {
                     Some(backend.snapshot().await)
                 } else {
                     None
                 };
-                Ok((before, open, snapshot, backend.config().await))
+                Ok((before, left, open, snapshot, backend.config().await))
             },
             move |state, result| {
                 if let Some(review) = &mut state.intake {
                     review.busy = false;
                 }
                 match result {
-                    Ok((before, open, snapshot, config)) => {
+                    Ok((before, left, open, snapshot, config)) => {
                         state.open = open;
                         state.config = Some(config);
                         if let Some(snapshot) = snapshot {
@@ -2266,12 +2368,28 @@ impl State {
                                 }
                             }
                         }
-                        if close {
+                        // Accept all puts the sheet away only when nothing is left that the
+                        // owner could still take: a doubted change stays in front of them.
+                        let waiting = state.intake.as_ref().is_some_and(|review| {
+                            review.ledger.as_ref().is_some_and(|ledger| {
+                                ledger
+                                    .proposals
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(index, proposal)| {
+                                        proposal.ready
+                                            && review.decided.get(index) == Some(&Decision::Pending)
+                                    })
+                            })
+                        });
+                        if close && !waiting {
                             state.intake = None;
                         }
-                        state.intake_undo = Some(IntakeUndo {
+                        state.intake_undo.push(IntakeUndo {
                             json: before,
+                            left,
                             dirty: was_dirty,
+                            serial,
                             taken,
                         });
                         state.show_undo_toast(if count == 1 {
@@ -2286,46 +2404,58 @@ impl State {
         );
     }
 
-    /// Put the positions back as they were before the last import.
+    /// Put the positions back as they were before the last import. Each import is undone in
+    /// turn, and only while the positions are still as it left them: anything edited since is
+    /// kept, and the undo says so rather than reverting it.
     pub fn undo_intake(&mut self) {
-        let Some(undo) = self.intake_undo.take() else {
+        let Some(undo) = self.intake_undo.pop() else {
             return;
         };
         self.run(
             move |backend| async move {
-                backend.restore_positions(undo.json).await?;
+                let now = backend
+                    .restore_positions(undo.json.clone(), &undo.left)
+                    .await?;
                 let open = backend.open_document().await;
                 let snapshot = if open.parse_error.is_none() {
                     Some(backend.snapshot().await)
                 } else {
                     None
                 };
-                Ok((
-                    undo.dirty,
-                    undo.taken,
-                    open,
-                    snapshot,
-                    backend.config().await,
-                ))
+                Ok((undo, now, open, snapshot, backend.config().await))
             },
             |state, result| match result {
-                Ok((dirty, taken, open, snapshot, config)) => {
+                Ok((undo, now, open, snapshot, config)) => {
                     state.open = open;
                     state.config = Some(config);
                     if let Some(snapshot) = snapshot {
                         state.apply_snapshot(snapshot);
                     }
-                    state.dirty = dirty;
-                    if let Some(review) = &mut state.intake {
-                        for index in taken {
+                    state.dirty = undo.dirty;
+                    // The import before this one now left the positions as they are.
+                    if let Some(earlier) = state.intake_undo.last_mut() {
+                        earlier.left = now;
+                    }
+                    if let Some(review) = &mut state.intake
+                        && review.serial == undo.serial
+                    {
+                        for index in undo.taken {
                             if let Some(decision) = review.decided.get_mut(index) {
                                 *decision = Decision::Pending;
                             }
                         }
                     }
-                    state.show_toast("Import undone");
+                    let more = !state.intake_undo.is_empty();
+                    if more {
+                        state.show_undo_toast("Import undone. Undo again for the one before.");
+                    } else {
+                        state.show_toast("Import undone");
+                    }
                 }
-                Err(error) => state.error = Some(error),
+                Err(error) => {
+                    state.intake_undo.clear();
+                    state.show_toast(error);
+                }
             },
         );
     }
@@ -2571,6 +2701,7 @@ impl State {
                     state.performance = None;
                     state.findings.clear();
                     state.has_policy = false;
+                    state.refresh_outlook();
                     state.opened_another();
                     state.page = Page::Overview;
                 }
@@ -3921,6 +4052,14 @@ impl State {
             return;
         }
         let provider_url = text_or_none(&form.provider_url.text);
+        if let Some(problem) = provider_url
+            .as_deref()
+            .and_then(crate::ask::provider_problem)
+        {
+            form.error = Some(problem);
+            form.message = None;
+            return;
+        }
         let api_key = text_or_none(&form.api_key.text);
         let model = text_or_none(&form.model.text);
         self.change_and_reload(
@@ -3992,6 +4131,8 @@ impl State {
                         state.has_policy = true;
                         state.show_policy(policy);
                         state.policy.message = Some("Policy loaded".to_string());
+                        state.outlook.assumptions = state.backend.outlook_assumptions();
+                        state.refresh_outlook();
                     }
                     Err(error) => state.policy.error = Some(error),
                 }
@@ -4006,6 +4147,8 @@ impl State {
                 self.has_policy = true;
                 self.policy.policy = Some(policy);
                 self.policy.message = Some(success.to_string());
+                self.outlook.assumptions = self.backend.outlook_assumptions();
+                self.refresh_outlook();
             }
             Err(error) => self.policy.error = Some(error),
         }
