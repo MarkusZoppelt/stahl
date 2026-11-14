@@ -1448,11 +1448,17 @@ impl State {
 
     /// What the bank has prepared: matters to sign, and data fixes, with past decisions noted.
     pub fn prepared(&self) -> Prepared {
+        self.prepared_with(true)
+    }
+
+    /// [`Self::prepared`], optionally keeping the matters while they are withheld, so a count
+    /// does not blink while the review is redone.
+    fn prepared_with(&self, withhold: bool) -> Prepared {
         if self.positions.is_empty() {
             return Prepared::default();
         }
         let mut prepared = prepare(&self.matter_inputs());
-        if self.matters_withheld().is_some() {
+        if withhold && self.matters_withheld().is_some() {
             prepared.matters.clear();
             return prepared;
         }
@@ -1464,6 +1470,25 @@ impl State {
             .matters
             .retain(|matter| !self.matters.ledger.hidden(matter, today));
         prepared
+    }
+
+    /// The weight of everything the page asks of the owner: the cards the Overview draws, then
+    /// the to-dos that are not notices. The door counts these. On a past day the matters are not
+    /// counted, as the page shows; while the review is redone they still are.
+    pub fn attention(&self) -> Vec<Weight> {
+        let prepared = self.prepared_with(self.in_past());
+        let (cards, _) = prepared.cards(self.matters.shown.as_deref());
+        cards
+            .iter()
+            .map(|matter| matter.weight)
+            .chain(
+                prepared
+                    .todo
+                    .iter()
+                    .map(|item| item.weight)
+                    .filter(|weight| *weight != Weight::Notice),
+            )
+            .collect()
     }
 
     /// The matter as the record keeps it: the same one, with its money written out. `None` when
