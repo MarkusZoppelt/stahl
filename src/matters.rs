@@ -2457,49 +2457,15 @@ mod tests {
         );
     }
 
-    /// Restores `PORTFOLIO_RS_DATA_DIR` when dropped, and keeps two tests that set it apart.
-    struct DataDir {
-        before: Option<std::ffi::OsString>,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl DataDir {
-        /// Point the variable at `dir`, which is a scratch directory, so a test that reads it
-        /// meanwhile finds somewhere harmless.
-        fn set(dir: &Path) -> Self {
-            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
-            let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
-            let before = env::var_os("PORTFOLIO_RS_DATA_DIR");
-            // SAFETY: held under a lock, undone on drop, and the value is a scratch directory.
-            unsafe { env::set_var("PORTFOLIO_RS_DATA_DIR", dir) };
-            Self {
-                before,
-                _guard: guard,
-            }
-        }
-    }
-
-    impl Drop for DataDir {
-        fn drop(&mut self) {
-            // SAFETY: as in `set`.
-            unsafe {
-                match &self.before {
-                    Some(value) => env::set_var("PORTFOLIO_RS_DATA_DIR", value),
-                    None => env::remove_var("PORTFOLIO_RS_DATA_DIR"),
-                }
-            }
-        }
-    }
-
+    // The ledger's place is computed from the workspace alone (`matters_dir` reads no
+    // environment), so this needs no `PORTFOLIO_RS_DATA_DIR`. Setting it here raced every other
+    // test that reads it, in the same process.
     #[test]
-    fn two_workspaces_keep_separate_ledgers_whatever_the_environment_says() {
+    fn two_workspaces_keep_separate_ledgers() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let (matter, entry) = sample();
         let first = scratch("first");
         let second = scratch("second");
-        // Both workspaces share the one place the environment names for history.
-        let shared = scratch("shared");
-        let _data_dir = DataDir::set(&shared);
         assert!(matters_dir(&first).starts_with(&first));
         assert_ne!(matters_dir(&first), matters_dir(&second));
         let backend = backend(&first, &runtime);
@@ -2509,10 +2475,6 @@ mod tests {
         assert_eq!(load_ledger(&first).ledger.entries.len(), 1);
         assert!(load_ledger(&second).ledger.entries.is_empty());
         assert!(decisions(&second).is_empty());
-        assert!(
-            !shared.join(LEDGER_FILE).exists() && !shared.join("history/main").exists(),
-            "nothing went to the environment's directory"
-        );
     }
 
     #[test]
