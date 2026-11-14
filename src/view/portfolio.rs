@@ -451,28 +451,34 @@ fn first_steps(s: &State, t: &Theme) -> El {
     )
 }
 
-/// Overview reads top to bottom: what happened, where you stand, what to do. The month's chart
-/// is on Performance, so a usual window shows this whole page without the agenda falling off it.
+/// Overview reads top to bottom: what changed, where you stand, what to do, and then, if you
+/// want to know more, Counsel's line and the allocation. The month's chart is on Performance, so a
+/// usual window shows the agenda without scrolling.
 pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     if s.positions.is_empty() {
         return first_steps(s, t);
     }
     let room = ui::room(s, cx);
     let narrow = room == ui::Room::Narrow;
-    // On a phone the three standing figures follow the agenda, so what to do is on screen
-    // without scrolling. The total stays the hero, above it.
+    // On a phone only the sentence comes before the total, and the statement's figures and the
+    // total's three follow Counsel's line, so what to do is on screen without scrolling.
     col()
         .w_full()
         .gap(if narrow { 16.0 } else { 24.0 })
         .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
-        // Questions are about today; a past day only shows what was.
-        .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
         .child(hero(s, t, cx, !narrow))
         // On a past day the section says why nothing can be signed, instead of vanishing.
         .child(ui::entering(
             overview::agenda(s, t, narrow, cx.is_reduced_motion()),
             2,
         ))
+        // Questions are about today; a past day only shows what was.
+        .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
+        .children(
+            narrow
+                .then(|| overview::statement_figures(s, t, cx))
+                .flatten(),
+        )
         .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
             ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })
