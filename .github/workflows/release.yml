@@ -65,7 +65,12 @@ jobs:
       # without the secrets (a pull request, Dependabot, forks) is ad-hoc signed instead, which only a tag refuses.
       # The app is stapled before it goes in the disk image, so a copy dragged out of it opens
       # offline too. Then the disk image itself is, so opening it doesn't warn either.
-      - name: build the macOS disk image
+      - name: build the macOS app
+        if: matrix.platform == 'macos-latest'
+        run: cargo bundle --release
+
+      # The only step with the signing secrets: it never compiles anything.
+      - name: sign and notarize the macOS disk image
         if: matrix.platform == 'macos-latest'
         env:
           MACOS_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.DEVELOPER_ID_P12 || '' }}
@@ -82,7 +87,6 @@ jobs:
           else
             echo "::notice::no signing secrets, so this disk image is ad-hoc signed and Gatekeeper will block it"
           fi
-          cargo bundle --release
           app="target/release/bundle/osx/Stahl Capital.app"
           dmg=stahl-capital-macos-arm64.dmg
           if [ "$sign" != true ]; then

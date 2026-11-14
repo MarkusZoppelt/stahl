@@ -67,6 +67,14 @@ jobs:
         if: steps.secrets.outputs.go == 'true'
         run: brew install xcodegen
 
+      # Before any key exists, so no build script of a dependency can read one.
+      - name: build the Rust library
+        if: steps.secrets.outputs.go == 'true'
+        working-directory: ios/rust
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        run: cargo build --release --target aarch64-apple-ios
+
       - name: put the signing material in a throwaway keychain
         if: steps.secrets.outputs.go == 'true'
         env:
@@ -86,7 +94,7 @@ jobs:
           # certificate pairs with it here. (DISTRIBUTION_P12 holds only a certificate.)
           printf '%s' "$DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/distribution.p12"
           printf '%s' "$DISTRIBUTION_CER" | base64 --decode > "$RUNNER_TEMP/distribution.cer"
-          security import "$RUNNER_TEMP/distribution.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" \
+          security import "$RUNNER_TEMP/distribution.p12" -k "$keychain" -P "$DEVELOPER_ID_P12_PASSWORD" -x \
             -T /usr/bin/codesign -T /usr/bin/security
           security import "$RUNNER_TEMP/distribution.cer" -k "$keychain" || true
           rm -f "$RUNNER_TEMP/distribution.p12" "$RUNNER_TEMP/distribution.cer"
@@ -105,6 +113,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          STAHL_SKIP_RUST: "1"
           STAHL_PROFILE_FILE: ${{ runner.temp }}/profile.mobileprovision
           ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: ios/testflight.sh --upload "$APPLE_TEAM_ID" "$GITHUB_RUN_NUMBER"

@@ -54,7 +54,10 @@ if [ -n "${STAHL_PROFILE_FILE:-}" ]; then
   done
 fi
 
-if command -v nix >/dev/null && [ -z "${CI:-}" ]; then
+# STAHL_SKIP_RUST=1 skips this when the library is already built (the workflow builds it first).
+if [ -n "${STAHL_SKIP_RUST:-}" ]; then
+  ls "$lib"/*.a >/dev/null
+elif command -v nix >/dev/null && [ -z "${CI:-}" ]; then
   (cd "$root" && IPHONEOS_DEPLOYMENT_TARGET=17.0 nix develop .#ios -c \
     sh -c "cd ios/rust && cargo build --release --target $target")
 else
