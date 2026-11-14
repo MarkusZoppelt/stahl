@@ -30,7 +30,7 @@ nix run github:MarkusZoppelt/stahl              # try it
 nix profile install github:MarkusZoppelt/stahl  # keep it
 ```
 
-The macOS build isn't notarized, so the first time you open it, right-click it and choose Open. On
+The macOS build is signed with a Developer ID and notarized by Apple, so it opens like any app. On
 Linux you need a Vulkan driver (`mesa-vulkan-drivers` on Debian and Ubuntu).
 
 On first launch, create a workspace. That's a folder in the same format as

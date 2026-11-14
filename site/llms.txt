@@ -29,7 +29,7 @@ Three things can leave the machine: tickers sent to Yahoo Finance to fetch price
 - Run without installing: `nix run github:MarkusZoppelt/stahl`
 - Install with Nix: `nix profile install github:MarkusZoppelt/stahl`
 - Installers (.dmg for Apple silicon, .deb for x64, .zip for Windows x64): https://github.com/MarkusZoppelt/stahl/releases
-- macOS builds are ad-hoc signed, so right-click the app and choose Open on first launch.
+- macOS builds are signed with a Developer ID and notarized by Apple.
 
 ## Links
 
