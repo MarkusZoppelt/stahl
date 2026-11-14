@@ -61,7 +61,9 @@
           filter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/assets/" path
-              && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null));
+              && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null))
+            # The intake tests read sample broker files.
+            || pkgs.lib.hasInfix "/tests/intake" path;
         };
 
         # rune-fx reads Rune's shaders from its sibling crate (`../../rune/src/*.wgsl`), but crane
@@ -183,6 +185,9 @@
             commonArgs
             // {
               inherit cargoArtifacts;
+              # reqwest's TLS reads the system's CA certificates when a client is built, and the
+              # Linux sandbox has none; the provider tests build one.
+              SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
             }
           );
         };

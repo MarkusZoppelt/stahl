@@ -7,7 +7,7 @@
 //! cargo run --example demo -- --list-scenes
 //! ```
 
-use std::{env, fs, process, time::SystemTime};
+use std::{env, fs, path::Path, process, time::SystemTime};
 
 use portfolio_rs::{
     config::ThemeMode,
@@ -49,8 +49,126 @@ fn main() {
     fn scene(s: &mut State, page: Page) {
         s.startup();
         s.settle();
+        // Counsel exists only with AI features on.
+        s.ai = s.ai || page == Page::Ask;
+        // The owner has been to the records room before, so its mark is not on every screen.
+        s.navigate(Page::Records);
+        s.settle();
         s.navigate(page);
         s.settle();
+    }
+    /// Today's move set to `percent`, with the amount it means, for the room's light.
+    fn day(s: &mut State, percent: f64) {
+        if let Some(summary) = s.summary.as_mut() {
+            let before = summary.total_value / (1.0 + percent / 100.0);
+            summary.day_change = summary.total_value - before;
+            summary.day_change_percent = percent;
+        }
+    }
+    /// The plate the wall has at its top, if any.
+    fn newest_plate(s: &State) -> Option<String> {
+        s.records
+            .data
+            .as_ref()
+            .and_then(|plates| plates.first())
+            .map(|plate| plate.id.clone())
+    }
+    /// One of the wall's plates by what kind of record it is, for opening it.
+    fn plate_of(s: &State, caption: &str) -> Option<String> {
+        s.records
+            .data
+            .as_ref()
+            .and_then(|plates| plates.iter().find(|plate| plate.kind.caption() == caption))
+            .map(|plate| plate.id.clone())
+    }
+    /// The matter the bank would put first, if there is one.
+    fn first_matter(s: &State) -> Option<String> {
+        s.prepared().matters.first().map(|matter| matter.id.clone())
+    }
+    /// A portfolio whose cash is below the policy's minimum, so the bank has a floor to restore.
+    fn cash_short(s: &mut State) {
+        scene(s, Page::Overview);
+        let Some(dir) = s.open.workspace_dir.clone() else {
+            return;
+        };
+        let path = Path::new(&dir).join("positions.json");
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        fs::write(
+            &path,
+            text.replace("\"Amount\": 30000.0", "\"Amount\": 10000.0"),
+        )
+        .ok();
+        s.load_workspace(dir);
+        s.settle();
+    }
+    /// A matter just signed: the seal is on the card, and the breath before it files away is
+    /// held open so a still can show it.
+    fn signed(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.sign_matter(&id);
+            s.settle();
+            if let Some(stamp) = &mut s.matters.stamp {
+                stamp.started = s.now + 60.0;
+            }
+            s.toast = None;
+        }
+    }
+    /// The decline form, with a reason written in.
+    fn declining(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            let mut reason = rune::TextEdit::new("");
+            reason.replace_text("Not this month. I would rather keep the cash until the spring.");
+            s.matters.declining = Some(stahl::matters::Declining { id, reason });
+        }
+    }
+    /// The Documents page with a record signed a moment ago, and that record open.
+    fn documents_records(s: &mut State) {
+        scene(s, Page::Documents);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.sign_matter(&id);
+            s.settle();
+        }
+        s.load_decisions();
+        s.settle();
+        s.matters.open_decision = s
+            .matters
+            .decisions
+            .first()
+            .map(|decision| decision.path.to_string_lossy().into_owned());
+        s.toast = None;
+    }
+    /// The Documents page after a decline, with the record open.
+    fn documents_declined(s: &mut State) {
+        scene(s, Page::Documents);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.decline_matter(
+                &id,
+                "Not this month; the cash stays put until spring.".to_string(),
+            );
+            s.settle();
+        }
+        s.load_decisions();
+        s.settle();
+        s.matters.open_decision = s
+            .matters
+            .decisions
+            .first()
+            .map(|decision| decision.path.to_string_lossy().into_owned());
+        s.toast = None;
+    }
+    /// A Sign control held down, for the strip from press to filed: render at several `--at`.
+    fn holding(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.begin_hold(&id, false);
+        }
     }
     /// What someone sees on first opening the app, with nothing to reopen.
     fn first_run(s: &mut State) {
@@ -76,6 +194,19 @@ fn main() {
         s.settle();
         s.navigate(page);
         s.settle();
+    }
+    /// A page on the lowest day Stahl recorded, as the time strip or the door would leave it.
+    fn past_scene(s: &mut State, page: Page) {
+        scene(s, page);
+        s.skip_opening();
+        let lowest = s
+            .time
+            .days
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total.total_cmp(&b.1.total))
+            .map(|(index, _)| index);
+        s.travel(lowest);
     }
     /// A newer release waiting, as if a check at startup had found it.
     fn update_scene(s: &mut State, installation: Installation, dialog: bool) {
@@ -104,6 +235,27 @@ fn main() {
         s.price_updates += 1;
         s.pulse_started = Some(s.now);
     }
+    /// Cut the demo's history down to its last `keep` valuations and open it again: a portfolio
+    /// whose wall has only just begun.
+    fn trim_history(s: &mut State, keep: usize) {
+        let Some(dir) = s.open.workspace_dir.clone() else {
+            return;
+        };
+        let path = Path::new(&dir).join("portfolio/history/main/snapshots.jsonl");
+        let Ok(text) = fs::read_to_string(&path) else {
+            return;
+        };
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect();
+        let kept = &lines[lines.len().saturating_sub(keep)..];
+        if fs::write(&path, kept.join("\n") + "\n").is_err() {
+            return;
+        }
+        s.load_workspace(dir);
+        s.settle();
+    }
     /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
     fn phone(s: &mut State, page: Page) {
         s.compact = true;
@@ -114,6 +266,28 @@ fn main() {
         s.since = Some(Since::First);
         s.change = None;
         s.history = None;
+    }
+    /// A broker's file from `tests/intake/`, copied beside the open portfolio and imported, as
+    /// dropping it on the window does.
+    fn intake(s: &mut State, name: &str) {
+        let Some(parent) = s
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(s.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+        else {
+            return;
+        };
+        let target = parent.join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name);
+        if fs::copy(source, &target).is_err() {
+            return;
+        }
+        s.open_intake(&target);
+        s.settle();
     }
     /// A portfolio on its targets, so the agenda has nothing to ask.
     fn on_target(s: &mut State) {
@@ -130,6 +304,75 @@ fn main() {
             bundle: "/Applications/Stahl Capital.app".into(),
         }
     }
+    /// A hand-written answer, to look at every block without a model.
+    fn ask_answer(s: &mut State, question: &str, lines: &str) {
+        scene(s, Page::Ask);
+        let mut turn = stahl::ask::Turn::new(question);
+        turn.blocks = stahl::ask::Lines::new().push(lines).into_iter().collect();
+        turn.phase = stahl::ask::Phase::Done;
+        s.ask.turns.push(turn);
+        s.apply_ask_span();
+    }
+    /// A provider in Settings, so the consent prompt has somewhere to send to.
+    fn provider(s: &mut State) {
+        s.settings.currency.replace_text("EUR");
+        s.settings
+            .provider_url
+            .replace_text("https://api.example.com/v1");
+        s.settings.api_key.replace_text("sk-demo");
+        s.settings.model.replace_text("gpt-4o-mini");
+        s.save_settings();
+        s.settle();
+        // The toast would sit over the page in a screenshot.
+        s.toast = None;
+    }
+    /// A question answered by the demo's scripted model.
+    fn ask_scripted(s: &mut State, question: &str) {
+        scene(s, Page::Ask);
+        // The vault door has opened; a question's answer shouldn't arrive behind it.
+        s.skip_opening();
+        s.ask_question(question);
+    }
+    const ASK_CHANGE: &str = concat!(
+        r#"{"block":"say","text":"Since {since.date}, your total moved {since.change}. Most of it was Bitcoin, which is {class.crypto.share} of the portfolio against a target of {class.crypto.target}."}"#,
+        "\n",
+        r#"{"block":"figures","ids":["total","since.change","class.crypto.share","cash.value"]}"#,
+        "\n",
+        r#"{"block":"chart","period":"month"}"#,
+        "\n",
+        r#"{"block":"say","text":"That is 3.2% of your money in one holding."}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"}]}"#,
+        "\n",
+    );
+    const ASK_ALLOCATION: &str = concat!(
+        r#"{"block":"say","text":"Crypto grew to {class.crypto.share} of the portfolio while stocks fell to {class.stocks.share}. That is why four of five classes sit outside their bands."}"#,
+        "\n",
+        r#"{"block":"allocation"}"#,
+        "\n",
+        r#"{"block":"holdings","sort":"today"}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Where should new money go?","ask":"Where should new money go?"}]}"#,
+        "\n",
+    );
+    const ASK_SPAN: &str = concat!(
+        r#"{"block":"say","text":"The middle of the month did the work. Here is that stretch on its own."}"#,
+        "\n",
+        r#"{"block":"chart","period":"month","span":[5,20]}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"What changed this month?","ask":"What changed this month?"}]}"#,
+        "\n",
+    );
+    const ASK_PLAN: &str = concat!(
+        r#"{"block":"say","text":"A halving in crypto is the kind of day worth planning for. Here is what it would leave, and what a move toward your targets would ask of you."}"#,
+        "\n",
+        r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
+        "\n",
+        r#"{"block":"plan","fraction":0.6}"#,
+        "\n",
+        r#"{"block":"go","steps":[{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"}]}"#,
+        "\n",
+    );
     let result = app::run_with_scenes(
         backend,
         env::args().skip(1).collect(),
@@ -162,10 +405,28 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            // The future as a fan: the default assumptions, with a goal to aim at.
+            ("outlook", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
+            // The same fan with the biggest class falling in year 2.
+            ("outlook-shock", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+                stahl::view::outlook::set_shock(s, 30);
+            }),
+            ("outlook-light", |s| {
+                scene(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             // The door thinking: the tumblers turn slowly and the steel breathes, as it does
             // while an answer is being composed.
             ("door-thinking", |s| {
                 scene(s, Page::Overview);
+                s.ai = true;
                 s.skip_opening();
                 s.door_busy = true;
             }),
@@ -243,7 +504,22 @@ fn main() {
             }),
             ("briefing", |s| scene(s, Page::Briefing)),
             ("health", |s| scene(s, Page::Health)),
-            ("settings", |s| scene(s, Page::Settings)),
+            ("settings", |s| {
+                scene(s, Page::Settings);
+                s.ai = true;
+            }),
+            // A provider away from this machine over plain http is refused with a sentence.
+            ("settings-ai-off", |s| scene(s, Page::Settings)),
+            ("settings-refused", |s| {
+                scene(s, Page::Settings);
+                s.ai = true;
+                s.settings
+                    .provider_url
+                    .replace_text("http://evil.example#@localhost/v1");
+                s.settings.model.replace_text("gpt-4o-mini");
+                s.save_settings();
+                s.settle();
+            }),
             ("palette", |s| {
                 scene(s, Page::Overview);
                 s.open_palette();
@@ -289,6 +565,43 @@ fn main() {
             ("edit-position-purchases", |s| {
                 scene(s, Page::Holdings);
                 s.open_form(Some(0));
+            }),
+            // A broker's file, read and compared with the positions: what it holds, and one row
+            // per change, each with the file's own line under it.
+            ("intake-review", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+            }),
+            // One change taken: the toast says so, and offers to put it back for a few seconds.
+            ("intake-undo", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.accept_intake(0);
+                s.settle();
+            }),
+            ("intake-review-light", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // A file the app can't read: one plain sentence saying why.
+            ("intake-unreadable", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "statement.pdf");
+            }),
+            // A file with lines the reader would not guess at: counted, and each given its reason.
+            ("intake-aside", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "set-aside.csv");
+            }),
+            ("phone-intake-aside", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "set-aside.csv");
+            }),
+            ("phone-intake-review", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
             }),
             ("welcome", first_run),
             ("welcome-light", |s| {
@@ -386,6 +699,229 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
+            ("records", |s| scene(s, Page::Records)),
+            ("records-light", |s| {
+                scene(s, Page::Records);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("records-plate", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A fall").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("records-plate-light", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A milestone").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("records-plate-old", |s| {
+                scene(s, Page::Records);
+                if let Some(id) = plate_of(s, "A holding") {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("records-privacy", |s| {
+                scene(s, Page::Records);
+                s.privacy = true;
+            }),
+            ("records-mark", |s| {
+                scene(s, Page::Overview);
+                s.records_unseen = 2;
+            }),
+            ("records-first-day", |s| {
+                scene(s, Page::Records);
+                trim_history(s, 1);
+            }),
+            ("records-empty", |s| empty(s, Page::Records)),
+            // What the bank has prepared: a matter to sign, the plan behind it, and the seal.
+            ("matters-expanded", |s| {
+                scene(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            // The other way to answer the same question, brought forward.
+            ("matters-alternative", |s| {
+                scene(s, Page::Overview);
+                s.matters.shown = Some("cash-place".to_string());
+            }),
+            // On a past day nothing can be signed, and the section says why.
+            ("matters-past", |s| past_scene(s, Page::Overview)),
+            // A ledger that can't be read is kept and reported, and nothing is written over it.
+            ("matters-ledger", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                if let Some(dir) = s.open.workspace_dir.clone() {
+                    fs::write(
+                        Path::new(&dir).join("portfolio/matters.json"),
+                        "{ \"entries\": [ oops",
+                    )
+                    .ok();
+                }
+                s.load_matters();
+                s.settle();
+                s.matters.expanded = first_matter(s);
+            }),
+            ("matters-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("matters-signed", signed),
+            ("matters-signed-light", |s| {
+                signed(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // A past decision of the same kind, and what happened since: the drift has moved
+            // enough that the bank brings it back, with the earlier decision named.
+            ("matters-prior", |s| {
+                scene(s, Page::Overview);
+                if let Some(matter) = s
+                    .prepared()
+                    .matters
+                    .into_iter()
+                    .find(|matter| matter.id == "rebalance")
+                {
+                    let mut figures = matter.figures.clone();
+                    if let Some(crypto) = figures.get_mut("class:Crypto") {
+                        *crypto += 3.5;
+                    }
+                    s.matters.ledger.record(stahl::matters::Entry {
+                        id: matter.id.clone(),
+                        kind: matter.kind,
+                        group: Some("allocation".to_string()),
+                        status: stahl::matters::Status::Signed,
+                        at: "2026-10-03".to_string(),
+                        reason: None,
+                        until: None,
+                        summary: "a halfway rebalance".to_string(),
+                        policy: matter.policy.clone(),
+                        figures,
+                        out_of_band: matter.out_of_band.clone(),
+                    });
+                }
+            }),
+            ("matters-private", |s| {
+                scene(s, Page::Overview);
+                s.privacy = true;
+            }),
+            ("matters-reduced", |s| {
+                scene(s, Page::Overview);
+                s.matters.confirm_sign = first_matter(s);
+            }),
+            ("matters-declined", declining),
+            // A press on Sign, held: render at several `--at` times for the strip.
+            ("matters-hold", holding),
+            ("matters-top-up", cash_short),
+            ("matters-todo", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+                s.findings.push(Finding::new(
+                    "stale_prices",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    "2 position(s) have prices older than the stale threshold".to_string(),
+                ));
+            }),
+            ("documents-decisions", documents_records),
+            ("documents-declined", documents_declined),
+            ("documents-decisions-light", |s| {
+                documents_records(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-matters", |s| phone(s, Page::Overview)),
+            ("phone-matters-expanded", |s| {
+                phone(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            ("phone-matters-todo", |s| {
+                phone(s, Page::Overview);
+                on_target(s);
+                s.findings.push(Finding::new(
+                    "stale_prices",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    "2 position(s) have prices older than the stale threshold".to_string(),
+                ));
+            }),
+            ("phone-matters-declined", |s| {
+                phone(s, Page::Overview);
+                if let Some(id) = first_matter(s) {
+                    let mut reason = rune::TextEdit::new("");
+                    reason.replace_text("Not this month.");
+                    s.matters.declining = Some(stahl::matters::Declining { id, reason });
+                }
+            }),
+            ("phone-matters-light", |s| {
+                phone(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-matters-signed", |s| {
+                phone(s, Page::Overview);
+                s.skip_opening();
+                if let Some(id) = first_matter(s) {
+                    s.sign_matter(&id);
+                    s.settle();
+                    if let Some(stamp) = &mut s.matters.stamp {
+                        stamp.started = s.now + 60.0;
+                    }
+                    s.toast = None;
+                }
+            }),
+            ("phone-documents-decisions", |s| {
+                phone(s, Page::Documents);
+                s.skip_opening();
+                if let Some(id) = first_matter(s) {
+                    s.sign_matter(&id);
+                    s.settle();
+                }
+                s.load_decisions();
+                s.settle();
+                s.toast = None;
+            }),
+            // A new plate is set onto the wall and catches the light once: render at several
+            // `--at` times to see the strip.
+            ("records-arrival", |s| {
+                scene(s, Page::Records);
+                s.skip_opening();
+                if let Some(id) = newest_plate(s) {
+                    s.record_arrival = Some((id, 0.0));
+                }
+            }),
+            ("phone-records", |s| phone(s, Page::Records)),
+            ("phone-records-mark", |s| {
+                phone(s, Page::Overview);
+                s.records_unseen = 2;
+                s.more = true;
+            }),
+            ("phone-records-plate", |s| {
+                phone(s, Page::Records);
+                if let Some(id) = plate_of(s, "A fall").or_else(|| newest_plate(s)) {
+                    s.open_record(id);
+                    s.settle();
+                }
+            }),
+            ("phone-records-arrival", |s| {
+                phone(s, Page::Records);
+                s.skip_opening();
+                if let Some(id) = newest_plate(s) {
+                    s.record_arrival = Some((id, 0.0));
+                }
+            }),
+            ("phone-records-light", |s| {
+                phone(s, Page::Records);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("phone-overview", |s| phone(s, Page::Overview)),
             ("phone-overview-first", |s| {
                 phone(s, Page::Overview);
@@ -410,6 +946,10 @@ fn main() {
             }),
             ("phone-allocation", |s| phone(s, Page::Allocation)),
             ("phone-performance", |s| phone(s, Page::Performance)),
+            ("phone-outlook", |s| {
+                phone(s, Page::Performance);
+                stahl::view::outlook::set_goal(s, Some(250_000.0));
+            }),
             ("phone-review", |s| phone(s, Page::Review)),
             ("phone-rebalance", |s| phone(s, Page::Rebalance)),
             ("phone-policy", |s| phone(s, Page::Policy)),
@@ -450,6 +990,16 @@ fn main() {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // The room's light on a day that is down, and on one that didn't move: the demo's
+            // prices are fixtures, so the day's move is set on the summary the light reads.
+            ("overview-down-day", |s| {
+                scene(s, Page::Overview);
+                day(s, -0.9);
+            }),
+            ("overview-flat-day", |s| {
+                scene(s, Page::Overview);
+                day(s, 0.0);
             }),
             // Launched into a portfolio: the opening has already played, and a refresh turns the
             // mark's tumblers once, so the frames from 0.05 s to 1.2 s show them turning.
@@ -540,6 +1090,224 @@ fn main() {
                 if let Some(palette) = &mut s.palette {
                     palette.query.replace_text("stocks");
                 }
+            }),
+            // Ask: a question answered with the app's own screens.
+            ("ask", |s| scene(s, Page::Ask)),
+            ("ask-light", |s| {
+                scene(s, Page::Ask);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-answer", |s| {
+                ask_answer(s, "What changed this month?", ASK_CHANGE)
+            }),
+            ("ask-answer-light", |s| {
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-blocks", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION)
+            }),
+            ("ask-blocks-light", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("ask-plan", |s| {
+                ask_answer(s, "What if crypto halves?", ASK_PLAN)
+            }),
+            ("ask-plan-light", |s| {
+                ask_answer(s, "What if crypto halves?", ASK_PLAN);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-ask", |s| phone(s, Page::Ask)),
+            ("phone-ask-answer", |s| {
+                s.compact = true;
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+            }),
+            ("phone-ask-blocks", |s| {
+                s.compact = true;
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+            }),
+            ("phone-ask-plan", |s| {
+                s.compact = true;
+                ask_answer(s, "What if crypto halves?", ASK_PLAN);
+            }),
+            // The demo's model, answering for real. Render these at --at 2 to see the whole
+            // answer, and at --at 0.5 to catch one arriving.
+            ("counsel-change", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-change-light", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("counsel-halves", |s| {
+                ask_scripted(s, "What if crypto halves?")
+            }),
+            ("counsel-halves-light", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // The same answer with the owner holding it on today, and with the table open.
+            ("counsel-halves-now", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.what_if_show(0, 1, true);
+            }),
+            ("counsel-halves-details", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.ask.what_if_details(0, 1);
+            }),
+            ("phone-counsel-halves", |s| {
+                s.compact = true;
+                ask_scripted(s, "What if crypto halves?");
+            }),
+            ("counsel-money", |s| {
+                ask_scripted(s, "Where should €2,000 go?")
+            }),
+            ("counsel-allocation", |s| {
+                ask_scripted(s, "Why is my allocation off?")
+            }),
+            // The answer's own slider, dragged most of the way to target.
+            ("counsel-plan-dragged", |s| {
+                ask_scripted(s, "Why is my allocation off?");
+                s.ask.plan_set(0, 3, 0.8);
+            }),
+            ("phone-counsel-plan", |s| {
+                s.compact = true;
+                ask_scripted(s, "Why is my allocation off?");
+            }),
+            ("counsel-bitcoin", |s| {
+                ask_scripted(s, "How is Bitcoin doing?")
+            }),
+            ("counsel-else", |s| ask_scripted(s, "Should I buy a house?")),
+            ("counsel-stream", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-waiting", |s| {
+                ask_scripted(s, "What changed this month?")
+            }),
+            ("counsel-revisit", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_advance(10.0);
+                s.navigate(Page::Holdings);
+                s.navigate(Page::Ask);
+            }),
+            // Two answers on one page: the second chart has to measure the room it really has.
+            ("counsel-two", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+                s.skip_opening();
+            }),
+            // The same, with the second answer arriving for real.
+            ("counsel-two-arrive", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                s.skip_opening();
+                s.ask_question("What changed this month?");
+            }),
+            ("counsel-span", |s| {
+                ask_answer(s, "When did it move?", ASK_SPAN)
+            }),
+            ("counsel-failed", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_fail("The provider didn't answer. Check the address in Settings.");
+            }),
+            ("counsel-stopped", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.ask_stop();
+            }),
+            ("phone-counsel", |s| {
+                s.compact = true;
+                ask_scripted(s, "What changed this month?");
+            }),
+            // A provider away from this machine: the question waits for a yes.
+            ("counsel-consent", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+            }),
+            ("counsel-consent-open", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+                s.consent_toggle();
+            }),
+            ("counsel-consent-light", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-counsel-consent", |s| {
+                s.compact = true;
+                scene(s, Page::Ask);
+                s.skip_opening();
+                provider(s);
+                s.ask_question("What changed this month?");
+            }),
+            // No provider: the app answers what it can itself.
+            ("counsel-no-model", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("Should I buy a house?");
+            }),
+            ("counsel-private", |s| {
+                ask_scripted(s, "Why is my allocation off?");
+                s.privacy = true;
+            }),
+            ("counsel-private-amounts", |s| {
+                ask_scripted(s, "What changed this month?");
+                s.privacy = true;
+            }),
+            ("counsel-builtin", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("How much is in crypto?");
+            }),
+            ("counsel-builtin-light", |s| {
+                scene(s, Page::Ask);
+                s.skip_opening();
+                s.model = std::sync::Arc::new(stahl::ask::Builtin);
+                s.ask_question("How much is in crypto?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // Time turned back: the whole app on the lowest recorded day.
+            ("past", |s| past_scene(s, Page::Overview)),
+            ("past-light", |s| {
+                past_scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("past-holdings", |s| past_scene(s, Page::Holdings)),
+            ("past-holdings-map", |s| {
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-allocation", |s| past_scene(s, Page::Allocation)),
+            ("past-rebalance", |s| past_scene(s, Page::Rebalance)),
+            ("phone-past", |s| {
+                s.compact = true;
+                past_scene(s, Page::Overview);
+            }),
+            ("phone-past-holdings", |s| {
+                s.compact = true;
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-private", |s| {
+                past_scene(s, Page::Overview);
+                s.privacy = true;
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

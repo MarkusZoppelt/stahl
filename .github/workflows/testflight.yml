@@ -1,0 +1,100 @@
+name: TestFlight
+
+# Every push to main becomes a TestFlight build of the iPhone and iPad app (ios/testflight.sh).
+# The certificate, profile and API key live only in a keychain and files made for this job and
+# deleted after it. A run without the secrets (a fork) builds nothing and says so.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  testflight:
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      DISTRIBUTION_P12: ${{ secrets.DISTRIBUTION_P12 }}
+      DISTRIBUTION_P12_PASSWORD: ${{ secrets.DISTRIBUTION_P12_PASSWORD }}
+      DISTRIBUTION_CER: ${{ secrets.DISTRIBUTION_CER }}
+      APPSTORE_PROFILE: ${{ secrets.APPSTORE_PROFILE }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/ios/rust/target
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: check the secrets are there
+        id: secrets
+        run: |
+          for name in APPLE_TEAM_ID DISTRIBUTION_P12 DISTRIBUTION_P12_PASSWORD DISTRIBUTION_CER \
+            APPSTORE_PROFILE ASC_KEY_ID ASC_ISSUER_ID ASC_KEY_P8; do
+            if [ -z "${!name}" ]; then
+              echo "::notice::$name isn't set, so there is no TestFlight build"
+              echo "go=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "go=true" >> "$GITHUB_OUTPUT"
+
+      # rustup reads the version from rust-toolchain.toml.
+      - name: install the Rust toolchain
+        if: steps.secrets.outputs.go == 'true'
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.secrets.outputs.go == 'true'
+        with:
+          workspaces: ios/rust -> target
+
+      - name: install xcodegen
+        if: steps.secrets.outputs.go == 'true'
+        run: brew install xcodegen
+
+      - name: put the signing material in a throwaway keychain
+        if: steps.secrets.outputs.go == 'true'
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          # The .p12 holds the private key; the public certificate pairs with it in the keychain.
+          printf '%s' "$DISTRIBUTION_P12" | base64 --decode > "$RUNNER_TEMP/distribution.p12"
+          printf '%s' "$DISTRIBUTION_CER" | base64 --decode > "$RUNNER_TEMP/distribution.cer"
+          security import "$RUNNER_TEMP/distribution.p12" -k "$keychain" -P "$DISTRIBUTION_P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security import "$RUNNER_TEMP/distribution.cer" -k "$keychain" || true
+          rm -f "$RUNNER_TEMP/distribution.p12" "$RUNNER_TEMP/distribution.cer"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          # The existing keychains, one word each, after ours.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain" | grep -q "Apple Distribution" || {
+            echo "::error::no Apple Distribution identity in the keychain"; exit 1; }
+          printf '%s' "$APPSTORE_PROFILE" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          printf '%s' "$ASC_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: build, sign and upload to TestFlight
+        if: steps.secrets.outputs.go == 'true'
+        env:
+          STAHL_PROFILE_FILE: ${{ runner.temp }}/profile.mobileprovision
+          ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: ios/testflight.sh --upload "$APPLE_TEAM_ID" "$GITHUB_RUN_NUMBER"
+
+      - name: delete the signing material
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/profile.mobileprovision" \
+            "$RUNNER_TEMP/distribution.p12" "$RUNNER_TEMP/distribution.cer"

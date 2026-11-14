@@ -83,6 +83,133 @@ const QUOTES: &str = r#"{
   "previous_close": {"BTC-USD": 73750.0, "SPY": 503.0, "TLT": 90.5, "GLD": 196.0}
 }"#;
 
+/// The demo's model: canned answers, handed over at once, so the demo, the screenshots and the
+/// tests are deterministic and never touch the network. The page stages their arrival.
+pub struct ScriptedModel;
+
+impl crate::ask::Model for ScriptedModel {
+    fn ask(&self, request: crate::ask::Request) -> crate::ask::Reply {
+        crate::ask::Reply::Ready(scripted(&request.question))
+    }
+
+    fn source(&self) -> crate::ask::Source {
+        crate::ask::Source::Scripted
+    }
+}
+
+/// The asset classes the demo's portfolio holds, for a question that names one.
+const CLASSES: [&str; 5] = ["Stocks", "Bonds", "Gold", "Crypto", "Cash"];
+
+/// The answer to `question`, as JSON Lines. Questions are matched on the words a person would
+/// use; anything else gets the demo's own version of "I can't answer that".
+pub fn scripted(question: &str) -> String {
+    let question = question.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|word| question.contains(word));
+    if has(&["half", "halve", "halves", "what if", "fall"]) && has(&["crypto", "bitcoin"]) {
+        return SCRIPT_HALVES.to_string();
+    }
+    // Any other what-if: the shock is the question's, the rest is the app's, as with a model.
+    if let Some(shocks) = crate::scenario::asked(&question, CLASSES) {
+        let shock = crate::ask::line(&crate::ask::Block::Scenario { shocks });
+        return [
+            r#"{"block":"say","text":"Here is what that would leave, and what it would do to your plan."}"#
+                .to_string(),
+            shock,
+            r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"}]}"#.to_string(),
+        ]
+        .join("\n")
+            + "\n";
+    }
+    if has(&["2,000", "2000", "new money", "invest", "where should"]) {
+        return SCRIPT_NEW_MONEY.to_string();
+    }
+    if has(&["allocation", "off", "drift", "target"]) {
+        return SCRIPT_ALLOCATION.to_string();
+    }
+    if has(&["bitcoin", "btc"]) {
+        return SCRIPT_BITCOIN.to_string();
+    }
+    if has(&["changed", "month", "since", "last look", "week"]) {
+        return SCRIPT_CHANGE.to_string();
+    }
+    SCRIPT_ELSE.to_string()
+}
+
+/// A month of small moves, and the one class worth a look. The demo's change is a gain, so the
+/// sentence says "up"; a loss says so plainly and drops the joke (see [`crate::ask::builtin`]).
+const SCRIPT_CHANGE: &str = concat!(
+    r#"{"block":"say","text":"Since {since.date} you are up {since.change}. {since.leader} did most of the work, which will surprise nobody."}"#,
+    "\n",
+    r#"{"block":"figures","ids":["total","since.change","today.change","cash.value"]}"#,
+    "\n",
+    r#"{"block":"chart","period":"month"}"#,
+    "\n",
+    r#"{"block":"say","text":"The rest is quiet. Crypto is {class.crypto.share} of the portfolio against a target of {class.crypto.target}, and that is the one number worth your attention."}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"},{"label":"Open Allocation","page":"allocation"}]}"#,
+    "\n",
+);
+
+/// A shock, and what it would leave.
+const SCRIPT_HALVES: &str = concat!(
+    r#"{"block":"say","text":"If crypto fell by half, here is what would be left, and what it would do to your plan."}"#,
+    "\n",
+    r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
+    "\n",
+    r#"{"block":"say","text":"It would also, for once, put crypto closer to where your policy wants it. An expensive way to rebalance."}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"What is my crypto target?","ask":"What is my crypto target?"}]}"#,
+    "\n",
+);
+
+/// New money, placed by buying only.
+const SCRIPT_NEW_MONEY: &str = concat!(
+    r#"{"block":"say","text":"Two thousand will not undo the drift, and it does not have to. It goes where it does the most good, buying only."}"#,
+    "\n",
+    r#"{"block":"figures","ids":["total","cash.value"]}"#,
+    "\n",
+    r#"{"block":"plan","amount":2000}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"Why is my allocation off?","ask":"Why is my allocation off?"}]}"#,
+    "\n",
+);
+
+/// Why the shares moved away from the policy.
+const SCRIPT_ALLOCATION: &str = concat!(
+    r#"{"block":"say","text":"Because prices moved and you did not. Crypto grew to {class.crypto.share} of the portfolio against a target of {class.crypto.target}, and stocks fell to {class.stocks.share} against {class.stocks.target}."}"#,
+    "\n",
+    r#"{"block":"allocation"}"#,
+    "\n",
+    r#"{"block":"say","text":"Nothing urgent. A move part of the way back would take the edge off it before the month is out."}"#,
+    "\n",
+    r#"{"block":"plan","fraction":0.5}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"Where should new money go?","ask":"Where should new money go?"}]}"#,
+    "\n",
+);
+
+/// One holding, in its own figures.
+const SCRIPT_BITCOIN: &str = concat!(
+    r#"{"block":"say","text":"Bitcoin is {holding.pos_btc.value}, or {class.crypto.share} of the portfolio. Today it moved {holding.pos_btc.today}."}"#,
+    "\n",
+    r#"{"block":"figures","ids":["holding.pos_btc.value","holding.pos_btc.today","class.crypto.share","class.crypto.drift"]}"#,
+    "\n",
+    r#"{"block":"holdings","class":"Crypto","sort":"value"}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"What if crypto halves?","ask":"What if crypto halves?"},{"label":"Why is crypto over its target?","ask":"Why is crypto over its target?"}]}"#,
+    "\n",
+);
+
+/// What the demo says when the question is outside what it was written for.
+const SCRIPT_ELSE: &str = concat!(
+    r#"{"block":"say","text":"That one needs a model. Stahl can still tell you what changed, where new money would go, and what a shock would leave. Add a model in Settings; a local one keeps everything on this computer."}"#,
+    "\n",
+    r#"{"block":"figures","ids":["total","today.change"]}"#,
+    "\n",
+    r#"{"block":"go","steps":[{"label":"What changed this month?","ask":"What changed this month?"},{"label":"Open Settings","page":"settings"}]}"#,
+    "\n",
+);
+
 /// Write the demo's prices where `PORTFOLIO_RS_QUOTES=fixture:<path>` can find them.
 pub fn write_quotes(path: &Path) {
     fs::write(path, QUOTES).expect("demo directory is writable");

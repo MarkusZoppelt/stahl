@@ -1,11 +1,13 @@
 //! The application: window chrome, native menus, and how it starts.
 
-use std::{thread, time::Duration};
+use std::{sync::Arc, thread, time::Duration};
 
 use rune::{App, AppHandle, AppSpec, Chrome, Cx, El, Env, MenuItem, Runtime, Tx};
 
 use crate::{
+    ask,
     backend::Backend,
+    demo,
     state::{Page, State},
     theme::FONTS,
     update::Updater,
@@ -204,7 +206,9 @@ pub fn run(
     rune_args: Vec<String>,
 ) -> Result<(), String> {
     let app = with_menus(configured(spec(), move || {
-        State::new(backend, initial_file).with_updater(Updater::github())
+        State::new(backend, initial_file)
+            .with_updater(Updater::github())
+            .with_model(Arc::new(ask::Builtin))
     }));
     let handle = app.handle();
     let app = app.on_ready({
@@ -224,7 +228,12 @@ pub fn run_with_scenes(
     scenes: &'static [Scene],
 ) -> Result<(), String> {
     let spec = AppSpec { scenes, ..spec() };
-    launch(with_menus(configured(spec, move || State::new(backend, None))).args(rune_args))
+    launch(
+        with_menus(configured(spec, move || {
+            State::new(backend, None).with_model(Arc::new(demo::ScriptedModel))
+        }))
+        .args(rune_args),
+    )
 }
 
 /// The app without a window, for tests and tooling: every scene and handler as in the real one.
@@ -244,7 +253,9 @@ pub fn headless_with_updater(
     updater: Updater,
 ) -> Runtime<State> {
     let mut runtime = configured(spec(), move || {
-        State::new(backend, initial_file).with_updater(updater)
+        State::new(backend, initial_file)
+            .with_updater(updater)
+            .with_model(Arc::new(demo::ScriptedModel))
     })
     .headless_runtime(size, Env::new(true, 2.0));
     runtime.state.startup();

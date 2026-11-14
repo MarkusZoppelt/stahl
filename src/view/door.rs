@@ -23,20 +23,17 @@ pub const NOTCH: f32 = TAU / 24.0;
 /// A heavy dial: it takes its time and settles with a small give, as steel would.
 pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
 
-/// How many things need the owner's attention: what the Overview's agenda lists, apart from its
-/// notices. The door and the agenda read the same list, so they never disagree.
+/// How many things need the owner's attention: the cards the Overview draws and its to-dos that
+/// are not notices. The door and the page read the same lists, so they never disagree.
 pub fn attention(s: &State) -> usize {
-    s.agenda()
-        .iter()
-        .filter(|item| item.weight != Weight::Notice)
-        .count()
+    s.attention().len()
 }
 
 /// Whether one of the things needing attention is a failure rather than a warning.
 fn attention_is_critical(s: &State) -> bool {
-    s.agenda()
+    s.attention()
         .iter()
-        .any(|item| matches!(item.weight, Weight::Total | Weight::Critical))
+        .any(|weight| matches!(weight, Weight::Total | Weight::Critical))
 }
 
 /// The angle the dial rests at: one full turn per price refresh and per portfolio opened, so
@@ -76,10 +73,28 @@ fn turn_dial(s: &mut State, drag: &mut Drag, _tx: &mut Tx) {
                     delta += TAU;
                 }
                 s.dial_hand += delta;
+                turn_time(s, delta);
             }
             s.dial_drag = Some(angle);
         }
-        Phase::Up => s.dial_drag = None,
+        Phase::Up => {
+            s.dial_drag = None;
+            s.time.dial_rest = 0.0;
+        }
+    }
+}
+
+/// The dial turns time: each notch turned back is a recorded day back, each notch forward a day
+/// forward, and it stops at today. Only with a portfolio open, so the welcome door stays a door.
+fn turn_time(s: &mut State, delta: f32) {
+    if !s.has_portfolio() {
+        return;
+    }
+    s.time.dial_rest += delta;
+    let notches = (s.time.dial_rest / NOTCH).trunc();
+    if notches != 0.0 {
+        s.time.dial_rest -= notches * NOTCH;
+        s.step_time(notches as i64);
     }
 }
 
@@ -89,6 +104,9 @@ fn turn_key(s: &mut State, event: &KeyEvent, _tx: &mut Tx) -> bool {
         Key::Left => s.dial_hand -= NOTCH,
         Key::Right => s.dial_hand += NOTCH,
         _ => return false,
+    }
+    if s.has_portfolio() {
+        s.step_time(if event.key == Key::Left { -1 } else { 1 });
     }
     true
 }
@@ -132,7 +150,11 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
             .focusable(true)
             .on_drag(turn_dial)
             .on_key(turn_key)
-            .help("Drag to turn the dial, or press the left and right arrow keys");
+            .help(if s.has_portfolio() && !s.time.days.is_empty() {
+                "Turn the dial back to go back in time, a recorded day a notch. The arrow keys turn it too."
+            } else {
+                "Drag to turn the dial, or press the left and right arrow keys"
+            });
     }
     door.role("img")
         .label(format!("Stahl Capital. {}", describe(count)))
@@ -145,9 +167,21 @@ fn body(s: &State, size: f32, place: &str) -> El {
         // The welcome screen's door is the large door; the mark has its own light and its own
         // tumblers.
         if place == "welcome" {
-            crate::fx::door(size, dial_turns(s), s.door_busy, s.dial_hand, dragging)
+            crate::fx::door(
+                size,
+                dial_turns(s),
+                s.door_busy || s.thinking(),
+                s.dial_hand,
+                dragging,
+            )
         } else {
-            crate::fx::mark(size, dial_turns(s), s.door_busy, s.dial_hand, dragging)
+            crate::fx::mark(
+                size,
+                dial_turns(s),
+                s.door_busy || s.thinking(),
+                s.dial_hand,
+                dragging,
+            )
         }
     } else {
         let dial = size * DIAL;

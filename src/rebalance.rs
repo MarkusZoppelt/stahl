@@ -53,6 +53,11 @@ impl Class {
         finite(self.value).max(0.0)
     }
 
+    /// What the class is worth, as the plans read it: a negative or unknown value is nothing.
+    pub fn held_value(&self) -> f64 {
+        self.held()
+    }
+
     fn band(&self) -> Option<f64> {
         self.target
             .map(|_| self.tolerance.unwrap_or(DEFAULT_TOLERANCE))

@@ -8,7 +8,7 @@ use crate::{
     format, icons,
     state::{Page, State},
     theme::Theme,
-    view::ui,
+    view::{matters, ui},
 };
 
 fn tone(severity: &Severity, t: &Theme) -> Color {
@@ -563,6 +563,7 @@ pub fn documents(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     col()
         .w_full()
         .gap(16.0)
+        .child(matters::records(s, t, cx))
         .child(
             ui::columns(ui::room(s, cx), [2, 1, 1], 16.0)
                 .child(weekly)

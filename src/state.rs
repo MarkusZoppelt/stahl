@@ -6,6 +6,8 @@
 
 use std::{
     collections::HashMap,
+    fs,
+    io::Read,
     mem,
     path::{Path, PathBuf},
     sync::{
@@ -21,6 +23,7 @@ use portfolio_rs::{
     doctor::WorkspaceHealth,
     mcp::dto::Finding,
     policy::Policy,
+    position::parse_purchase_date,
     review::Review,
     simulate::RebalanceSimulation,
     state::{
@@ -38,12 +41,24 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    intake::{
+        self,
+        apply::{self as intake_apply, Choice},
+        reconcile::{self, Bought, Holding, Ledger},
+        rules::SetAside,
+        text::Sheet,
+    },
+    matters::MattersPage,
+    outlook,
+    records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
 };
 
 /// How long a chart takes to draw itself in.
 pub const DRAW_IN: f64 = 0.9;
+/// How long a new plate takes to be set onto the wall and catch the light once.
+pub const RECORD_ARRIVAL_FOR: f64 = 2.4;
 /// How far (points) a page is pulled past its top before letting go refreshes the prices.
 pub const PULL_TO_REFRESH: f32 = 72.0;
 /// How far a holding's row slides on a phone to show its actions.
@@ -115,9 +130,12 @@ pub struct Opening {
 }
 
 const TOAST_FOR: Duration = Duration::from_millis(2600);
+/// Longer, because the Undo beside it is worth a moment's thought.
+const UNDO_FOR: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
+    Ask,
     Overview,
     Holdings,
     Allocation,
@@ -127,11 +145,28 @@ pub enum Page {
     Policy,
     Documents,
     Briefing,
+    Records,
     Health,
     Settings,
 }
 
 impl Page {
+    /// Every page, in the order the sidebar lists them.
+    pub const ALL: [Page; 13] = [
+        Page::Ask,
+        Page::Overview,
+        Page::Holdings,
+        Page::Allocation,
+        Page::Performance,
+        Page::Review,
+        Page::Rebalance,
+        Page::Policy,
+        Page::Documents,
+        Page::Briefing,
+        Page::Records,
+        Page::Health,
+        Page::Settings,
+    ];
     pub const PORTFOLIO: [Page; 4] = [
         Page::Overview,
         Page::Holdings,
@@ -139,12 +174,13 @@ impl Page {
         Page::Performance,
     ];
     pub const PLAN: [Page; 4] = [Page::Review, Page::Rebalance, Page::Policy, Page::Documents];
-    pub const INSIGHTS: [Page; 2] = [Page::Briefing, Page::Health];
+    pub const INSIGHTS: [Page; 3] = [Page::Briefing, Page::Records, Page::Health];
     /// The pages with a tab of their own on a phone. Everything else is under More.
     pub const TABS: [Page; 3] = [Page::Overview, Page::Holdings, Page::Performance];
 
     pub fn label(self) -> &'static str {
         match self {
+            Page::Ask => "Counsel",
             Page::Overview => "Overview",
             Page::Holdings => "Holdings",
             Page::Allocation => "Allocation",
@@ -154,6 +190,7 @@ impl Page {
             Page::Policy => "Policy",
             Page::Documents => "Documents",
             Page::Briefing => "Briefing",
+            Page::Records => "Records",
             Page::Health => "Data Health",
             Page::Settings => "Settings",
         }
@@ -161,6 +198,7 @@ impl Page {
 
     pub fn key(self) -> &'static str {
         match self {
+            Page::Ask => "nav-ask",
             Page::Overview => "nav-overview",
             Page::Holdings => "nav-holdings",
             Page::Allocation => "nav-allocation",
@@ -170,6 +208,7 @@ impl Page {
             Page::Policy => "nav-policy",
             Page::Documents => "nav-documents",
             Page::Briefing => "nav-briefing",
+            Page::Records => "nav-records",
             Page::Health => "nav-health",
             Page::Settings => "nav-settings",
         }
@@ -179,9 +218,11 @@ impl Page {
         Self::PLAN.contains(&self)
     }
 
-    /// Its digit with the main modifier, for the pages that have one.
+    /// Its digit with the main modifier, for the pages that have one. Records is reached through
+    /// the sidebar and the command palette.
     pub fn shortcut(self) -> Option<char> {
         Some(match self {
+            Page::Ask => return None,
             Page::Overview => '1',
             Page::Holdings => '2',
             Page::Allocation => '3',
@@ -192,6 +233,7 @@ impl Page {
             Page::Documents => '8',
             Page::Briefing => '9',
             Page::Health => '0',
+            Page::Records => return None,
             Page::Settings => ',',
         })
     }
@@ -203,6 +245,22 @@ impl Page {
             .chain(Self::INSIGHTS)
             .chain([Page::Settings])
             .find(|page| page.shortcut() == Some(key))
+    }
+
+    /// A page by the name a block or a prompt uses: "rebalance", "Data Health".
+    pub fn from_name(name: &str) -> Option<Page> {
+        let name = name.trim().to_lowercase().replace([' ', '_'], "-");
+        Self::ALL
+            .into_iter()
+            .filter(|page| *page != Page::Ask)
+            .find(|page| page.label().to_lowercase().replace(' ', "-") == name)
+            .or(match name.as_str() {
+                "health" | "data-health" => Some(Page::Health),
+                "docs" => Some(Page::Documents),
+                "settings" | "preferences" => Some(Page::Settings),
+                // Counsel is reached only through the AI switch, never by name.
+                _ => None,
+            })
     }
 }
 
@@ -404,6 +462,65 @@ impl PositionForm {
     }
 }
 
+/// What the owner did with one change a broker's file proposes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Decision {
+    /// Still to decide.
+    Pending,
+    /// Recorded.
+    Accepted,
+    /// Not taken.
+    Left,
+}
+
+/// A broker's file, read and compared with the positions: what it asks for, or why it can't be
+/// used. The review sheet is drawn from this and nothing else.
+pub struct IntakeReview {
+    /// The file's name, as the owner knows it.
+    pub file: String,
+    /// The rows it was read from, so each change can show the file's own line.
+    pub sheet: Option<Sheet>,
+    /// What the file means for the record. `None` when it can't be read.
+    pub ledger: Option<Ledger>,
+    /// Why the file can't be used, in plain words.
+    pub problem: Option<String>,
+    /// One decision per proposal in `ledger`.
+    pub decided: Vec<Decision>,
+    /// The lines the reader set aside, and why. Nothing is recorded from them.
+    pub aside: Vec<SetAside>,
+    /// Which sheet this is, so an undo only puts back rows of the sheet that took them.
+    pub serial: u64,
+    /// A change is being written, so a second press mustn't start another.
+    pub busy: bool,
+}
+
+impl IntakeReview {
+    fn problem(file: String, why: String) -> IntakeReview {
+        IntakeReview {
+            file,
+            sheet: None,
+            ledger: None,
+            problem: Some(why),
+            decided: Vec::new(),
+            aside: Vec::new(),
+            serial: 0,
+            busy: false,
+        }
+    }
+}
+
+/// The positions as they were before an import, so the toast's Undo can put them back.
+pub struct IntakeUndo {
+    /// The positions before the import.
+    json: String,
+    /// The positions as the import left them. The undo only applies while they still are.
+    left: String,
+    dirty: bool,
+    /// The sheet it took proposals from, and which, to put them back to undecided.
+    serial: u64,
+    taken: Vec<usize>,
+}
+
 /// The New Workspace form.
 pub struct NewWorkspaceForm {
     pub name: TextEdit,
@@ -470,14 +587,32 @@ pub enum Command {
     Theme,
     Sidebar,
     AddPosition,
+    Import,
     CopyBriefing,
     CheckForUpdates,
+    /// Ask Counsel this question, from the palette.
+    Ask(String),
     Close,
 }
 
 pub struct Palette {
     pub query: TextEdit,
     pub selected: usize,
+}
+
+/// The one-time question before a question goes to a provider the owner hasn't allowed yet.
+pub struct Consent {
+    /// The question, to put back if they change their mind.
+    pub question: String,
+    /// The request as it will go, so nothing is rebuilt after they say yes.
+    pub request: crate::ask::Request,
+    pub model: String,
+    pub host: String,
+    /// The exact body: what "Show exactly what is sent" shows.
+    pub body: String,
+    pub show: bool,
+    /// Drops the request if the prompt is abandoned.
+    pub cancel: tokio::sync::oneshot::Sender<()>,
 }
 
 pub struct SettingsForm {
@@ -584,6 +719,43 @@ pub struct PolicyPage {
     pub error: Option<String>,
 }
 
+/// The Performance page's outlook: how far out to look, what is added every month, and the
+/// goal the owner is aiming at. The assumptions come from the policy, or from `outlook`'s
+/// table when it has none.
+pub struct OutlookPage {
+    pub years: u32,
+    pub monthly: f64,
+    pub goal: TextEdit,
+    /// The goal once it reads as a number, so a view never parses text.
+    pub goal_amount: Option<f64>,
+    pub assumptions: outlook::Assumptions,
+    /// How far the biggest class is assumed to fall in year 2, in percent. 0 is no fall.
+    pub shock: u32,
+    /// The fan for these inputs, computed when they change rather than in the view.
+    pub simulated: outlook::Outlook,
+}
+
+impl OutlookPage {
+    /// The falls the page offers, in percent. The first is none.
+    pub const SHOCKS: [u32; 4] = [0, 20, 30, 50];
+    /// The year the fall happens in.
+    pub const SHOCK_YEAR: u32 = 2;
+}
+
+impl OutlookPage {
+    fn new() -> Self {
+        Self {
+            years: 10,
+            monthly: 500.0,
+            goal: TextEdit::new(""),
+            goal_amount: None,
+            assumptions: outlook::Assumptions::default(),
+            shock: 0,
+            simulated: outlook::Outlook::default(),
+        }
+    }
+}
+
 pub struct DocumentsPage {
     pub title: TextEdit,
     pub generated: Option<GeneratedDocument>,
@@ -642,6 +814,9 @@ pub struct Pick {
 
 pub struct State {
     pub backend: Backend,
+    /// Whether AI features are on: Counsel, its questions, and the provider. Off until the owner
+    /// turns them on; the saved choice is read at startup.
+    pub ai: bool,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     pending: usize,
@@ -752,6 +927,12 @@ pub struct State {
     pub drop_hover: bool,
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
+    /// A broker's file waiting for the owner's approval.
+    pub intake: Option<IntakeReview>,
+    /// The imports whose Undo is offered, oldest first. The last is undone first.
+    pub intake_undo: Vec<IntakeUndo>,
+    /// Counts the sheets opened, so an undo knows which sheet's rows it put back.
+    intake_serial: u64,
     pub new_workspace: Option<NewWorkspaceForm>,
     pub guide: bool,
     /// Set when a folder was opened and it is not a workspace. The previous portfolio stays in
@@ -792,14 +973,37 @@ pub struct State {
     pub simulation: Loadable<RebalanceSimulation>,
     /// The allocation the Rebalance page is being played with.
     pub rebalance: RebalancePage,
+    /// The Performance page's fan: its horizon, its monthly amount and its goal.
+    pub outlook: OutlookPage,
     pub briefing: Loadable<Briefing>,
+    /// The records room's wall, newest plate first.
+    pub records: Loadable<Vec<Record>>,
+    /// Plates the owner hasn't been shown yet: the sidebar's small mark.
+    pub records_unseen: usize,
+    /// The plate whose arrival is being shown, and when it started.
+    pub record_arrival: Option<(String, f64)>,
+    /// The plate opened on the Records page.
+    pub record_plate: Option<String>,
     pub validation: Loadable<ValidationReport>,
     pub doctor: Loadable<WorkspaceHealth>,
     pub policy: PolicyPage,
     pub documents: DocumentsPage,
+    /// What the bank has prepared for signature, and what was decided.
+    pub matters: MattersPage,
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
+    /// The session's Counsel conversation, and the model answering it.
+    pub ask: crate::ask::Conversation,
+    /// What the model has sent so far, read on the UI thread.
+    ask_events: Receiver<crate::ask::Event>,
+    ask_events_tx: Sender<crate::ask::Event>,
+    /// The model that answers questions.
+    pub model: Arc<dyn crate::ask::Model>,
+    /// A question waiting for the owner's yes before it leaves the machine.
+    pub consent: Option<Consent>,
+    /// Frames still to rebuild after an answer finished, so measured blocks settle.
+    ask_settle: u8,
 
     // Since the last look.
     /// The portfolio this session's look was noted for, so reopening it doesn't count again.
@@ -808,6 +1012,8 @@ pub struct State {
     pub since: Option<Since>,
     /// The portfolio since then, from the stored valuations.
     pub change: Option<Change>,
+    /// Where the owner is in time: today, or a recorded day in the past.
+    pub time: crate::time::Time,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -818,6 +1024,38 @@ pub enum BadNumber {
         thousands: String,
         decimal: String,
     },
+}
+
+/// Long lines broken at spaces, so a request reads as a page rather than one endless line.
+fn wrap_lines(text: &str, width: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let mut at = 0;
+        let mut rest = line;
+        while rest.chars().count() > width {
+            let cut = rest
+                .char_indices()
+                .take(width + 1)
+                .filter(|(_, character)| *character == ' ')
+                .map(|(index, _)| index)
+                .last()
+                .unwrap_or_else(|| {
+                    rest.char_indices()
+                        .nth(width)
+                        .map_or(rest.len(), |(index, _)| index)
+                });
+            out.push_str(&rest[..cut]);
+            out.push('\n');
+            rest = rest[cut..].trim_start();
+            at += 1;
+            if at > 10_000 {
+                break;
+            }
+        }
+        out.push_str(rest);
+        out.push('\n');
+    }
+    out
 }
 
 /// Marks that only ever separate thousands: `1 000`, `1'000`, and the spaces locales format with.
@@ -931,7 +1169,10 @@ fn text_or_none(text: &str) -> Option<String> {
 impl State {
     pub fn new(backend: Backend, initial_file: Option<String>) -> State {
         let (jobs_tx, jobs_rx) = channel();
+        let (ask_events_tx, ask_events) = channel();
+        let ai = backend.ai_features();
         State {
+            ai,
             backend,
             jobs_tx,
             jobs_rx,
@@ -993,6 +1234,9 @@ impl State {
             drop_hover: false,
             palette: None,
             form: None,
+            intake: None,
+            intake_undo: Vec::new(),
+            intake_serial: 0,
             new_workspace: None,
             guide: false,
             folder_prompt: None,
@@ -1021,7 +1265,12 @@ impl State {
             review: Loadable::default(),
             simulation: Loadable::default(),
             rebalance: RebalancePage::new(),
+            outlook: OutlookPage::new(),
             briefing: Loadable::default(),
+            records: Loadable::default(),
+            records_unseen: 0,
+            record_arrival: None,
+            record_plate: None,
             validation: Loadable::default(),
             doctor: Loadable::default(),
             policy: PolicyPage {
@@ -1038,6 +1287,7 @@ impl State {
                 message: None,
                 error: None,
             },
+            matters: MattersPage::default(),
             settings: SettingsForm {
                 currency: TextEdit::new(""),
                 provider_url: TextEdit::new(""),
@@ -1047,6 +1297,12 @@ impl State {
                 error: None,
             },
             has_api_key: false,
+            ask: crate::ask::Conversation::new(),
+            ask_events,
+            ask_events_tx,
+            model: Arc::new(crate::ask::Builtin),
+            consent: None,
+            ask_settle: 0,
             updates: Updates {
                 updater: Updater::disabled(),
                 available: None,
@@ -1060,6 +1316,7 @@ impl State {
             seen_for: None,
             since: None,
             change: None,
+            time: crate::time::Time::default(),
         }
     }
 
@@ -1075,7 +1332,7 @@ impl State {
 
     // --- Running work off the UI thread ---
 
-    fn run<T, F>(
+    pub(crate) fn run<T, F>(
         &mut self,
         work: impl FnOnce(Backend) -> F,
         done: impl FnOnce(&mut State, BackendResult<T>) + Send + 'static,
@@ -1129,6 +1386,32 @@ impl State {
         let from_welcome = self.welcome_showing;
         crate::view::rebalance::sync(self);
         let mut changed = self.drain() || mem::take(&mut self.settled);
+        changed |= self.drain_ask();
+        changed |= self.ask_advance(now);
+        changed |= self.ask_reveal(now);
+        if let Some((at, _)) = self.ask.queued.front() {
+            tx.wake_at(*at);
+        }
+        if let Some(reveal) = self.ask.reveal.as_ref().filter(|reveal| !reveal.done()) {
+            tx.wake_at(reveal.next_at());
+        }
+        // A block that has just landed shows what it says for a beat, then moves to what the
+        // shock leaves or counts its figures up. The frames keep coming until it has.
+        if let Some(landed) = self
+            .ask
+            .turns
+            .last()
+            .and_then(|turn| turn.landed.last())
+            .copied()
+            && now < landed + crate::ask::PLAY_HOLD
+        {
+            tx.wake_at(landed + crate::ask::PLAY_HOLD);
+            changed = true;
+        }
+        if self.ask_settle > 0 {
+            self.ask_settle -= 1;
+            changed = true;
+        }
         // The compositor found the shader door on its first frame: build the view that uses it.
         if self.shaders && !self.shader_view {
             self.shader_view = true;
@@ -1180,14 +1463,27 @@ impl State {
         }
         if self.toast_armed {
             self.toast_armed = false;
-            tx.wake_after(TOAST_FOR + Duration::from_millis(50));
+            let shown_for = self.toast_for();
+            tx.wake_after(shown_for + Duration::from_millis(50));
         }
+        // A new plate's arrival plays once: after it, the plate is simply on the wall.
+        if let Some((_, started)) = &self.record_arrival {
+            if now >= started + RECORD_ARRIVAL_FOR {
+                self.record_arrival = None;
+                changed = true;
+            } else {
+                tx.wake_at(started + RECORD_ARRIVAL_FOR);
+            }
+        }
+        // A hold on a Sign control fills its ring; only letting go after its time signs.
+        changed |= self.matters_tick();
         if self
             .toast
             .as_ref()
-            .is_some_and(|(_, shown)| shown.elapsed() >= TOAST_FOR)
+            .is_some_and(|(_, shown)| shown.elapsed() >= self.toast_for())
         {
             self.toast = None;
+            self.intake_undo.clear();
             changed = true;
         }
         // A save or revert asked for from the unsaved-changes dialog finishes in `drain`, above.
@@ -1211,8 +1507,23 @@ impl State {
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>) {
+        self.intake_undo.clear();
+        self.show_undo_toast(message);
+    }
+
+    /// A toast with an Undo beside it, which puts the positions back as they were.
+    fn show_undo_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
         self.toast_armed = true;
+    }
+
+    /// How long the toast stays: an Undo is worth more than a word of confirmation.
+    fn toast_for(&self) -> Duration {
+        if !self.intake_undo.is_empty() {
+            UNDO_FOR
+        } else {
+            TOAST_FOR
+        }
     }
 
     /// A tap on the door in the phone's top bar turns it a quarter. A full turn seals the vault.
@@ -1271,6 +1582,10 @@ impl State {
     /// floats over the page, then a holding's details, then a page reached through More.
     /// Returns whether there was anywhere to go back to.
     pub fn go_back(&mut self) -> bool {
+        if self.consent.is_some() {
+            self.consent_cancel();
+            return true;
+        }
         if self.palette.take().is_some()
             || self.form.take().is_some()
             || self.confirm.take().is_some()
@@ -1280,6 +1595,9 @@ impl State {
         }
         if self.guide {
             self.guide = false;
+            return true;
+        }
+        if self.record_plate.take().is_some() {
             return true;
         }
         if !self.compact {
@@ -1348,6 +1666,15 @@ impl State {
             format::HIDDEN.to_string()
         } else {
             format::signed_currency(value, &self.currency())
+        }
+    }
+
+    /// Money to the nearest thousand, for ranges where cents are noise.
+    pub fn money_thousands(&self, value: f64) -> String {
+        if self.privacy {
+            format::HIDDEN.to_string()
+        } else {
+            format::currency_thousands(value, &self.currency())
         }
     }
 
@@ -1509,6 +1836,8 @@ impl State {
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        // Today's figures land as today's, and the day being looked at is shown again over them.
+        let past = self.leave_past_for_news();
         self.summary = Some(snapshot.summary);
         self.positions = snapshot.positions;
         self.quotes = snapshot.quotes;
@@ -1517,10 +1846,45 @@ impl State {
         self.findings = snapshot.findings;
         self.network = snapshot.network;
         self.has_policy = snapshot.has_policy;
+        self.outlook.assumptions = self.backend.outlook_assumptions();
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
         self.load_since();
+        self.load_record_mark();
+        self.travel(past);
+        self.load_days();
+    }
+
+    /// Recompute the Performance page's fan from what the page holds now. Called when the
+    /// portfolio or one of the outlook controls changes, never from a view: the simulation is
+    /// far too much work for a pointer move over the chart.
+    pub fn refresh_outlook(&mut self) {
+        let shocked = self
+            .allocation
+            .iter()
+            .max_by(|a, b| a.value.total_cmp(&b.value))
+            .map(|item| item.asset_class.clone());
+        let shock = shocked
+            .filter(|_| self.outlook.shock > 0)
+            .map(|asset_class| outlook::Shock {
+                asset_class,
+                fall_percent: f64::from(self.outlook.shock),
+                year: OutlookPage::SHOCK_YEAR,
+            });
+        let inputs = outlook::Inputs {
+            today: self
+                .allocation
+                .iter()
+                .map(|item| (item.asset_class.clone(), item.value))
+                .collect(),
+            monthly: self.outlook.monthly,
+            years: self.outlook.years,
+            goal: self.outlook.goal_amount,
+            shock,
+            assumptions: self.outlook.assumptions.clone(),
+        };
+        self.outlook.simulated = outlook::simulate(&inputs);
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -1753,8 +2117,12 @@ impl State {
 
     /// A different portfolio is open now, so nothing fetched for the last one still applies.
     fn opened_another(&mut self) {
+        self.travel(None);
+        self.time = crate::time::Time::default();
         self.dirty = false;
         self.form = None;
+        self.intake = None;
+        self.intake_undo.clear();
         self.folder_prompt = None;
         self.selected = None;
         self.inspector.set_open(false);
@@ -1772,6 +2140,7 @@ impl State {
         self.documents.generated = None;
         self.documents.message = None;
         self.documents.error = None;
+        self.matters.clear();
         if self.page.needs_workspace() && !self.is_workspace() {
             self.page = Page::Overview;
         }
@@ -1791,6 +2160,330 @@ impl State {
             return;
         }
         self.show_file_dialog(tx);
+    }
+
+    /// Ask for a broker's file to compare with the positions.
+    pub fn ask_for_intake(&mut self, tx: &mut Tx) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        let directory = self
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(self.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf);
+        let options = FileDialogOptions {
+            title: "Import a Broker File".into(),
+            directory,
+            ..Default::default()
+        }
+        .filter("Broker export", &["csv", "tsv", "txt"]);
+        if self.platform_picker {
+            self.ask_platform(PickKind::File, options.title, |state, path| {
+                state.open_intake(Path::new(&path));
+            });
+            return;
+        }
+        tx.open_file(options, |state: &mut State, result, _| match result {
+            Ok(Some(path)) => state.open_intake(&path),
+            Ok(None) => {}
+            Err(error) => state.error = Some(error.to_string()),
+        });
+    }
+
+    /// Read a broker's file and compare it with the positions, for the owner to approve.
+    pub fn open_intake(&mut self, path: &Path) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        // A file is compared with the positions as they are today, not a day travelled to.
+        self.return_to_today();
+        let file = path.to_string_lossy().into_owned();
+        let name = file_name(&file).to_string();
+        let holdings = self.intake_holdings();
+        self.run(
+            move |_backend| async move {
+                // At most one byte more than the largest file read, so a huge file is refused
+                // without being loaded. The reading happens here, off the UI thread.
+                let mut bytes = Vec::new();
+                fs::File::open(&file)
+                    .and_then(|handle| {
+                        handle
+                            .take(intake::text::MAX_BYTES as u64 + 1)
+                            .read_to_end(&mut bytes)
+                    })
+                    .map_err(|error| format!("This file can't be read: {error}"))?;
+                let outcome = intake::understand(&bytes);
+                let ledger = match &outcome {
+                    intake::Outcome::Read { reading, .. } => {
+                        Some(reconcile::reconcile(reading, &holdings))
+                    }
+                    _ => None,
+                };
+                Ok((outcome, ledger))
+            },
+            move |state, result| match result {
+                Ok((outcome, ledger)) => state.read_intake(name, outcome, ledger),
+                Err(error) => state.intake = Some(IntakeReview::problem(name, error)),
+            },
+        );
+    }
+
+    /// What was made of a file, compared with the positions on record.
+    fn read_intake(&mut self, file: String, outcome: intake::Outcome, ledger: Option<Ledger>) {
+        self.intake_serial += 1;
+        let serial = self.intake_serial;
+        let review = match (outcome, ledger) {
+            (intake::Outcome::Read { sheet, reading, .. }, Some(ledger)) => {
+                // The sheet is over Holdings: what the file changes is in the table behind it.
+                self.navigate(Page::Holdings);
+                IntakeReview {
+                    file,
+                    decided: vec![Decision::Pending; ledger.proposals.len()],
+                    aside: reading.aside,
+                    sheet: Some(sheet),
+                    ledger: Some(ledger),
+                    problem: None,
+                    serial,
+                    busy: false,
+                }
+            }
+            (intake::Outcome::Unmapped { missing, .. }, _) => IntakeReview::problem(
+                file,
+                format!(
+                    "This table can be read, but nothing in it says {}. A different export from \
+                     your broker may name its columns.",
+                    intake::spoken(&missing)
+                ),
+            ),
+            (intake::Outcome::Unreadable(why), _) => IntakeReview::problem(file, why),
+            (intake::Outcome::Read { .. }, None) => {
+                IntakeReview::problem(file, "This file can't be compared.".to_string())
+            }
+        };
+        self.intake = Some(review);
+    }
+
+    /// The positions as reconciling a broker's file needs them.
+    fn intake_holdings(&self) -> Vec<Holding> {
+        self.positions
+            .iter()
+            .map(|position| Holding {
+                id: position
+                    .position_id
+                    .clone()
+                    .unwrap_or_else(|| position.id.to_string()),
+                name: position.name.clone(),
+                ticker: position.ticker.clone(),
+                class: position.asset_class.clone(),
+                quantity: position.amount,
+                purchases: position
+                    .purchases
+                    .iter()
+                    .map(|purchase| Bought {
+                        date: purchase
+                            .date
+                            .as_deref()
+                            .and_then(parse_purchase_date)
+                            .map(|date| date.date_naive()),
+                        quantity: purchase.quantity,
+                        price: purchase.price,
+                    })
+                    .collect(),
+                currency: self
+                    .quote(position)
+                    .and_then(|quote| quote.currency.clone()),
+            })
+            .collect()
+    }
+
+    /// Record one change the sheet proposed.
+    pub fn accept_intake(&mut self, index: usize) {
+        self.write_intake(vec![index], false);
+    }
+
+    /// Record every change that needs no second look, and put the sheet away.
+    pub fn accept_all_intake(&mut self) {
+        let indices = self.intake.as_ref().map_or_else(Vec::new, |review| {
+            let Some(ledger) = &review.ledger else {
+                return Vec::new();
+            };
+            ledger
+                .proposals
+                .iter()
+                .enumerate()
+                .filter(|(index, proposal)| {
+                    proposal.in_all && review.decided.get(*index) == Some(&Decision::Pending)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        });
+        self.write_intake(indices, true);
+    }
+
+    /// Refuse one change, so the sheet stops asking about it.
+    pub fn leave_intake(&mut self, index: usize) {
+        if let Some(review) = &mut self.intake
+            && let Some(decision) = review.decided.get_mut(index)
+        {
+            *decision = Decision::Left;
+        }
+    }
+
+    /// Write the changes at `indices`, then re-read what they affect, keeping the positions from
+    /// before them so the toast's Undo can put them back.
+    fn write_intake(&mut self, indices: Vec<usize>, close: bool) {
+        let Some(review) = self.intake.as_mut() else {
+            return;
+        };
+        if review.busy {
+            return;
+        }
+        let Some(ledger) = &review.ledger else {
+            return;
+        };
+        let mut ops = Vec::new();
+        let mut taken = Vec::new();
+        for index in indices {
+            let Some(proposal) = ledger.proposals.get(index) else {
+                continue;
+            };
+            if review.decided.get(index) != Some(&Decision::Pending) || !proposal.ready {
+                continue;
+            }
+            if let Some(op) = intake_apply::op(proposal, &Choice::of(proposal)) {
+                ops.push(op);
+                taken.push(index);
+            }
+        }
+        if ops.is_empty() {
+            return;
+        }
+        review.busy = true;
+        let was_dirty = self.dirty;
+        let count = taken.len();
+        let serial = review.serial;
+        self.run(
+            move |backend| async move {
+                let (before, left) = backend.apply_intake(ops).await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((before, left, open, snapshot, backend.config().await))
+            },
+            move |state, result| {
+                if let Some(review) = &mut state.intake {
+                    review.busy = false;
+                }
+                match result {
+                    Ok((before, left, open, snapshot, config)) => {
+                        state.open = open;
+                        state.config = Some(config);
+                        if let Some(snapshot) = snapshot {
+                            state.apply_snapshot(snapshot);
+                        }
+                        state.dirty = true;
+                        if let Some(review) = &mut state.intake {
+                            for &index in &taken {
+                                if let Some(decision) = review.decided.get_mut(index) {
+                                    *decision = Decision::Accepted;
+                                }
+                            }
+                        }
+                        // Accept all puts the sheet away only when nothing is left that the
+                        // owner could still take: a doubted change stays in front of them.
+                        let waiting = state.intake.as_ref().is_some_and(|review| {
+                            review.ledger.as_ref().is_some_and(|ledger| {
+                                ledger
+                                    .proposals
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(index, proposal)| {
+                                        proposal.ready
+                                            && review.decided.get(index) == Some(&Decision::Pending)
+                                    })
+                            })
+                        });
+                        if close && !waiting {
+                            state.intake = None;
+                        }
+                        state.intake_undo.push(IntakeUndo {
+                            json: before,
+                            left,
+                            dirty: was_dirty,
+                            serial,
+                            taken,
+                        });
+                        state.show_undo_toast(if count == 1 {
+                            "Imported. Save to keep it.".to_string()
+                        } else {
+                            format!("{count} changes imported. Save to keep them.")
+                        });
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+            },
+        );
+    }
+
+    /// Put the positions back as they were before the last import. Each import is undone in
+    /// turn, and only while the positions are still as it left them: anything edited since is
+    /// kept, and the undo says so rather than reverting it.
+    pub fn undo_intake(&mut self) {
+        let Some(undo) = self.intake_undo.pop() else {
+            return;
+        };
+        self.run(
+            move |backend| async move {
+                backend
+                    .restore_positions(undo.json.clone(), &undo.left)
+                    .await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((undo, open, snapshot, backend.config().await))
+            },
+            |state, result| match result {
+                Ok((undo, open, snapshot, config)) => {
+                    state.open = open;
+                    state.config = Some(config);
+                    if let Some(snapshot) = snapshot {
+                        state.apply_snapshot(snapshot);
+                    }
+                    state.dirty = undo.dirty;
+                    // The import before this one keeps what it left: if anything was edited
+                    // between the two, its undo must see that and refuse.
+                    if let Some(review) = &mut state.intake
+                        && review.serial == undo.serial
+                    {
+                        for index in undo.taken {
+                            if let Some(decision) = review.decided.get_mut(index) {
+                                *decision = Decision::Pending;
+                            }
+                        }
+                    }
+                    let more = !state.intake_undo.is_empty();
+                    if more {
+                        state.show_undo_toast("Import undone. Undo again for the one before.");
+                    } else {
+                        state.show_toast("Import undone");
+                    }
+                }
+                Err(error) => {
+                    state.intake_undo.clear();
+                    state.show_toast(error);
+                }
+            },
+        );
     }
 
     fn show_file_dialog(&mut self, tx: &mut Tx) {
@@ -2034,6 +2727,7 @@ impl State {
                     state.performance = None;
                     state.findings.clear();
                     state.has_policy = false;
+                    state.refresh_outlook();
                     state.opened_another();
                     state.page = Page::Overview;
                 }
@@ -2045,19 +2739,31 @@ impl State {
     // --- Navigating ---
 
     pub fn navigate(&mut self, page: Page) {
+        let page = if page == Page::Ask && !self.ai {
+            Page::Overview
+        } else {
+            page
+        };
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
+        self.cancel_hold();
         if page != self.page {
             self.previous_page = self.page;
         }
         self.page = page;
         self.more = false;
+        if page == Page::Ask {
+            // The question is what the page is for: the input takes the keyboard.
+            self.ask.input.focused = true;
+            self.apply_ask_span();
+        }
         self.chart_hover = None;
         self.chart_point = None;
         self.measure.clear();
         self.donut_hover = None;
         self.palette = None;
+        self.record_plate = None;
         if page != Page::Holdings {
             self.inspector.set_open(false);
         } else if self.selected.is_some() {
@@ -2073,6 +2779,8 @@ impl State {
                 self.load_history();
                 // The agenda reads the same review as the Review page, so they never disagree.
                 self.load_review();
+                // What was signed, declined or put off, and the policy the plans are measured by.
+                self.load_matters();
             }
             Page::Holdings | Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
@@ -2082,19 +2790,29 @@ impl State {
                 self.load_review();
             }
             Page::Briefing => self.load_briefing(),
+            Page::Records => {
+                self.load_records(true);
+                self.load_history();
+            }
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
-            Page::Documents => {}
+            Page::Documents => self.load_decisions(),
+            Page::Ask => {
+                // A chart block and an allocation block read what the Overview reads.
+                self.load_history();
+                self.load_review();
+            }
         }
     }
 
     fn load_history(&mut self) {
         // Holdings sparklines use the same month Overview charts, so the two pages agree.
-        let period = if self.page == Page::Performance {
-            self.period
-        } else {
-            Period::Month
+        let period = match self.page {
+            Page::Performance => self.period,
+            // A plate's moment is read against everything Stahl has, not the last month.
+            Page::Records => Period::All,
+            _ => Period::Month,
         };
         self.history_request += 1;
         let request = self.history_request;
@@ -2168,6 +2886,80 @@ impl State {
         );
     }
 
+    /// Read the wall. `mark_seen` says this is the owner opening the page: the plates they
+    /// haven't seen are shown once, in a short ceremony, and then simply there.
+    pub fn load_records(&mut self, mark_seen: bool) {
+        if !self.has_portfolio() {
+            self.records = Loadable::default();
+            return;
+        }
+        self.records.loading = true;
+        self.run(
+            |backend| async move { backend.records().await },
+            move |state, result| state.finish_records(mark_seen, result),
+        );
+    }
+
+    fn finish_records(&mut self, mark_seen: bool, result: BackendResult<backend::RecordsView>) {
+        self.records.loading = false;
+        let view = match result {
+            Ok(view) => view,
+            Err(error) => {
+                self.records.error = Some(error);
+                return;
+            }
+        };
+        let unseen: Vec<String> = view
+            .plates
+            .iter()
+            .filter(|plate| !view.seen.contains(&plate.id))
+            .map(|plate| plate.id.clone())
+            .collect();
+        self.records_unseen = unseen.len();
+        self.records.data = Some(view.plates);
+        self.records.error = None;
+        if !mark_seen || unseen.is_empty() {
+            return;
+        }
+        // The newest unseen plate is the one at the top of the wall: it is set into place there.
+        self.record_arrival = unseen.first().cloned().map(|id| (id, self.now));
+        self.records_unseen = 0;
+        self.run(
+            |backend| async move { backend.mark_records_seen(unseen).await },
+            |_, _| {},
+        );
+    }
+
+    /// The mark beside Records, for a portfolio that has just opened or refreshed.
+    fn load_record_mark(&mut self) {
+        if !self.has_portfolio() || self.positions.is_empty() {
+            self.records_unseen = 0;
+            return;
+        }
+        self.run(
+            |backend| async move { backend.records().await },
+            |state, result| {
+                if let Ok(view) = result {
+                    state.records_unseen = view
+                        .plates
+                        .iter()
+                        .filter(|plate| !view.seen.contains(&plate.id))
+                        .count();
+                }
+            },
+        );
+    }
+
+    /// Open one plate on the Records page, or close the one that is open.
+    pub fn open_record(&mut self, id: String) {
+        self.record_plate = Some(id);
+        self.load_history();
+    }
+
+    pub fn close_record(&mut self) {
+        self.record_plate = None;
+    }
+
     pub fn load_health(&mut self) {
         self.validation.loading = true;
         self.run(
@@ -2238,6 +3030,9 @@ impl State {
 
     /// What changed since the owner last looked, in words, or `None` with nothing worth saying.
     pub fn statement(&self) -> Option<Statement> {
+        if let Some(statement) = self.past_statement() {
+            return Some(statement);
+        }
         let summary = self.summary.as_ref()?;
         let currency = self.currency();
         let encrypted = self
@@ -2319,6 +3114,8 @@ impl State {
         if !self.has_portfolio() || self.form.is_some() {
             return;
         }
+        // Positions are edited as they are today.
+        self.return_to_today();
         let position = existing.and_then(|id| self.positions.iter().find(|p| p.id == id));
         self.form = Some(PositionForm::new(position));
     }
@@ -2391,6 +3188,7 @@ impl State {
     }
 
     pub fn delete_position(&mut self, id: usize) {
+        self.return_to_today();
         self.selected = None;
         self.inspector.set_open(false);
         self.change_and_reload(
@@ -2507,6 +3305,8 @@ impl State {
                 self.navigate(Page::Holdings);
                 self.open_form(None);
             }
+            Command::Ask(question) => self.ask_about(question),
+            Command::Import => self.ask_for_intake(tx),
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
             Command::Close => self.reset(),
@@ -2519,6 +3319,7 @@ impl State {
     }
 
     pub fn open_palette(&mut self) {
+        self.cancel_hold();
         let mut query = TextEdit::new("");
         query.focused = true;
         self.palette = Some(Palette { query, selected: 0 });
@@ -2537,6 +3338,554 @@ impl State {
         }
         // Not loaded yet: open the page, which has the button once it is.
         self.navigate(Page::Briefing);
+    }
+
+    // --- Counsel ---
+
+    /// An answer is on its way: true from sending until it finishes, fails or is stopped.
+    pub fn thinking(&self) -> bool {
+        self.ask.thinking
+    }
+
+    /// The owner pressed "Now" or "Then" on a what-if: hold it there.
+    pub fn what_if_show(&mut self, turn: usize, block: usize, now: bool) {
+        self.ask.what_if_show(turn, block, now);
+    }
+
+    /// The model that answers questions. The real app wires the provider here; the demo and the
+    /// tests wire the scripted one.
+    pub fn with_model(mut self, model: Arc<dyn crate::ask::Model>) -> State {
+        self.model = model;
+        self
+    }
+
+    /// Ask `question` as if it had been typed.
+    pub fn ask_question(&mut self, question: impl Into<String>) {
+        if !self.ai {
+            return;
+        }
+        let question = question.into();
+        self.ask.input.replace_text(&question);
+        self.ask_send();
+    }
+
+    /// Ask `question` on the Counsel page, from anywhere: a palette row, a chip, a next step.
+    pub fn ask_about(&mut self, question: impl Into<String>) {
+        if !self.ai {
+            return;
+        }
+        self.navigate(Page::Ask);
+        self.ask_question(question);
+    }
+
+    /// Send what is in the input from the Overview's line, on the Counsel page.
+    pub fn ask_here(&mut self) {
+        if !self.ai || self.ask.input.text.trim().is_empty() {
+            return;
+        }
+        self.navigate(Page::Ask);
+        self.ask_send();
+    }
+
+    /// Send what is in the input. Nothing happens for an empty question, or while an answer is
+    /// still arriving: one question at a time.
+    pub fn ask_send(&mut self) {
+        if !self.ai || self.ask.thinking || self.consent.is_some() {
+            return;
+        }
+        let question = self.ask.input.text.trim().to_string();
+        if question.is_empty() {
+            return;
+        }
+        let table = crate::facts::of(self);
+        let conversation = self.ask_conversation();
+        let (cancel, receiver) = tokio::sync::oneshot::channel();
+        let request = crate::ask::Request {
+            question,
+            conversation,
+            system: crate::ask::prompt(self, &table),
+            facts: table,
+            cancel: Some(receiver),
+        };
+        let source = self.ask_source();
+        self.ask.source = source.clone();
+        // With no provider, the app answers what it can work out itself.
+        if self.model_is_builtin() {
+            let blocks = crate::ask::builtin(self, &request.question);
+            let text = blocks
+                .iter()
+                .map(crate::ask::line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let question = request.question.clone();
+            self.ask.input.replace_text("");
+            self.ask_ready_for(question, &text, cancel);
+            return;
+        }
+        // A provider on this machine never leaves it. Any other host is asked about once.
+        if let crate::ask::Source::Http { model, host } = source
+            && !crate::ask::is_local_host(&host)
+            // An address that can't be used is refused at send, with a sentence, not asked about.
+            && !host.is_empty()
+            && !self.backend.consented_hosts().contains(&host)
+        {
+            let body = self.consent_text(&request);
+            self.consent = Some(Consent {
+                question: request.question.clone(),
+                request,
+                model,
+                host,
+                body,
+                show: false,
+                cancel,
+            });
+            return;
+        }
+        self.ask.input.replace_text("");
+        self.ask_dispatch(request, cancel);
+    }
+
+    /// Where an answer would come from now: the configured provider, or the app itself.
+    pub fn ask_source(&self) -> crate::ask::Source {
+        match self.backend.llm_now() {
+            Some(llm) => crate::ask::Source::Http {
+                model: if llm.model.trim().is_empty() {
+                    "the model".to_string()
+                } else {
+                    llm.model
+                },
+                host: crate::ask::host_of(&llm.url),
+            },
+            None => crate::ask::Source::Builtin,
+        }
+    }
+
+    /// Whether the app itself is answering, because no provider is set and the wired-in model
+    /// is the built-in one.
+    fn model_is_builtin(&self) -> bool {
+        self.backend.llm_now().is_none() && self.model.is_builtin()
+    }
+
+    /// The model to ask: the provider from Settings if there is one, else the one wired in.
+    fn ask_model(&self) -> Arc<dyn crate::ask::Model> {
+        match self.backend.llm_now() {
+            Some(llm) => Arc::new(crate::ask::Http::new(
+                llm.url,
+                llm.key,
+                llm.model,
+                self.backend.handle(),
+            )),
+            None => self.model.clone(),
+        }
+    }
+
+    /// The question the consent prompt asks, and the exact text of the request.
+    fn consent_text(&self, request: &crate::ask::Request) -> String {
+        let body = match self.ask.source.clone() {
+            crate::ask::Source::Http { model, .. } => {
+                let model = if model == "the model" {
+                    self.settings.model.text.clone()
+                } else {
+                    model
+                };
+                crate::ask::Http::body(request, &model)
+            }
+            _ => serde_json::json!({ "question": request.question }),
+        };
+        wrap_lines(&serde_json::to_string_pretty(&body).unwrap_or_default(), 84)
+    }
+
+    /// Start a turn with an answer already in hand.
+    fn ask_ready_for(
+        &mut self,
+        question: String,
+        text: &str,
+        cancel: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.ask.turns.push(crate::ask::Turn::new(question));
+        self.ask.generation += 1;
+        self.ask.thinking = true;
+        self.ask.streaming = true;
+        self.ask.partial = None;
+        self.ask.lines = crate::ask::Lines::new();
+        self.ask.cancel = Some(cancel);
+        self.ask_ready(text);
+    }
+
+    /// Ask the model `request`, and show the answer in a new turn.
+    fn ask_dispatch(
+        &mut self,
+        request: crate::ask::Request,
+        cancel: tokio::sync::oneshot::Sender<()>,
+    ) {
+        let question = request.question.clone();
+        let model = self.ask_model();
+        match model.ask(request) {
+            crate::ask::Reply::Ready(text) => self.ask_ready_for(question, &text, cancel),
+            crate::ask::Reply::Pieces(mut pieces) => {
+                self.ask.turns.push(crate::ask::Turn::new(question));
+                self.ask.generation += 1;
+                self.ask.thinking = true;
+                self.ask.streaming = true;
+                self.ask.partial = None;
+                self.ask.lines = crate::ask::Lines::new();
+                self.ask.cancel = Some(cancel);
+                let events = self.ask_events_tx.clone();
+                let waker = self.waker.clone();
+                self.backend.spawn(async move {
+                    while let Some(event) = pieces.recv().await {
+                        let finished = !matches!(event, crate::ask::Event::Text(_));
+                        if events.send(event).is_err() {
+                            break;
+                        }
+                        if let Some(waker) = &waker {
+                            waker();
+                        }
+                        if finished {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// The owner allowed questions to go to this host: remember it, and send.
+    pub fn consent_send(&mut self) {
+        let Some(consent) = self.consent.take() else {
+            return;
+        };
+        if let Err(error) = self.backend.allow_host(&consent.host) {
+            self.show_toast(error);
+        }
+        self.ask.input.replace_text("");
+        self.ask_dispatch(consent.request, consent.cancel);
+    }
+
+    /// The owner changed their mind. The question goes back in the input.
+    pub fn consent_cancel(&mut self) {
+        let Some(consent) = self.consent.take() else {
+            return;
+        };
+        self.ask.input.replace_text(&consent.question);
+    }
+
+    /// Show or hide the exact request in the consent prompt.
+    pub fn consent_toggle(&mut self) {
+        if let Some(consent) = &mut self.consent {
+            consent.show = !consent.show;
+        }
+    }
+
+    /// The earlier questions and the plain text of their answers, for the model's context.
+    fn ask_conversation(&self) -> Vec<(String, String)> {
+        let table = crate::facts::of(self);
+        let currency = self.currency();
+        self.ask
+            .turns
+            .iter()
+            .filter(|turn| turn.finished())
+            .map(|turn| {
+                let answer = turn
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        crate::ask::Block::Say { text } => {
+                            Some(crate::ask::spoken(text, &table, self.privacy, &currency))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (turn.question.clone(), answer)
+            })
+            .collect()
+    }
+
+    /// A ready answer: its blocks are shown one at a time, on the app's clock.
+    fn ask_ready(&mut self, text: &str) {
+        let mut lines = crate::ask::Lines::new();
+        let mut blocks = lines.push(text);
+        blocks.extend(lines.finish());
+        if blocks.is_empty() {
+            self.ask_fail("There was nothing in that answer. Try asking another way.");
+            return;
+        }
+        let start = self.now + crate::ask::FIRST_BLOCK;
+        for (index, block) in blocks.into_iter().enumerate() {
+            self.ask
+                .queued
+                .push_back((start + index as f64 * crate::ask::NEXT_BLOCK, block));
+        }
+    }
+
+    /// Show every block that is due, and finish the turn when none are left. True when one landed.
+    ///
+    /// `now` is the clock the queue is read against. A block is stamped with the app's own clock
+    /// ([`State::now`]), which is the same in a frame and never a jump a caller made.
+    pub fn ask_advance(&mut self, now: f64) -> bool {
+        if self.ask.queued.is_empty() {
+            return false;
+        }
+        let table = crate::facts::of(self);
+        let (hidden, currency) = (self.privacy, self.currency());
+        let landed_at = self.now;
+        let mut landed = false;
+        while self.ask.queued.front().is_some_and(|(at, _)| *at <= now) {
+            let (_, block) = self.ask.queued.pop_front().expect("just checked");
+            let keep = !block.is_empty(&table);
+            // A chart measures the room it has, so it draws in once it is on the page, and a
+            // span it marks is measured the same way the Performance chart's is.
+            if keep && let crate::ask::Block::Chart { span, .. } = &block {
+                self.restart_draw = true;
+                // A chart measures the room it has on the frame after it is laid out. Two more
+                // frames, so it takes its width before anyone looks at it, whatever else is on
+                // the page above it.
+                self.ask_settle = self.ask_settle.max(2);
+                if let Some(span) = span {
+                    self.measure.span = Some((span[0], span[1]));
+                }
+            }
+            // The answer's first sentence arrives word by word, and the rest waits for it.
+            let mut sentence = None;
+            if let Some(turn) = self.ask.current_mut() {
+                if keep {
+                    if turn.first_say(&block) {
+                        sentence =
+                            Some(crate::ask::spoken(block.text(), &table, hidden, &currency));
+                    }
+                    turn.land(block, landed_at);
+                }
+                turn.phase = crate::ask::Phase::Streaming;
+            }
+            if let Some(sentence) = sentence {
+                self.begin_reveal(sentence, landed_at);
+            }
+            landed = true;
+        }
+        if landed {
+            self.ask_finish_if_ready();
+        }
+        landed
+    }
+
+    /// The sentence that just landed is revealed word by word, and the blocks after it wait
+    /// until its words are on the page.
+    fn begin_reveal(&mut self, sentence: String, now: f64) {
+        let total = sentence.split_whitespace().count();
+        if total < 2 {
+            return;
+        }
+        let Some(turn) = self.ask.turns.len().checked_sub(1) else {
+            return;
+        };
+        let Some(block) = self.ask.turns[turn].blocks.len().checked_sub(1) else {
+            return;
+        };
+        let reveal = crate::ask::Reveal {
+            turn,
+            block,
+            // The block lands with its first word on the page, so nothing is ever an empty box.
+            words: 1,
+            total,
+            started: now,
+        };
+        let ends = reveal.ends_at();
+        self.ask.reveal = Some(reveal);
+        // The rest of the answer follows the sentence closely, then keeps its own rhythm.
+        for (index, (at, _)) in self.ask.queued.iter_mut().enumerate() {
+            *at = ends + crate::ask::AFTER_SENTENCE + crate::ask::NEXT_BLOCK * index as f64;
+        }
+    }
+
+    /// Put the sentence's next words on the page. True when the page changed.
+    pub fn ask_reveal(&mut self, now: f64) -> bool {
+        let Some(reveal) = self.ask.reveal.as_ref() else {
+            return false;
+        };
+        if reveal.done() {
+            self.ask.reveal = None;
+            return true;
+        }
+        let due = (((now - reveal.started) / reveal.step()).floor() as usize + 1).min(reveal.total);
+        if due <= reveal.words {
+            return false;
+        }
+        let done = due >= reveal.total;
+        if let Some(reveal) = &mut self.ask.reveal {
+            reveal.words = due;
+        }
+        if done {
+            self.ask.reveal = None;
+            self.ask_finish_if_ready();
+        }
+        true
+    }
+
+    /// Finish the turn when nothing is left to arrive: no block queued and no words left.
+    fn ask_finish_if_ready(&mut self) {
+        if !self.ask.queued.is_empty() || self.ask.reveal.as_ref().is_some_and(|r| !r.done()) {
+            return;
+        }
+        if self.ask.turns.last().is_some_and(|turn| !turn.finished()) {
+            self.ask_done();
+        }
+    }
+
+    /// Read what the model has sent. True when anything arrived.
+    fn drain_ask(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(event) = self.ask_events.try_recv() {
+            match event {
+                crate::ask::Event::Text(text) => self.ask_text(&text),
+                crate::ask::Event::Done => self.ask_done(),
+                crate::ask::Event::Failed(why) => self.ask_fail(why),
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    /// A piece of a provider's answer: whole lines become blocks as they complete.
+    fn ask_text(&mut self, text: &str) {
+        let blocks = self.ask.lines.push(text);
+        let now = self.now;
+        if !blocks.is_empty()
+            && let Some(turn) = self.ask.current_mut()
+        {
+            for block in blocks {
+                turn.land(block, now);
+            }
+            turn.phase = crate::ask::Phase::Streaming;
+        }
+        self.ask.partial = crate::ask::partial_say(self.ask.lines.partial());
+    }
+
+    /// The answer has finished.
+    fn ask_done(&mut self) {
+        let leftovers = self.ask.lines.finish();
+        let now = self.now;
+        if let Some(turn) = self.ask.current_mut() {
+            for block in leftovers {
+                turn.land(block, now);
+            }
+            turn.phase = crate::ask::Phase::Done;
+        }
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+        self.ask.partial = None;
+        self.ask.cancel = None;
+        self.ask.reveal = None;
+        // The page is its final height now: two more frames let anything that measures its room
+        // take the right size, without drawing the chart in a second time.
+        self.ask_settle = 2;
+    }
+
+    /// The answer failed. Say what happened in plain words.
+    pub fn ask_fail(&mut self, why: impl Into<String>) {
+        let why = why.into();
+        self.ask.queued.clear();
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+        self.ask.partial = None;
+        self.ask.cancel = None;
+        self.ask.reveal = None;
+        if let Some(turn) = self.ask.current_mut() {
+            turn.phase = crate::ask::Phase::Failed;
+            turn.error = Some(why);
+        }
+    }
+
+    /// Turn AI features on or off. Saved at once. Turning them off leaves the Counsel page for the
+    /// Overview, stops an answer that is arriving, and drops a question waiting for consent.
+    pub fn set_ai(&mut self, on: bool) {
+        if self.ai == on {
+            return;
+        }
+        if let Err(error) = self.backend.set_ai_features(on) {
+            self.settings.error = Some(error);
+            return;
+        }
+        self.ai = on;
+        if !on {
+            self.ask_stop();
+            self.consent = None;
+            if self.page == Page::Ask {
+                self.navigate(Page::Overview);
+            }
+        }
+    }
+
+    /// Stop the answer in flight. True when there was one to stop.
+    pub fn ask_stop(&mut self) -> bool {
+        if !self.ask.thinking {
+            return false;
+        }
+        if let Some(cancel) = self.ask.cancel.take() {
+            let _ = cancel.send(());
+        }
+        self.ask.thinking = false;
+        self.ask.streaming = false;
+        self.ask.queued.clear();
+        self.ask.partial = None;
+        self.ask.reveal = None;
+        if let Some(turn) = self.ask.current_mut() {
+            turn.phase = crate::ask::Phase::Stopped;
+        }
+        true
+    }
+
+    /// Ask the last question again, after a failure or a stop.
+    pub fn ask_retry(&mut self) {
+        let Some(last) = self.ask.turns.last() else {
+            return;
+        };
+        if !last.finished() {
+            return;
+        }
+        let question = last.question.clone();
+        self.ask.turns.pop();
+        self.ask.reveal = None;
+        self.ask.input.replace_text(&question);
+        self.ask_send();
+    }
+
+    /// A `chart` block may mark a span. The chart's readout is the page's own, so the span is
+    /// kept on the shared measure and put back when the page is reopened.
+    pub fn apply_ask_span(&mut self) {
+        let span = self
+            .ask
+            .turns
+            .iter()
+            .rev()
+            .flat_map(|turn| turn.blocks.iter().rev())
+            .find_map(|block| match block {
+                crate::ask::Block::Chart {
+                    span: Some([a, b]), ..
+                } => Some((*a, *b)),
+                _ => None,
+            });
+        self.measure.span = span;
+    }
+
+    /// The history a `chart` block asks for: the page's own when the period matches, else the one
+    /// loaded for the answer.
+    pub fn ask_history(&self, period: Option<&str>) -> Option<&History> {
+        let period = period.map_or(Period::Month, Period::from_name);
+        if self.period == period {
+            return self.history.as_ref();
+        }
+        self.ask
+            .chart
+            .as_ref()
+            .filter(|(loaded, _)| *loaded == period)
+            .map(|(_, history)| history)
+    }
+
+    /// The period a `chart` block draws, in words.
+    pub fn ask_chart_name(&self, period: Option<&str>) -> String {
+        let period = period.map_or(Period::Month, Period::from_name);
+        format!("Your value, {}.", period.phrase())
     }
 
     // --- Updates ---
@@ -2766,6 +4115,14 @@ impl State {
             return;
         }
         let provider_url = text_or_none(&form.provider_url.text);
+        if let Some(problem) = provider_url
+            .as_deref()
+            .and_then(crate::ask::provider_problem)
+        {
+            form.error = Some(problem);
+            form.message = None;
+            return;
+        }
         let api_key = text_or_none(&form.api_key.text);
         let model = text_or_none(&form.model.text);
         self.change_and_reload(
@@ -2837,6 +4194,8 @@ impl State {
                         state.has_policy = true;
                         state.show_policy(policy);
                         state.policy.message = Some("Policy loaded".to_string());
+                        state.outlook.assumptions = state.backend.outlook_assumptions();
+                        state.refresh_outlook();
                     }
                     Err(error) => state.policy.error = Some(error),
                 }
@@ -2851,6 +4210,8 @@ impl State {
                 self.has_policy = true;
                 self.policy.policy = Some(policy);
                 self.policy.message = Some(success.to_string());
+                self.outlook.assumptions = self.backend.outlook_assumptions();
+                self.refresh_outlook();
             }
             Err(error) => self.policy.error = Some(error),
         }
@@ -3207,13 +4568,18 @@ mod tests {
     }
 
     #[test]
-    fn shortcuts_reach_every_page() {
+    fn shortcuts_reach_every_page_that_has_one() {
         for page in Page::PORTFOLIO
             .into_iter()
             .chain(Page::PLAN)
             .chain(Page::INSIGHTS)
         {
-            assert_eq!(Page::from_shortcut(page.shortcut().unwrap()), Some(page));
+            match page.shortcut() {
+                Some(key) => assert_eq!(Page::from_shortcut(key), Some(page)),
+                // Every digit is spoken for. Records is reached from the sidebar and the
+                // command palette, which lists every page.
+                None => assert_eq!(page, Page::Records),
+            }
         }
     }
 }

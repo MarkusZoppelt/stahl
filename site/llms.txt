@@ -15,13 +15,14 @@ Stahl Capital is software, not a bank, a broker or an adviser. The page's privat
 - Policy, in a workspace: a machine-readable investment policy
 - Documents, in a workspace: weekly reports and decision records
 - Briefing: a summary with Copy as Markdown, to hand to an AI assistant
+- Counsel: questions answered with live blocks from the app's own figures, by the AI provider you set or by the app itself; the model never writes a figure
 - Data Health: file validation, data-quality findings and workspace checks
 
 ## Your data
 
 Positions are in a plain JSON file on your machine, shared with the portfolio_rs CLI. A file that doesn't parse shows its line and column. It is never shown as an empty portfolio and never overwritten.
 
-Three things can leave the machine: tickers sent to Yahoo Finance to fetch prices (set `PORTFOLIO_RS_QUOTES=offline` to stop that), whatever you send an AI provider, if you add one in Settings, and one request to api.github.com on launch to check for a newer version (set `STAHL_NO_UPDATE_CHECK=1` to skip it). There's no account and no telemetry.
+Three things can leave the machine: tickers sent to Yahoo Finance to fetch prices (set `PORTFOLIO_RS_QUOTES=offline` to stop that); the question you ask Counsel when you have set an AI provider in Settings, which carries the figures on the page, the policy review, the briefing, the conversation so far and your key in a header, with amounts hidden in privacy mode (a local provider is never asked about; any other host is shown the exact request once); and one request to api.github.com on launch to check for a newer version (set `STAHL_NO_UPDATE_CHECK=1` to skip it). There's no account and no telemetry.
 
 ## Install
 

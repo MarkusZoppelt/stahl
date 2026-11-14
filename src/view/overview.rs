@@ -1,11 +1,8 @@
 //! The Overview's own parts: what changed since the owner last looked, and what to look at.
 
-use rune::{Cx, El, col, icon, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize};
+use rune::{Cx, El, col, row, text};
 
 use crate::{
-    agenda::{Calm, Item, Weight},
-    icons,
     state::State,
     statement::{Figure, Tone},
     theme::{FACT, LEDE, LEDE_COMPACT, Theme},
@@ -52,22 +49,37 @@ fn figure(figure: &Figure, t: &Theme, stack_note: bool) -> El {
         .child(body)
 }
 
-/// One or two sentences on what changed since the last look, and the figures behind them.
+/// The figures behind the statement's sentences, or `None` when it has none.
+pub fn statement_figures(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
+    let statement = s.statement()?;
+    if statement.figures.is_empty() {
+        return None;
+    }
+    let room = ui::room(s, cx);
+    let figures = statement
+        .figures
+        .iter()
+        .map(|each| figure(each, t, room != ui::Room::Wide));
+    Some(match room {
+        // Under the sentence, not stretched across the page, so they read as its evidence.
+        ui::Room::Wide => row()
+            .key("statement-figures")
+            .items_start()
+            .gap(32.0)
+            .max_w(760.0)
+            .children(figures),
+        _ => ui::columns(room, [3, 3, 2], 16.0)
+            .key("statement-figures")
+            .children(figures),
+    })
+}
+
+/// One or two sentences on what changed since the last look. The figures behind them follow
+/// them, except on a phone, where the page puts them after what there is to do.
 pub fn statement(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
     let statement = s.statement()?;
-    let room = ui::room(s, cx);
-    let narrow = room == ui::Room::Narrow;
-    let figures = (!statement.figures.is_empty()).then(|| {
-        let figures = statement
-            .figures
-            .iter()
-            .map(|each| figure(each, t, room != ui::Room::Wide));
-        match room {
-            // Under the sentence, not stretched across the page, so they read as its evidence.
-            ui::Room::Wide => row().items_start().gap(32.0).max_w(760.0).children(figures),
-            _ => ui::columns(room, [3, 3, 2], 16.0).children(figures),
-        }
-    });
+    let narrow = ui::room(s, cx) == ui::Room::Narrow;
+    let figures = (!narrow).then(|| statement_figures(s, t, cx)).flatten();
     Some(
         col()
             .key("statement")
@@ -86,105 +98,7 @@ pub fn statement(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
     )
 }
 
-fn agenda_action(item: &Item, t: &Theme) -> El {
-    let action = item.action;
-    Button::new(action.label())
-        .variant(ButtonVariant::Outline)
-        .control_size(ControlSize::Small)
-        .on_press(move |s: &mut State| action.perform(s))
-        .build(&t.kit)
-        .key(format!("agenda-action-{}", item.id))
-}
-
-fn agenda_item(index: usize, item: &Item, t: &Theme, narrow: bool) -> El {
-    let k = &t.kit;
-    let color = match item.weight {
-        Weight::Total | Weight::Critical => t.down,
-        Weight::Warning => t.warn,
-        Weight::Notice => t.info,
-    };
-    // In a row, width 0 plus grow takes the leftover. In a column, that collapses to a word.
-    let words = col().min_w(0.0).gap(2.0).child(
-        text(item.title.clone())
-            .font(k.ty.ui_medium)
-            .color(k.c.text_base)
-            .wrap(),
-    );
-    let words = if narrow {
-        words.w_full()
-    } else {
-        words.grow(1.0).w(0.0)
-    };
-    let words = words.children(
-        item.detail
-            .clone()
-            .map(|detail| ui::caption(detail, t).wrap()),
-    );
-    // On a phone the button sits under the words, so a long title isn't squeezed beside it.
-    let body = if narrow {
-        // items_start so the button keeps its own width instead of stretching into a bar.
-        col()
-            .grow(1.0)
-            .w(0.0)
-            .min_w(0.0)
-            .gap(8.0)
-            .items_start()
-            .child(words)
-            .child(agenda_action(item, t))
-    } else {
-        row()
-            .center_y()
-            .grow(1.0)
-            .w(0.0)
-            .min_w(0.0)
-            .gap(16.0)
-            .child(words)
-            .child(agenda_action(item, t))
-    };
-    row()
-        .key(format!("agenda-{}", item.id))
-        .w_full()
-        .items_start()
-        .gap(12.0)
-        .py(if narrow { 8.0 } else { 12.0 })
-        // The ledger's own rule heads the first.
-        .children((index > 0).then(|| ui::rule(t).absolute(0.0, 0.0)))
-        .child(ui::dot(color).mt(6.0))
-        .child(body)
-}
-
-/// What deserves a look, most important first, each with the one button that deals with it.
-pub fn agenda(s: &State, t: &Theme, narrow: bool) -> El {
-    let k = &t.kit;
-    let items = s.agenda();
-    let ledger = ui::ledger(t)
-        .key("agenda")
-        .child(ui::title("What to look at", t));
-    if !items.is_empty() {
-        return ledger.child(
-            col().w_full().children(
-                items
-                    .iter()
-                    .enumerate()
-                    .map(|(index, item)| agenda_item(index, item, t, narrow)),
-            ),
-        );
-    }
-    let calm = match s.agenda_calm() {
-        Calm::Checking => ui::muted("Checking against your policy…", t),
-        Calm::Clear(words) => row()
-            .key("agenda-clear")
-            .w_full()
-            .items_start()
-            .gap(8.0)
-            .child(icon(&icons::CHECK_CIRCLE, 16.0).color(t.up).mt(2.0))
-            .child(
-                text(words)
-                    .font(k.ty.ui)
-                    .color(k.c.text_muted)
-                    .wrap()
-                    .shrink(),
-            ),
-    };
-    ledger.child(calm)
+/// What the bank has prepared for signature, and what needs doing but not signing.
+pub fn agenda(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
+    super::matters::section(s, t, narrow, reduced)
 }

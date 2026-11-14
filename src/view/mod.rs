@@ -1,6 +1,6 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::{env, mem};
+use std::{env, fs, io::Read, mem, path::Path};
 
 use rune::{
     Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
@@ -17,23 +17,31 @@ use crate::{
     theme::{PAGE_TITLE, STATEMENT, STATEMENT_COMPACT, Theme, WORDMARK},
 };
 
-mod answers;
+pub mod answer;
+pub mod answers;
+pub mod ask;
 mod charts;
 mod compact;
 pub mod door;
 pub mod guide;
 mod insights;
+mod intake;
+pub mod matters;
+pub mod outlook;
 mod overlays;
 mod overview;
+pub mod past;
 mod plan;
-mod portfolio;
+pub mod portfolio;
 pub mod rebalance;
+mod records;
 mod treemap;
 pub mod ui;
 mod updates;
 
 pub fn page_icon(page: Page) -> &'static Icon {
     match page {
+        Page::Ask => &icons::SPARKLES,
         Page::Overview => &icons::LAYOUT_DASHBOARD,
         Page::Holdings => &icons::CHART_COLUMN,
         Page::Allocation => &icons::CHART_PIE,
@@ -43,6 +51,7 @@ pub fn page_icon(page: Page) -> &'static Icon {
         Page::Policy => &icons::SHIELD,
         Page::Documents => &icons::FILE_TEXT,
         Page::Briefing => &icons::CLIPBOARD_LIST,
+        Page::Records => &icons::LANDMARK,
         Page::Health => &icons::HEART_PULSE,
         Page::Settings => &icons::SETTINGS,
     }
@@ -55,8 +64,26 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        // The sheet over the page is the first thing Escape puts away.
+        if s.intake.take().is_some() {
+            return true;
+        }
+        // A plate lifted off the wall goes back on it first.
+        if s.record_plate.take().is_some() {
+            return true;
+        }
         if s.measure.span.take().is_some() {
             s.measure.clear();
+            return true;
+        }
+        if s.consent.is_some() {
+            s.consent_cancel();
+            return true;
+        }
+        if s.matters.confirm_sign.take().is_some() {
+            return true;
+        }
+        if s.ask_stop() {
             return true;
         }
         return s.palette.take().is_some()
@@ -65,7 +92,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             || s.confirm.take().is_some()
             || s.folder_prompt.take().is_some()
             || mem::take(&mut s.guide)
-            || s.close_update_dialog();
+            || s.close_update_dialog()
+            // Last: the past is left only when nothing smaller was open.
+            || s.return_to_today();
     }
     if portfolio::holdings_key(s, event, tx) {
         return true;
@@ -91,6 +120,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         // Some layouts need Shift to type a slash, so it doesn't matter here.
         ('/' | '?', _) => s.toggle_guide(),
         ('q', false) => s.quit_or_ask(tx),
+        // A recorded day back or forward, from anywhere.
+        ('[', false) if s.has_portfolio() => s.step_time(-1),
+        (']', false) if s.has_portfolio() => s.step_time(1),
         (key, false) => match Page::from_shortcut(key) {
             Some(page) if s.has_portfolio() => s.navigate(page),
             _ => return false,
@@ -116,18 +148,30 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         shell(s, &t, cx, &mut layer)
     };
     layer.extend(door::opening(s));
-    overlays::build(s, &t, &mut layer);
+    overlays::build(s, &t, cx, &mut layer);
 
     let body = body
         .fill(t.kit.c.bg_base)
         .on_drop_files(|s: &mut State, files, _| {
             s.drop_hover = false;
-            if let Some(path) = files.first() {
-                let path = path.clone();
+            let Some(path) = files.first() else {
+                return;
+            };
+            let path = path.clone();
+            // A broker's export goes to the review sheet; anything else opens as it always has.
+            if s.has_portfolio() && is_broker_file(&path) {
+                s.open_intake(&path);
+            } else {
                 s.open_dropped(&path);
             }
         })
-        .on_drop_hover(|s: &mut State, over, _| s.drop_hover = over);
+        .on_drop_hover(|s: &mut State, over, _| s.drop_hover = over)
+        // A hold needs someone holding: a window that is no longer in front signs nothing.
+        .on_window_focus(|s: &mut State, focused, _| {
+            if !focused {
+                s.cancel_hold();
+            }
+        });
     let body = if s.drop_hover {
         body.border(2.0, t.accent)
     } else {
@@ -152,6 +196,38 @@ fn drops_work() -> bool {
     // Nor does the iOS shell pass drops on yet.
     !cfg!(target_os = "ios")
         && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
+}
+
+/// Whether a dropped file goes to the review sheet rather than opening as a portfolio. Decided
+/// by what is in it, not what it is called: a PDF, a workbook or a `.txt` export reaches the
+/// sheet, which says why it can't read one. Only a folder, an encrypted file or positions JSON
+/// opens as a portfolio.
+fn is_broker_file(path: &Path) -> bool {
+    if path.is_dir() {
+        return false;
+    }
+    let mut start = [0u8; 512];
+    let read = fs::File::open(path)
+        .and_then(|mut file| file.read(&mut start))
+        .unwrap_or(0);
+    let start = &start[..read];
+    if start.starts_with(b"%PDF")
+        || start.starts_with(b"PK\x03\x04")
+        || start.starts_with(&[0xd0, 0xcf, 0x11, 0xe0])
+    {
+        return true;
+    }
+    // Positions are JSON, or encrypted (`-----BEGIN PGP` armour, or binary packets).
+    let start = start.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(start);
+    let json = start
+        .iter()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .is_some_and(|byte| matches!(byte, b'[' | b'{'));
+    let gpg = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("gpg"));
+    !(json || gpg)
 }
 
 fn welcome(s: &State, t: &Theme) -> El {
@@ -377,12 +453,20 @@ fn folder_prompt(s: &State, t: &Theme) -> El {
 }
 
 fn nav_row(s: &State, page: Page, t: &Theme) -> El {
-    SidebarRow::new(page.label())
+    let mut row = SidebarRow::new(page.label())
         .icon(page_icon(page))
         .selected(s.page == page)
-        .on_select(move |s: &mut State, _| s.navigate(page))
-        .build(&t.kit)
-        .key(page.key())
+        .on_select(move |s: &mut State, _| s.navigate(page));
+    // A record the owner hasn't been shown: one quiet mark, until they look.
+    if page == Page::Records && s.records_unseen > 0 {
+        row = row.trailing(
+            ui::dot(t.accent)
+                .role("img")
+                .label("A new record")
+                .transition(ui::appear()),
+        );
+    }
+    row.build(&t.kit).key(page.key())
 }
 
 fn sidebar(s: &State, t: &Theme) -> El {
@@ -412,7 +496,11 @@ fn sidebar(s: &State, t: &Theme) -> El {
                         .truncate(),
                 ),
         );
-    let mut bar = Sidebar::new().label("Sections").header(header).section(
+    let mut bar = Sidebar::new().label("Sections").header(header);
+    if s.ai {
+        bar = bar.child(nav_row(s, Page::Ask, t));
+    }
+    bar = bar.section(
         SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
     );
     bar = if s.is_workspace() {
@@ -508,7 +596,7 @@ fn tool(icon: &'static Icon, label: &str, t: &Theme) -> IconButton {
         .help(label.to_string())
 }
 
-fn toolbar(s: &State, t: &Theme) -> Toolbar {
+fn toolbar(s: &State, t: &Theme, cx: &Cx<State>) -> Toolbar {
     let k = &t.kit;
     let refresh = if s.loading {
         Spinner::new().size(14.0).build(k).key("refreshing").mx(7.0)
@@ -587,7 +675,11 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
         .leading(if s.positions.is_empty() {
             el()
         } else {
-            freshness(s, t)
+            row()
+                .center_y()
+                .gap(24.0)
+                .child(freshness(s, t))
+                .children(past::strip(s, t, cx))
         })
         .trailing(trailing)
 }
@@ -626,10 +718,15 @@ fn pane_fits(s: &State, cx: &Cx<State>) -> bool {
 /// The current page's content. Without `pane_fits`, a selected holding's details take the
 /// table's place.
 fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
+    // A page about today says so in the past, rather than show figures that read as current.
+    if let Some(note) = past::now_only(s, t) {
+        return note;
+    }
     let selected = s
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     match s.page {
+        Page::Ask => ask::page(s, t, cx),
         Page::Overview => portfolio::overview(s, t, cx),
         Page::Holdings => match selected {
             Some(position) if !pane_fits => portfolio::details_page(s, position, t),
@@ -642,25 +739,14 @@ fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
         Page::Policy => plan::policy(s, t, cx),
         Page::Documents => plan::documents(s, t, cx),
         Page::Briefing => insights::briefing(s, t, cx),
+        Page::Records => records::page(s, t, cx),
         Page::Health => insights::health(s, t),
         Page::Settings => insights::settings(s, t),
     }
 }
 
 /// Every page in the order the sidebar lists them.
-const PAGE_ORDER: [Page; 11] = [
-    Page::Overview,
-    Page::Holdings,
-    Page::Allocation,
-    Page::Performance,
-    Page::Review,
-    Page::Rebalance,
-    Page::Policy,
-    Page::Documents,
-    Page::Briefing,
-    Page::Health,
-    Page::Settings,
-];
+const PAGE_ORDER: [Page; Page::ALL.len()] = Page::ALL;
 
 /// Which way the owner went to reach this page: down the sidebar is forward.
 fn travel(s: &State) -> ui::Travel {
@@ -705,20 +791,23 @@ fn page_column(
         None => scroller,
     };
     col().key("main").w_full().h_full().min_h(0.0).child(
+        // A wide window keeps the page at its reading width and splits what's left on both sides.
         scroller.child(
-            col()
-                .key(key)
-                .w_full()
-                .max_w(1240.0)
-                .px(margin)
-                .pt(20.0)
-                .pb(40.0)
-                .gap(24.0)
-                .transition(ui::page_arrive(travel(s), s.compact))
-                .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
-                .child(heading)
-                .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
-                .child(content),
+            col().w_full().items_center().child(
+                col()
+                    .key(key)
+                    .w_full()
+                    .max_w(1240.0)
+                    .px(margin)
+                    .pt(20.0)
+                    .pb(40.0)
+                    .gap(24.0)
+                    .transition(ui::page_arrive(travel(s), s.compact))
+                    .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
+                    .child(heading)
+                    .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
+                    .child(content),
+            ),
         ),
     )
 }
@@ -732,25 +821,30 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     let pane_fits = pane_fits(s, cx);
-    let scroller = page_column(
-        s,
-        t,
-        format!("page-{}", s.page.key()),
-        page_heading(s, t),
-        Some(guide::about(s.page)),
-        page_content(s, t, cx, pane_fits),
-        32.0,
-    );
+    let scroller = if s.page == Page::Ask && s.ai && !s.in_past() {
+        ask::page(s, t, cx)
+    } else {
+        page_column(
+            s,
+            t,
+            format!("page-{}", s.page.key()),
+            page_heading(s, t),
+            Some(guide::about(s.page)),
+            page_content(s, t, cx, pane_fits),
+            32.0,
+        )
+    };
     let main = col()
         .key("main-frame")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
         .child(ui::light(s, t, 12.0))
+        .children(past::band(s, t))
         .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
-        .toolbar(toolbar(s, t))
+        .toolbar(toolbar(s, t, cx))
         .titlebar_inset(cx.titlebar_inset())
         .reduced_motion(cx.is_reduced_motion());
     if let Some(position) = selected.filter(|_| pane_fits) {
@@ -773,14 +867,10 @@ mod tests {
 
     #[test]
     fn every_page_has_a_place_in_the_order() {
-        for page in Page::PORTFOLIO
-            .into_iter()
-            .chain(Page::PLAN)
-            .chain(Page::INSIGHTS)
-            .chain([Page::Settings])
-        {
+        for page in Page::ALL {
             assert!(PAGE_ORDER.contains(&page), "{page:?}");
         }
+        assert_eq!(PAGE_ORDER.len(), Page::ALL.len(), "no page twice");
     }
 
     #[test]

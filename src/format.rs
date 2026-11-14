@@ -50,6 +50,21 @@ pub fn amount(value: f64) -> String {
     with_prefix(value, "")
 }
 
+/// `€143,000`, for a range where a thousand either way is noise, such as a ten-year outlook.
+pub fn currency_thousands(value: f64, code: &str) -> String {
+    let rounded = (value / 1000.0).round() * 1000.0;
+    let sign = if rounded.is_sign_negative() && rounded != 0.0 {
+        "-"
+    } else {
+        ""
+    };
+    format!(
+        "{sign}{}{}",
+        currency_symbol(code),
+        group_thousands(&format!("{:.0}", rounded.abs()))
+    )
+}
+
 fn with_prefix(value: f64, prefix: &str) -> String {
     let fixed = format!("{:.2}", value.abs());
     let (whole, fraction) = fixed.split_once('.').unwrap_or((&fixed, "00"));
@@ -189,6 +204,16 @@ mod tests {
         assert_eq!(currency(999.0, "GBP"), "£999.00");
         assert_eq!(currency(1_000.0, "GBP"), "£1,000.00");
         assert_eq!(currency(1_234_567.891, "USD"), "$1,234,567.89");
+    }
+
+    #[test]
+    fn rounds_money_to_the_nearest_thousand() {
+        assert_eq!(currency_thousands(143_359.21, "EUR"), "€143,000");
+        assert_eq!(currency_thousands(336_122.57, "EUR"), "€336,000");
+        assert_eq!(currency_thousands(190_131.6, "EUR"), "€190,000");
+        assert_eq!(currency_thousands(500.0, "EUR"), "€1,000");
+        assert_eq!(currency_thousands(-8_878.5, "EUR"), "-€9,000");
+        assert_eq!(currency_thousands(0.0, "USD"), "$0");
     }
 
     #[test]

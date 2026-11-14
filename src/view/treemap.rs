@@ -1,10 +1,14 @@
 //! A squarified treemap of the holdings. Area is value. The layout is a pure function.
 
 use portfolio_rs::state::PositionDto;
-use rune::{Beat, Color, El, Key, KeyEvent, Sequence, Tx, col, el, text, tok::motion::LEAD};
+use rune::{
+    Beat, Color, El, Key, KeyEvent, Sequence, Tx, col, color::srgb_encode, el, text,
+    tok::motion::LEAD,
+};
 
 use crate::{
     format,
+    fx::Plate,
     state::{Page, State},
     theme::{HOLDING_TITLE, NUMBER, SECTION, Theme},
     view::{portfolio, ui},
@@ -334,6 +338,25 @@ fn wash(change: Option<f64>, largest: f64, up: Color, down: Color) -> Option<Col
     )
 }
 
+/// How far a tile with no move leans to plain grey. The steel itself is blue-green, so without
+/// this a tile with no change would read as a gain.
+const NEUTRAL_STRENGTH: f32 = 0.8;
+
+/// The loss colour is less saturated than the gain's and its steel is paler, so at the same
+/// strength a fall reads as grey-violet beside a gain's teal. This evens them out.
+const LOSS_BOOST: f32 = 1.6;
+
+/// The tint a steel tile takes: its wash, or, with no change or none known, plain grey steel.
+fn plate_tint(wash: Option<Color>, loss: bool) -> ([f32; 3], f32) {
+    match wash {
+        Some(c) => (
+            [c.r, c.g, c.b].map(srgb_encode),
+            c.a * 1.6 * if loss { LOSS_BOOST } else { 1.0 },
+        ),
+        None => ([0.5; 3], NEUTRAL_STRENGTH),
+    }
+}
+
 /// How much a tile says, from everything down to its name, which goes last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Detail {
@@ -457,12 +480,24 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
             let big_name = w >= 320.0 && h >= 200.0;
             let label = match (change, points) {
                 (Some(_), Some(_)) => {
-                    format!("{name}, {own} today, {share} of the portfolio's move")
+                    format!(
+                        "{name}, {own} {}, {share} of the portfolio's move",
+                        s.when().word()
+                    )
                 }
-                (Some(_), None) => format!("{name}, {own} today"),
+                (Some(_), None) => format!("{name}, {own} {}", s.when().word()),
                 _ => name.clone(),
             };
-            el().key(format!("tile-{id}"))
+            // With a compositor a tile is a steel plate, dark in the dark and pale on paper, leaning
+            // to today's gain or loss as the wash did; hover raises it in the shader.
+            let wash = wash(change, largest, t.up, t.down);
+            let steel = s.shaders.then(|| {
+                let plate = Plate::new(if t.dark { 0.18 } else { 0.86 });
+                let (rgb, strength) = plate_tint(wash, change.is_some_and(|change| change < 0.0));
+                ui::steel(s, plate.tint(rgb, strength), 8.0)
+            });
+            let tile = el()
+                .key(format!("tile-{id}"))
                 .matched(format!("position-{id}"))
                 .role("gridcell")
                 .label(label)
@@ -472,17 +507,28 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                 .size(w, h)
                 .radius(8.0)
                 .clip_rounded(8.0)
-                .fill(t.card)
-                .border(
-                    1.0,
-                    if selected {
-                        k.c.text_base
-                    } else {
-                        k.c.border_muted
-                    },
-                )
-                .hover(k.c.hover)
-                .motion(LEAD)
+                .children(steel);
+            let tile = if s.shaders {
+                tile.children(selected.then(|| {
+                    el().absolute(0.0, 0.0)
+                        .size(w, h)
+                        .radius(8.0)
+                        .border(1.0, k.c.text_base)
+                        .a11y_hidden()
+                }))
+            } else {
+                tile.fill(t.card)
+                    .border(
+                        1.0,
+                        if selected {
+                            k.c.text_base
+                        } else {
+                            k.c.border_muted
+                        },
+                    )
+                    .hover(k.c.hover)
+            };
+            tile.motion(LEAD)
                 .press_scale(0.985)
                 .on_press(move |s: &mut State| s.select_position(id))
                 .on_key(move |s: &mut State, event: &KeyEvent, tx: &mut Tx| {
@@ -506,9 +552,8 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                     tx.scroll_into_view(format!("tile-{next}"));
                     true
                 })
-                .children(s.shaders.then(|| crate::fx::lift(8.0)))
                 .children(
-                    wash(change, largest, t.up, t.down)
+                    wash.filter(|_| !s.shaders)
                         .map(|wash| el().absolute(0.0, 0.0).size(w, h).fill(wash).a11y_hidden()),
                 )
                 .child(
@@ -552,16 +597,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .mt(14.0)
                                     .gap(20.0)
                                     // Cash has no move today: no dashes, just its share.
-                                    .children(
-                                        change
-                                            .is_some()
-                                            .then(|| figure("Today", own.clone(), own_color, t)),
-                                    )
-                                    .children(
-                                        points.is_some().then(|| {
-                                            figure("Of today", share.clone(), share_color, t)
-                                        }),
-                                    )
+                                    .children(change.is_some().then(|| {
+                                        figure(&s.when().title(), own.clone(), own_color, t)
+                                    }))
+                                    .children(points.is_some().then(|| {
+                                        figure(&s.when().of(), share.clone(), share_color, t)
+                                    }))
                                     .child(figure("Of portfolio", weight, k.c.text_base, t)),
                             ),
                         Detail::Figures => body
@@ -571,16 +612,17 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .color(k.c.text_muted)
                                     .truncate(),
                             )
-                            .children(
-                                change
-                                    .is_some()
-                                    .then(|| labelled(own.clone(), "today", own_color, t).mt(6.0)),
-                            )
-                            .children(
-                                points
-                                    .is_some()
-                                    .then(|| labelled(share.clone(), "of today", share_color, t)),
-                            )
+                            .children(change.is_some().then(|| {
+                                labelled(own.clone(), &s.when().word(), own_color, t).mt(6.0)
+                            }))
+                            .children(points.is_some().then(|| {
+                                labelled(
+                                    share.clone(),
+                                    &s.when().of().to_lowercase(),
+                                    share_color,
+                                    t,
+                                )
+                            }))
                             // The first figure to go when the tile is short.
                             .children(
                                 (h >= WEIGHT_ROOM)
@@ -619,9 +661,11 @@ fn tile_line(
     if room < 22.0 {
         return None;
     }
+    // The lines are the month up to today: not a past day's.
     let values = position.position_id.as_deref().and_then(|id| {
         s.history
             .as_ref()
+            .filter(|_| !s.in_past())
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;
@@ -796,6 +840,29 @@ mod tests {
         assert_eq!(neighbor(&tiles, 1, [0.0, 1.0]), Some(3));
         assert_eq!(neighbor(&tiles, 1, [-1.0, 0.0]), None);
         assert_eq!(neighbor(&tiles, 2, [-1.0, 0.0]), Some(1));
+    }
+
+    #[test]
+    fn a_tile_with_no_move_is_plain_steel_and_a_gain_or_loss_is_not() {
+        let up = Color {
+            r: 0.0,
+            g: 1.0,
+            b: 0.5,
+            a: 1.0,
+        };
+        let down = Color {
+            r: 1.0,
+            g: 0.0,
+            b: 0.2,
+            a: 1.0,
+        };
+        let neutral = plate_tint(None, false);
+        assert_eq!(plate_tint(wash(Some(0.0), 2.0, up, down), false), neutral);
+        assert_eq!(plate_tint(wash(None, 2.0, up, down), false), neutral);
+        assert_eq!(neutral.0[0], neutral.0[1], "plain steel has no hue");
+        assert_eq!(neutral.0[1], neutral.0[2], "plain steel has no hue");
+        assert_ne!(plate_tint(wash(Some(0.5), 2.0, up, down), false), neutral);
+        assert_ne!(plate_tint(wash(Some(-0.5), 2.0, up, down), true), neutral);
     }
 
     #[test]

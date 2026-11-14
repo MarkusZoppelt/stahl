@@ -13,7 +13,7 @@ use std::{
     future::Future,
     io::ErrorKind,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
 };
 
 use chrono::{Datelike as _, Duration, Local, NaiveDate};
@@ -30,8 +30,9 @@ use portfolio_rs::{
         snapshots::{self, Snapshot as HistoryPoint},
     },
     policy::{self, Policy},
+    position::parse_purchase_date,
     review::Review,
-    services::atomic_write,
+    services::{atomic_write, portfolio_loader::check_positions},
     simulate::RebalanceSimulation,
     state::{
         AllocationItemDto, AppConfigDto, AppState, CreatePositionRequest, GeneratedDocument,
@@ -44,7 +45,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Error as JsonError, from_value, to_value};
 use tokio::{runtime::Handle, sync::RwLock};
 
-use crate::statement::{Change, Contribution, Seen};
+use crate::{
+    intake::apply::{self as intake_apply, Op as IntakeOp},
+    outlook::Assumptions,
+    records::{self, Record},
+    statement::{Change, Contribution, Seen},
+    time,
+};
 
 pub type BackendResult<T> = Result<T, String>;
 
@@ -60,11 +67,20 @@ const HISTORY_ID: &str = "main";
 /// Beside a portfolio's history: the days its owner looked at it.
 const SEEN_FILE: &str = "seen.json";
 
+/// Beside a portfolio's history: the records its owner has been shown.
+const RECORDS_SEEN_FILE: &str = "records-seen.json";
+
 #[derive(Serialize, Deserialize)]
 struct SeenFile {
     last: String,
     #[serde(default)]
     before: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct RecordsSeenFile {
+    #[serde(default)]
+    seen: Vec<String>,
 }
 
 fn read_seen(text: &str) -> Option<Seen> {
@@ -489,6 +505,28 @@ impl Period {
         }
     }
 
+    /// A period as a block or a prompt names it, defaulting to the month the Overview charts.
+    pub fn from_name(name: &str) -> Period {
+        match name.trim().to_lowercase().as_str() {
+            "week" | "1w" | "seven days" => Period::Week,
+            "ytd" | "year to date" => Period::Ytd,
+            "year" | "1y" | "twelve months" => Period::Year,
+            "all" | "everything" => Period::All,
+            _ => Period::Month,
+        }
+    }
+
+    /// The period's name as a sentence would have it.
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Period::Week => "the past week",
+            Period::Month => "the past month",
+            Period::Ytd => "this year",
+            Period::Year => "the past year",
+            Period::All => "all of it",
+        }
+    }
+
     /// The first day of the period, or `None` for all of history.
     fn start(self, today: NaiveDate) -> Option<NaiveDate> {
         match self {
@@ -540,6 +578,107 @@ impl History {
 pub struct HistoryValue {
     pub date: String,
     pub value: f64,
+}
+
+/// What the records room finds: the plates, newest first, and the ids already shown.
+#[derive(Clone, Debug, Default)]
+pub struct RecordsView {
+    pub plates: Vec<Record>,
+    pub seen: Vec<String>,
+}
+
+/// The stored valuations as the records room reads them, with the money that moved into or out
+/// of the portfolio on each day.
+fn record_days(points: &[HistoryPoint], transactions: &[Transaction]) -> Vec<records::Day> {
+    let mut points: Vec<&HistoryPoint> = points.iter().collect();
+    points.sort_by(|a, b| a.date.cmp(&b.date));
+    points.dedup_by(|a, b| a.date == b.date);
+    let mut days = Vec::new();
+    for (index, point) in points.iter().enumerate() {
+        let Some(date) = snapshots::strict_date(&point.date) else {
+            continue;
+        };
+        // Unknown flows are never read as "nothing moved": a NaN compares false everywhere, so
+        // the day is left out of any record that needs a quiet day.
+        let flow = index
+            .checked_sub(1)
+            .and_then(|before| performance::position_effects(points[before], point, transactions))
+            .map_or(f64::NAN, |effects| {
+                performance::total(&effects).net_contributions
+            });
+        let mut classes: Vec<(String, f64)> = Vec::new();
+        for position in &point.positions {
+            let Some(value) = position.value_base.filter(|value| value.is_finite()) else {
+                continue;
+            };
+            match classes
+                .iter_mut()
+                .find(|(class, _)| *class == position.asset_class)
+            {
+                Some((_, total)) => *total += value,
+                None => classes.push((position.asset_class.clone(), value)),
+            }
+        }
+        days.push(records::Day {
+            date,
+            total: point.total_base,
+            classes,
+            flow,
+        });
+    }
+    days
+}
+
+/// The holdings today, with their purchases and the prices the snapshots recorded for them.
+fn record_holdings(positions: &[PositionDto], points: &[HistoryPoint]) -> Vec<records::Holding> {
+    positions
+        .iter()
+        .filter_map(|position| {
+            let id = position.position_id.clone()?;
+            let name = position.name.clone().or_else(|| position.ticker.clone())?;
+            let mut purchases: Vec<records::Purchase> = position
+                .purchases
+                .iter()
+                .filter_map(|purchase| {
+                    let date = purchase.date.as_deref().and_then(parse_purchase_date)?;
+                    Some(records::Purchase {
+                        date: date.date_naive(),
+                        quantity: purchase.quantity,
+                        price: purchase.price,
+                    })
+                })
+                .collect();
+            purchases.sort_by_key(|purchase| purchase.date);
+            let mut prices: Vec<(chrono::NaiveDate, f64)> = Vec::new();
+            let mut currency = None;
+            for point in points {
+                let Some(snapshot) = point
+                    .positions
+                    .iter()
+                    .find(|snapshot| snapshot.position_id == id)
+                else {
+                    continue;
+                };
+                let (Some(date), Some(price)) =
+                    (snapshots::strict_date(&point.date), snapshot.price)
+                else {
+                    continue;
+                };
+                if price.is_finite() && price > 0.0 {
+                    prices.push((date, price));
+                    currency = snapshot.price_currency.clone().or(currency);
+                }
+            }
+            Some(records::Holding {
+                id,
+                name,
+                currency,
+                purchases,
+                prices,
+                average_cost: position.average_cost,
+            })
+        })
+        .collect()
 }
 
 /// The parts of a [`PortfolioContext`] the Briefing page shows. Its fields are
@@ -707,12 +846,41 @@ fn series_from(points: &[HistoryPoint]) -> Vec<HoldingSeries> {
         .collect()
 }
 
+/// Where questions may go, as configured in Settings.
+#[derive(Clone)]
+pub struct Llm {
+    /// The provider's base URL, as the owner wrote it.
+    pub url: String,
+    /// The key, for the request's Authorization header only.
+    pub key: Option<String>,
+    pub model: String,
+}
+
+impl Llm {
+    fn from_config(config: &AppConfig) -> Option<Llm> {
+        let url = config
+            .llm_provider_url
+            .clone()
+            .filter(|url| !url.trim().is_empty())?;
+        Some(Llm {
+            url,
+            key: config
+                .llm_api_key
+                .clone()
+                .filter(|key| !key.trim().is_empty()),
+            model: config.llm_model.clone().unwrap_or_default(),
+        })
+    }
+}
+
 #[derive(Clone)]
 pub struct Backend {
     state: Arc<AppState>,
     config: Arc<RwLock<AppConfig>>,
     /// Where to persist the config. `None` is the user's default location.
     config_path: Option<PathBuf>,
+    /// The owner's `[outlook]` assumptions, from the policy file when it has them.
+    outlook: Arc<StdRwLock<Assumptions>>,
     runtime: Handle,
 }
 
@@ -737,8 +905,25 @@ impl Backend {
             state: Arc::new(state),
             config: Arc::new(RwLock::new(config)),
             config_path,
+            outlook: Arc::new(StdRwLock::new(Assumptions::default())),
             runtime,
         }
+    }
+
+    /// The assumptions the outlook is drawn on: the policy's `[outlook]` table when it has
+    /// one, the bank's table otherwise.
+    pub fn outlook_assumptions(&self) -> Assumptions {
+        self.outlook
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    fn set_outlook(&self, assumptions: Assumptions) {
+        *self
+            .outlook
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = assumptions;
     }
 
     /// Run `work` on the Tokio runtime, from any executor.
@@ -854,6 +1039,7 @@ impl Backend {
             ));
         }
         let policy_path = root.join("portfolio/policy.toml");
+        let policy_text = fs::read_to_string(&policy_path).ok();
         let policy = if policy_path.exists() {
             let policy = Policy::from_file(&policy_path.to_string_lossy())
                 .map_err(|error| format!("failed to load policy: {error:#}"))?;
@@ -861,6 +1047,12 @@ impl Backend {
         } else {
             None
         };
+        self.set_outlook(
+            policy_text
+                .as_deref()
+                .map(Assumptions::from_policy_toml)
+                .unwrap_or_default(),
+        );
         self.state
             .load_file(&positions.to_string_lossy())
             .await
@@ -895,6 +1087,7 @@ impl Backend {
     pub async fn load_simple_file(&self, path: String) -> BackendResult<()> {
         self.state.load_file(&path).await.map_err(report)?;
         *self.state.policy.write().await = None;
+        self.set_outlook(Assumptions::default());
         self.config.write().await.set_portfolio_file(path);
         self.save_config().await
     }
@@ -1097,6 +1290,126 @@ impl Backend {
         }))
     }
 
+    // --- Time ---
+
+    /// Every recorded day before today, oldest first, that can be shown as it stood: complete,
+    /// and in today's base currency. An encrypted portfolio has none.
+    pub async fn days(&self) -> BackendResult<Vec<time::Day>> {
+        if self.encrypted().await {
+            return Ok(Vec::new());
+        }
+        let Some(path) = self.history_path().await else {
+            return Ok(Vec::new());
+        };
+        let portfolio = self.state.portfolio().await;
+        let today = self.today_point(&portfolio).await;
+        let (mut points, _skipped) = snapshots::read(&path);
+        points
+            .retain(|point| point.base_currency == today.base_currency && point.date < today.date);
+        Ok(time::days_from(&points))
+    }
+
+    // --- The records room ---
+
+    /// Whether the open portfolio's values must not be written to disk in plaintext.
+    async fn encrypted(&self) -> bool {
+        self.state
+            .file_path()
+            .await
+            .is_none_or(|path| path.ends_with(".gpg"))
+    }
+
+    /// The wall, newest first, and the ids of the plates the owner has already been shown.
+    ///
+    /// An encrypted portfolio has no records: its ids would say which round numbers it passed,
+    /// and the file they are kept in is not encrypted. Nothing is written for one either.
+    pub async fn records(&self) -> BackendResult<RecordsView> {
+        if self.encrypted().await {
+            return Ok(RecordsView::default());
+        }
+        Ok(RecordsView {
+            plates: self.plates().await?,
+            seen: self.seen_records().await,
+        })
+    }
+
+    /// Every record this portfolio's history honestly supports.
+    async fn plates(&self) -> BackendResult<Vec<Record>> {
+        let Some(path) = self.history_path().await else {
+            return Ok(Vec::new());
+        };
+        let portfolio = self.state.portfolio().await;
+        if portfolio.positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let base = self.state.currency().await;
+        let today = self.today_point(&portfolio).await;
+        let (mut points, _skipped) = snapshots::read(&path);
+        points.retain(|point| {
+            point.complete && point.base_currency == today.base_currency && point.date < today.date
+        });
+        if today.complete {
+            points.push(today);
+        }
+        let transactions = analytics::transactions(&portfolio, &base, None);
+        let days = record_days(&points, &transactions);
+        let positions = self.state.get_positions().await;
+        let holdings = record_holdings(&positions, &points);
+        let policy = self.state.policy().await;
+        let allocations = policy
+            .as_ref()
+            .map_or(&[][..], |policy| policy.allocations.as_slice());
+        Ok(records::find(&records::Facts {
+            days: &days,
+            holdings: &holdings,
+            allocations,
+            currency: &base,
+        }))
+    }
+
+    /// Where the plates the owner has been shown are kept: beside the history, like the days
+    /// looked at. Ids only, which carry a date and a kind and no amounts.
+    async fn records_seen_path(&self) -> Option<PathBuf> {
+        Some(self.history_path().await?.parent()?.join(RECORDS_SEEN_FILE))
+    }
+
+    async fn seen_records(&self) -> Vec<String> {
+        let Some(path) = self.records_seen_path().await else {
+            return Vec::new();
+        };
+        fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<RecordsSeenFile>(&text).ok())
+            .map(|file| file.seen)
+            .unwrap_or_default()
+    }
+
+    /// Remember that these plates have been shown, so each one's arrival plays once and not again.
+    pub async fn mark_records_seen(&self, ids: Vec<String>) -> BackendResult<()> {
+        if ids.is_empty() || self.encrypted().await {
+            return Ok(());
+        }
+        let Some(path) = self.records_seen_path().await else {
+            return Ok(());
+        };
+        let mut seen = self.seen_records().await;
+        let mut added = false;
+        for id in ids {
+            if !seen.contains(&id) {
+                seen.push(id);
+                added = true;
+            }
+        }
+        if !added {
+            return Ok(());
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(report)?;
+        }
+        let text = serde_json::to_string(&RecordsSeenFile { seen }).unwrap_or_default() + "\n";
+        atomic_write::write_atomic_private(&path, text.as_bytes()).map_err(report)
+    }
+
     pub async fn add_position(&self, request: CreatePositionRequest) -> BackendResult<()> {
         self.state
             .add_position(request)
@@ -1125,6 +1438,43 @@ impl Backend {
         self.state.save().await.map_err(report)
     }
 
+    /// Write approved changes from a broker's file into the positions, and hand back the
+    /// positions as they were, so the owner can undo them.
+    ///
+    /// The result is checked before it replaces anything: positions that `portfolio_rs` could
+    /// not read back would leave a document that doesn't parse. Returns the positions from
+    /// before and the positions as the import left them.
+    pub async fn apply_intake(&self, ops: Vec<IntakeOp>) -> BackendResult<(String, String)> {
+        let before = self.state.positions_json.read().await.clone();
+        let after = intake_apply::apply(&before, &ops)?;
+        check_positions("positions.json", &after).map_err(|error| {
+            format!(
+                "This import would leave positions that can't be read ({}), so nothing was \
+                 changed.",
+                error.reason
+            )
+        })?;
+        self.state.set_positions_json(after).await;
+        let left = self.state.positions_json.read().await.clone();
+        Ok((before, left))
+    }
+
+    /// Put the positions back as they were before an import, if they are still as that import
+    /// left them. Returns the positions as they are now. Anything edited since is not lost: the
+    /// undo refuses instead.
+    pub async fn restore_positions(&self, json: String, left: &str) -> BackendResult<String> {
+        let current = self.state.positions_json.read().await.clone();
+        if !same_positions(&current, left) {
+            return Err(
+                "The positions have changed since that import, so it can't be undone \
+                        without losing the change."
+                    .to_string(),
+            );
+        }
+        self.state.set_positions_json(json).await;
+        Ok(self.state.positions_json.read().await.clone())
+    }
+
     // --- Policy ---
 
     pub async fn policy(&self) -> Option<Policy> {
@@ -1133,6 +1483,11 @@ impl Backend {
 
     pub async fn load_policy(&self) -> BackendResult<Policy> {
         self.state.load_policy(None).await.map_err(report)?;
+        if let Some(path) = self.state.policy_path().await
+            && let Ok(text) = fs::read_to_string(&path)
+        {
+            self.set_outlook(Assumptions::from_policy_toml(&text));
+        }
         self.state
             .policy()
             .await
@@ -1145,6 +1500,7 @@ impl Backend {
             .set_policy_from_toml(toml)
             .await
             .map_err(report)?;
+        self.set_outlook(Assumptions::from_policy_toml(toml));
         self.state
             .policy()
             .await
@@ -1238,6 +1594,85 @@ impl Backend {
     }
 
     /// `None` leaves a value unchanged.
+    /// The provider Counsel may ask, when one is set. The key is for the request only: it is
+    /// never shown in the interface, written to a log, or put in an error.
+    pub async fn llm(&self) -> Option<Llm> {
+        let config = self.config.read().await;
+        Llm::from_config(&config)
+    }
+
+    /// [`Backend::llm`] without waiting: the views and the send path read the config this way.
+    pub fn llm_now(&self) -> Option<Llm> {
+        let config = self.config.try_read().ok()?;
+        Llm::from_config(&config)
+    }
+
+    /// The runtime questions are read on.
+    pub fn handle(&self) -> Handle {
+        self.runtime.clone()
+    }
+
+    /// The file that remembers which hosts the owner has allowed questions to go to. Beside the
+    /// config, so a test's backend keeps its own.
+    pub fn consent_path(&self) -> Option<PathBuf> {
+        let config = self
+            .config_path
+            .clone()
+            .or_else(|| config_path().ok().map(PathBuf::from))?;
+        Some(config.with_file_name("ask-consent.json"))
+    }
+
+    /// The file that remembers whether AI features are on. Beside the config, like the consent.
+    pub fn features_path(&self) -> Option<PathBuf> {
+        let config = self
+            .config_path
+            .clone()
+            .or_else(|| config_path().ok().map(PathBuf::from))?;
+        Some(config.with_file_name("features.json"))
+    }
+
+    /// Whether the owner turned AI features on. A missing or unreadable file means off.
+    pub fn ai_features(&self) -> bool {
+        self.features_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value.get("ai").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+    }
+
+    /// Remember the choice at once.
+    pub fn set_ai_features(&self, on: bool) -> BackendResult<()> {
+        let Some(path) = self.features_path() else {
+            return Ok(());
+        };
+        std::fs::write(&path, serde_json::json!({ "ai": on }).to_string())
+            .map_err(|error| format!("couldn't remember that choice: {error}"))
+    }
+
+    /// The hosts the owner has already said yes to.
+    pub fn consented_hosts(&self) -> Vec<String> {
+        self.consent_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// Remember that questions may go to `host`, from now on.
+    pub fn allow_host(&self, host: &str) -> BackendResult<()> {
+        let Some(path) = self.consent_path() else {
+            return Ok(());
+        };
+        let mut hosts = self.consented_hosts();
+        if hosts.iter().any(|each| each == host) {
+            return Ok(());
+        }
+        hosts.push(host.to_string());
+        let text = serde_json::to_string_pretty(&hosts)
+            .map_err(|error| format!("couldn't remember that choice: {error}"))?;
+        std::fs::write(&path, text)
+            .map_err(|error| format!("couldn't remember that choice: {error}"))
+    }
+
     pub async fn set_llm_config(
         &self,
         provider_url: Option<String>,
@@ -1272,6 +1707,17 @@ impl Backend {
     }
 }
 
+/// Whether two positions texts say the same, whatever their spacing.
+fn same_positions(a: &str, b: &str) -> bool {
+    match (
+        serde_json::from_str::<serde_json::Value>(a),
+        serde_json::from_str::<serde_json::Value>(b),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -1300,6 +1746,61 @@ mod tests {
         let path = dir.path().join("positions.json");
         fs::write(&path, CASH_ONLY).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn a_host_is_remembered_beside_the_config_and_nowhere_else() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(backend.consented_hosts().is_empty());
+        backend.allow_host("api.example.com").unwrap();
+        backend.allow_host("api.example.com").unwrap();
+        backend.allow_host("127.0.0.1").unwrap();
+        assert_eq!(
+            backend.consented_hosts(),
+            vec!["api.example.com".to_string(), "127.0.0.1".to_string()]
+        );
+        assert!(dir.path().join("ask-consent.json").is_file());
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_features_file_reads_as_off() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(!backend.ai_features(), "missing");
+        fs::write(dir.path().join("features.json"), "{not json").unwrap();
+        assert!(!backend.ai_features(), "corrupt");
+        fs::write(dir.path().join("features.json"), r#"{"ai": "yes"}"#).unwrap();
+        assert!(!backend.ai_features(), "wrong type");
+        backend.set_ai_features(true).unwrap();
+        assert!(backend.ai_features());
+        assert!(dir.path().join("features.json").is_file());
+        backend.set_ai_features(false).unwrap();
+        assert!(!backend.ai_features());
+    }
+
+    #[test]
+    fn the_provider_is_read_without_its_key_ever_leaving_the_config() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(backend.llm_now().is_none(), "no provider is set");
+        runtime
+            .block_on(backend.set_llm_config(
+                Some("https://api.example.com/v1".to_string()),
+                Some("sk-secret".to_string()),
+                Some("a-model".to_string()),
+            ))
+            .unwrap();
+        let llm = backend.llm_now().expect("a provider");
+        assert_eq!(llm.url, "https://api.example.com/v1");
+        assert_eq!(llm.model, "a-model");
+        assert_eq!(llm.key.as_deref(), Some("sk-secret"));
+        // The DTO the interface sees still hides it.
+        let dto = runtime.block_on(backend.config());
+        assert!(dto.has_llm_api_key);
     }
 
     #[test]
@@ -1668,6 +2169,33 @@ mod tests {
     }
 
     #[test]
+    fn the_outlook_assumptions_come_from_the_policy_and_leave_with_it() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        let path = write_portfolio(&dir);
+        let policy = Backend::policy_from_strategy("balanced-growth").unwrap();
+        let mut text = Backend::policy_to_toml(&policy).unwrap();
+        text.push_str("\n[outlook.assumptions.Stocks]\nreturn = 0.06\nvolatility = 0.18\n");
+        fs::create_dir_all(dir.path().join("portfolio")).unwrap();
+        fs::write(dir.path().join("portfolio/policy.toml"), text).unwrap();
+
+        runtime.block_on(async {
+            let workspace = dir.path().to_string_lossy().into_owned();
+            backend.load_workspace(workspace).await.unwrap();
+            let (stocks, from_policy) = backend.outlook_assumptions().for_class("Stocks");
+            assert!(from_policy);
+            assert!((stocks.annual_return - 0.06).abs() < 1e-9);
+            assert!((stocks.volatility - 0.18).abs() < 1e-9);
+            backend.load_simple_file(path).await.unwrap();
+            assert!(
+                !backend.outlook_assumptions().for_class("Stocks").1,
+                "the policy's assumptions leave with it"
+            );
+        });
+    }
+
+    #[test]
     fn position_edits_persist_only_on_save() {
         let runtime = Runtime::new().unwrap();
         let dir = TempDir::new().unwrap();
@@ -1904,6 +2432,60 @@ mod tests {
             backend.record_today().await.unwrap();
         });
         assert!(!dir.path().join("main").exists());
+    }
+
+    #[test]
+    fn the_records_room_finds_the_walls_plates_and_remembers_them() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("portfolio");
+        demo::seed_workspace(&root);
+        let backend = demo::backend(dir.path(), Some(&root), runtime.handle().clone());
+        let seen = root.join("portfolio/history/main").join(RECORDS_SEEN_FILE);
+        fs::remove_file(&seen).ok();
+        let today = Local::now().date_naive();
+
+        runtime.block_on(async {
+            backend.startup(None).await.unwrap();
+            let view = backend.records().await.unwrap();
+            let ids: Vec<&str> = view.plates.iter().map(|plate| plate.id.as_str()).collect();
+            println!("{} plates: {ids:?}", view.plates.len());
+            for plate in &view.plates {
+                println!(
+                    "{} | {} | {} | {}",
+                    plate.date,
+                    plate.title(),
+                    plate.figure_text(false, "EUR").unwrap_or_default(),
+                    plate.sentence(false, "EUR")
+                );
+            }
+            assert!(view.seen.is_empty());
+            assert!(
+                view.plates
+                    .iter()
+                    .any(|plate| plate.id.ends_with(":begins")),
+                "the demo's first valuation"
+            );
+            assert!(
+                view.plates
+                    .iter()
+                    .any(|plate| plate.id.ends_with(":best-day")),
+                "the demo moved on some day"
+            );
+            assert!(view.plates.iter().any(|plate| plate.date == today));
+
+            // Only the ids of what was shown are written, beside the history.
+            let newest = view.plates[0].id.clone();
+            backend
+                .mark_records_seen(vec![newest.clone()])
+                .await
+                .unwrap();
+            let written = fs::read_to_string(&seen).unwrap();
+            assert!(written.contains(&newest), "{written}");
+            assert!(!written.contains('€'), "{written}");
+            let again = backend.records().await.unwrap();
+            assert_eq!(again.seen, [newest]);
+        });
     }
 
     #[test]

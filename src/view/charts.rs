@@ -221,7 +221,7 @@ pub fn value_chart(
     points: &[HistoryValue],
     t: &Theme,
     cx: &Cx<State>,
-    key: &'static str,
+    key: &str,
     height: f32,
 ) -> El {
     let k = &t.kit;

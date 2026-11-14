@@ -91,6 +91,20 @@ Without Nix, [rustup](https://rustup.rs) picks up `rust-toolchain.toml`. Linux a
 To release, bump the version in `Cargo.toml`, merge, and push a matching tag (`v0.4.0`).
 `.github/workflows/release.yml` builds the installers and publishes them with their checksums.
 
+The macOS app and disk image are signed with a Developer ID and notarized by
+[rcodesign](https://github.com/indygreg/apple-platform-rs), and a tag fails without these
+repository secrets:
+
+- `DEVELOPER_ID_P12`: the Developer ID Application certificate and its key, as a base64 `.p12`
+- `DEVELOPER_ID_P12_PASSWORD`: the password it was exported with
+- `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`: an App Store Connect API key (the `.p8` as is)
+
+Without them, a pull request or a manual run still builds, ad-hoc signed.
+
+Every push to `main` also builds the iPhone and iPad app and uploads it to TestFlight
+(`.github/workflows/testflight.yml`), signed with the Apple Distribution certificate:
+`DISTRIBUTION_P12`, `DISTRIBUTION_P12_PASSWORD`, `APPLE_TEAM_ID` and the same API key.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

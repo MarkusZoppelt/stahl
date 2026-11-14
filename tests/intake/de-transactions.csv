@@ -1,0 +1,9 @@
+Depot 4711 0815 – Umsätze
+Zeitraum: 01.11.2026 bis 12.11.2026
+
+Datum;Typ;Wertpapier;ISIN;Symbol;Stück;Kurs;Währung;Gebühren;Betrag;
+10.11.2026;Kauf;S&P 500 Index Trust;US78462F1030;SPY;3;512,40;EUR;1,00;-1.538,20;
+06.11.2026;Kauf;Nordlicht Global Small Cap;IE00BK5BQT80;NGSC;12;48,15;EUR;1,00;-578,80;
+04.11.2026;Verkauf;Gold Bullion Shares;US78463V1070;GLD;5;201,30;EUR;1,00;1.005,50;
+03.11.2026;Ausschüttung;Treasury 20+ Year Bond;US4642874329;TLT;;;EUR;;14,22;
+Summe;;;;;;;;;-1.097,28;

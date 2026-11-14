@@ -1,0 +1,9 @@
+"Brokerage Account XXXX-1234"
+"Transactions for 10/01/2026 to 11/30/2026"
+
+"Date","Action","Symbol","Description","Quantity","Price","Fees & Comm","Amount"
+"11/25/2026","Buy","VTI","HARBORVIEW TOTAL MARKET","4","$271.86","","-$1,087.44"
+"11/03/2026","Sell","TLT","LONG TREASURY BOND FUND","10","$88.20","$0.35","$881.65"
+"10/15/2026","Qualified Dividend","SPY","S&P 500 INDEX TRUST","","","","$45.10"
+"10/02/2026","Buy","BTC-USD","BITCOIN","0.0125","$61,000.00","","-$762.50"
+"Transactions Total","","","","","","","-$923.19"

@@ -29,6 +29,7 @@ use stahl::{
     app,
     backend::{Backend, Period},
     demo::{self, FakeReleases},
+    intake::reconcile::Change,
     state::{Command, Confirm, Page, PendingOpen, PickKind, State, UpdatePhase},
     update::{self, Installation, Updater},
     view::guide,
@@ -64,6 +65,15 @@ impl Harness {
     }
 
     fn boot_with(workspace: bool, file: Option<&str>, updater: Updater) -> Harness {
+        Self::boot_at(workspace, file, updater, (1320.0, 860.0))
+    }
+
+    /// A window tall enough to show the whole Overview, for a hold near the bottom of it.
+    fn boot_tall(workspace: bool) -> Harness {
+        Self::boot_at(workspace, None, Updater::disabled(), (1320.0, 1600.0))
+    }
+
+    fn boot_at(workspace: bool, file: Option<&str>, updater: Updater, size: (f32, f32)) -> Harness {
         offline();
         let tokio = Tokio::new().unwrap();
         let dir = TempDir::new().unwrap();
@@ -81,7 +91,7 @@ impl Harness {
             workspace.then_some(root.as_path()),
             tokio.handle().clone(),
         );
-        let rt = app::headless_with_updater(backend, initial, (1320.0, 860.0), updater);
+        let rt = app::headless_with_updater(backend, initial, size, updater);
         let mut harness = Harness {
             rt,
             dir,
@@ -175,6 +185,29 @@ impl Harness {
         self.rt.find(key).is_some()
     }
 
+    /// Click the first visible element whose text is exactly `label`, for a control with no key.
+    fn click_label(&mut self, label: &str) {
+        let (x, y) = self
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| {
+                element.text.as_deref() == Some(label)
+                    && element.visible[2] > 0.0
+                    && element.visible[3] > 0.0
+            })
+            .map(|element| {
+                let [x, y, width, height] = element.rect;
+                (x + width / 2.0, y + height / 2.0)
+            })
+            .unwrap_or_else(|| panic!("nothing to click labelled {label}"));
+        self.rt.pointer_move(x, y);
+        self.rt.frame(1.0 / 60.0);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
     fn has_text(&self, wanted: &str) -> bool {
         self.rt.elements().iter().any(|element| {
             element
@@ -203,6 +236,7 @@ fn every_page_opens_on_a_real_workspace() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         app.click(page.key());
@@ -340,6 +374,177 @@ fn adding_a_position_is_unsaved_until_saved() {
     assert!(!app.rt.state.dirty);
     assert!(fs::read_to_string(&path).unwrap().contains("Apple"));
     assert!(!app.exists("save"));
+}
+
+/// A broker's file from `tests/intake/`, dropped on the window as the platform hands it over.
+fn dropped(app: &mut Harness, name: &str) -> PathBuf {
+    let path = app.dir.path().join(name);
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name),
+        &path,
+    )
+    .unwrap();
+    app.rt.drop_files(vec![path.clone()], Some((660.0, 430.0)));
+    app.settle();
+    path
+}
+
+/// Every position's id and count, which an import changes and an undo puts back.
+fn counts(app: &Harness) -> Vec<(String, f64)> {
+    app.rt
+        .state
+        .positions
+        .iter()
+        .map(|position| {
+            (
+                position.position_id.clone().unwrap_or_default(),
+                position.amount,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "de-transactions.csv");
+    assert!(app.rt.state.intake.is_some(), "the review sheet is up");
+    assert!(app.has_text("Two purchases, one sale and one holding we have not seen before."));
+    assert!(app.exists("intake-accept-all"));
+    assert!(app.exists("intake-accept-0"));
+    assert!(
+        app.has_text("line 5:"),
+        "each change shows the file's own row"
+    );
+
+    app.click("intake-accept-all");
+    assert!(
+        app.rt.state.intake.is_some(),
+        "a doubted change, the new holding, stays in front of the owner"
+    );
+    assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
+    assert!(!app.rt.state.intake_undo.is_empty());
+    assert!(app.exists("toast"));
+    let after = counts(&app);
+    assert_ne!(before, after, "the positions changed");
+    let on_record = |app: &Harness| {
+        app.rt
+            .state
+            .positions
+            .iter()
+            .any(|position| position.ticker.as_deref() == Some("NGSC"))
+    };
+    assert!(!on_record(&app), "a new holding is never taken unseen");
+    assert!(app.has_text("filed under Stocks"));
+    let review = app.rt.state.intake.as_ref().unwrap();
+    let ledger = review.ledger.as_ref().unwrap();
+    let new = ledger
+        .proposals
+        .iter()
+        .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
+    assert!(on_record(&app), "taken by hand, it is on record");
+
+    // Undo takes back the last import only: the new holding, not the batch before it.
+    app.click_label("Undo");
+    assert!(!on_record(&app), "the new holding is taken back");
+    assert_eq!(counts(&app), after, "the batch before it stays");
+    // Two imports, undone in order.
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+    app.click_label("Undo");
+    assert!(app.rt.state.intake_undo.is_empty());
+    assert_eq!(counts(&app), before, "the positions are as they were");
+    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
+}
+
+#[test]
+fn one_row_can_be_accepted_on_its_own() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    dropped(&mut app, "de-transactions.csv");
+
+    app.click("intake-accept-0");
+    assert!(
+        app.rt.state.intake.is_some(),
+        "the sheet stays open for the rest"
+    );
+    assert!(app.has_text("Recorded"), "the row says what happened to it");
+    assert!(app.rt.state.dirty);
+    assert_ne!(counts(&app), before, "that one change is on record");
+    assert!(!app.rt.state.intake_undo.is_empty());
+
+    app.click("intake-leave-1");
+    assert!(!app.exists("intake-row-1"), "a row left is not asked again");
+    app.click("intake-dismiss");
+    assert!(app.rt.state.intake.is_none());
+}
+
+#[test]
+fn the_same_broker_file_twice_proposes_nothing_the_second_time() {
+    let mut app = Harness::boot(true, None);
+    let path = dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-all");
+    assert!(app.rt.state.dirty);
+    // The new holding is doubted, so it was left for the owner; take it by hand.
+    let new = app
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.as_ref())
+        .and_then(|ledger| {
+            ledger
+                .proposals
+                .iter()
+                .position(|proposal| matches!(proposal.change, Change::Add { .. }))
+        })
+        .unwrap();
+    app.click(&format!("intake-accept-{new}"));
+
+    app.rt.drop_files(vec![path], Some((660.0, 430.0)));
+    app.settle();
+    let review = app.rt.state.intake.as_ref().expect("the sheet still opens");
+    let ledger = review.ledger.as_ref().expect("the file still reads");
+    assert!(
+        ledger.proposals.iter().all(|proposal| !proposal.ready),
+        "{:#?}",
+        ledger.proposals
+    );
+    assert!(ledger.agreed > 0);
+    assert!(!app.exists("intake-accept-all"), "there is nothing to take");
+    assert!(app.has_text("every line is already on your record"));
+}
+
+#[test]
+fn an_unreadable_file_says_why_and_offers_nothing_to_take() {
+    let mut app = Harness::boot(true, None);
+    app.command('2', false);
+    let path = app.dir.path().join("statement.pdf");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/intake/statement.pdf"),
+        &path,
+    )
+    .unwrap();
+    app.click("import-intake");
+    assert_eq!(
+        app.rt.file_dialog().expect("the import dialog is open").0,
+        FileDialogKind::Open
+    );
+    app.rt
+        .resolve_file_dialog(Some(path))
+        .expect("the dialog is answered");
+    app.settle();
+
+    assert!(app.has_text("This is a PDF."));
+    assert!(!app.exists("intake-accept-all"));
+    app.click("intake-cancel");
+    assert!(app.rt.state.intake.is_none(), "Close puts the sheet away");
+    assert!(!app.rt.state.dirty, "an unreadable file changes nothing");
 }
 
 #[test]
@@ -816,7 +1021,7 @@ fn overview_agrees_with_the_review_and_leads_to_the_fix() {
     assert!(app.has_text("4 of 5 asset classes are outside their tolerance"));
     assert_eq!(app.rt.state.agenda_len(), 1);
 
-    app.click("agenda-action-drift");
+    app.click("matter-adjust-rebalance");
     assert_eq!(app.rt.state.page, Page::Rebalance);
 }
 
@@ -1010,6 +1215,7 @@ fn every_empty_page_says_what_belongs_there() {
         ),
         (Page::Review, "No policy yet", "review-set-policy"),
         (Page::Rebalance, "No policy yet", "rebalance-set-policy"),
+        (Page::Records, "The room is empty", "records-empty-add"),
     ] {
         app.click(page.key());
         assert_eq!(app.rt.state.page, page);
@@ -1199,6 +1405,98 @@ fn dragging_the_chart_measures_that_span_until_escape() {
 }
 
 #[test]
+fn the_outlook_years_slider_moves_the_median_by_key() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    let median = |app: &Harness| {
+        app.rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("outlook-median"))
+            .and_then(|element| element.text.clone())
+            .expect("the outlook median")
+    };
+    let before = median(&app);
+    app.rt.update(|_, tx| tx.focus("outlook-years", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.years, 11);
+    let after = median(&app);
+    assert_ne!(before, after, "a longer horizon moves the median");
+    app.press(Key::Left);
+    assert_eq!(app.rt.state.outlook.years, 10);
+    assert_eq!(median(&app), before, "and back again");
+    // The monthly amount steps with the arrows too.
+    app.rt.update(|_, tx| tx.focus("outlook-monthly", true));
+    app.rt.frame(1.0 / 60.0);
+    app.press(Key::Right);
+    assert_eq!(app.rt.state.outlook.monthly, 550.0);
+}
+
+#[test]
+fn the_outlook_shock_is_picked_by_key_and_moves_the_fan() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    assert_eq!(app.rt.state.outlook.shock, 0, "none is the default");
+    let low = |app: &Harness| app.rt.state.outlook.simulated.horizon().unwrap().low;
+    let before = low(&app);
+    // Focus the control on "None", then walk to "-30%" with the arrows and pick it.
+    app.rt
+        .update(|_, tx| tx.scroll_into_view("outlook-shock-note"));
+    app.settle();
+    app.click_label("None");
+    app.press(Key::Right);
+    app.press(Key::Right);
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.outlook.shock, 30, "the third segment is 30%");
+    assert!(low(&app) < before, "a fall moves the lower band down");
+    let note = app
+        .rt
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("outlook-shock-note"))
+        .and_then(|element| element.text.clone())
+        .expect("the assumptions say what falls");
+    assert!(note.contains("falls 30% in year 2"), "{note}");
+}
+
+#[test]
+fn the_outlook_hides_money_in_privacy_mode_and_says_how_it_was_drawn() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Performance.key());
+    app.rt.update(|state, _| state.privacy = true);
+    app.settle();
+    let texts: Vec<String> = app
+        .rt
+        .elements()
+        .into_iter()
+        .filter(|element| {
+            matches!(
+                element.key.as_deref(),
+                Some("outlook-method" | "outlook-shock-note")
+            )
+        })
+        .filter_map(|element| element.text.clone())
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("3000 paths") && text.contains("9 months")),
+        "{texts:?}"
+    );
+    for key in ["outlook-low", "outlook-median", "outlook-high"] {
+        let shown = app
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .and_then(|element| element.text.clone())
+            .expect("a figure");
+        assert!(!shown.chars().any(|c| c.is_ascii_digit()), "{key}: {shown}");
+    }
+}
+
+#[test]
 fn a_phone_measures_on_the_rail_and_a_vertical_drag_still_scrolls() {
     let mut app = Harness::phone();
     app.click(Page::Performance.key());
@@ -1243,7 +1541,7 @@ fn a_chart_follows_the_pointer() {
 
 #[test]
 fn the_same_position_and_class_fly_between_pages_without_clashing() {
-    let mut app = Harness::boot(true, None);
+    let mut app = Harness::boot_tall(true);
     assert!(app.exists("mover-0"));
     assert!(app.exists("legend-0"));
     app.click("mover-0");
@@ -2802,6 +3100,7 @@ fn a_phone_reaches_every_page_through_the_tabs_or_more() {
         (Page::Briefing, "Cash buffer"),
         (Page::Health, "Portfolio file is valid"),
         (Page::Settings, "AI provider"),
+        (Page::Records, "The first valuation"),
         (Page::Overview, "Top movers today"),
     ] {
         let tabbed = [Page::Overview, Page::Holdings, Page::Performance].contains(&page);
@@ -3130,6 +3429,41 @@ fn the_door_opens_once_from_welcome_and_a_refresh_does_not_replay_it() {
     assert!(
         app.rt.state.opening.is_some(),
         "a new portfolio opens the door again"
+    );
+}
+
+#[test]
+fn the_door_counts_what_the_page_asks() {
+    let mut app = Harness::boot_tall(true);
+    let label = |app: &Harness| element(app, "door-sidebar").label;
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("Stahl Capital. 1 thing needs attention")
+    );
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    for _ in 0..150 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert_eq!(
+        label(&app).as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
+    );
+    assert!(!app.exists("door-attention-sidebar"));
+    assert!(app.has_text("Nothing needs your signature today."));
+}
+
+#[test]
+fn the_mark_stays_until_both_plans_are_decided() {
+    let mut app = Harness::boot_tall(true);
+    let one = Some("Stahl Capital. 1 thing needs attention");
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    assert_eq!(element(&app, "door-sidebar").label.as_deref(), one);
+    app.click("matter-postpone-cash-place");
+    assert_eq!(
+        element(&app, "door-sidebar").label.as_deref(),
+        Some("Stahl Capital. Nothing needs attention")
     );
 }
 
@@ -3564,4 +3898,1713 @@ fn the_door_can_be_turned_by_hand_and_by_the_keyboard() {
         "a keyboard reaches the dial: {}",
         cold.rt.state.dial_hand
     );
+}
+
+// --- Counsel ---
+
+#[test]
+fn counsel_answers_a_typed_question_with_blocks() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert!(app.has_text("The door is open, and the light is on."));
+
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    let turn = &app.rt.state.ask.turns[0];
+    assert_eq!(turn.question, "What changed this month?");
+    assert_eq!(turn.phase, stahl::ask::Phase::Done);
+    assert!(
+        turn.blocks.len() >= 4,
+        "the answer is made of several blocks: {:?}",
+        turn.blocks
+    );
+    assert!(
+        app.has_text("Bitcoin did most of the work"),
+        "the first sentence is on the page"
+    );
+    assert!(app.exists("ask-0-2-chart"), "the chart block is drawn");
+    assert!(
+        app.has_text("€107,400.00"),
+        "the figure block shows the app's own total"
+    );
+    assert!(!app.rt.state.thinking(), "nothing is still in flight");
+}
+
+#[test]
+fn the_first_sentence_arrives_word_by_word() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    let sentence = |app: &Harness| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some("ask-0-0-say"))
+            .and_then(|element| element.text.clone())
+            .unwrap_or_default()
+    };
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    // The block lands a third of a second after the question, with its first words only.
+    for _ in 0..21 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let early = sentence(&app);
+    let words = early.split_whitespace().count();
+    assert!(
+        (1..6).contains(&words),
+        "the sentence has only started: {early:?}"
+    );
+    for _ in 0..12 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let later = sentence(&app);
+    assert!(
+        later.split_whitespace().count() > words,
+        "more words have arrived: {early:?} then {later:?}"
+    );
+    // And it finishes, as the sentence that was arriving from its start. The day it names is
+    // the last one looked at, so it moves with the calendar.
+    app.settle();
+    let finished = sentence(&app);
+    assert!(
+        finished.starts_with(&later),
+        "what is shown is the sentence from its start: {later:?} then {finished:?}"
+    );
+    assert!(
+        finished.starts_with("Since ")
+            && finished.ends_with(
+                " you are up €291.41. Bitcoin did most of the work, which will surprise nobody."
+            ),
+        "{finished:?}"
+    );
+}
+
+#[test]
+fn a_loss_is_said_plainly_and_never_with_the_joke() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    let change = app
+        .rt
+        .state
+        .change
+        .as_mut()
+        .expect("the demo looked at this portfolio before");
+    change.start = change.end + 300.0;
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("you are down €300.00"),
+        "the loss is stated, without a second sign"
+    );
+    assert!(
+        !app.has_text("surprise nobody"),
+        "the joke is only for a gain"
+    );
+    assert!(!app.has_text("you are up"));
+}
+
+#[test]
+fn an_empty_page_offers_questions_the_app_can_answer_without_a_model() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    let asked: Vec<String> = (0..6)
+        .filter(|index| app.exists(&format!("ask-suggestion-{index}")))
+        .filter_map(|index| {
+            app.rt
+                .elements()
+                .iter()
+                .find(|element| element.key.as_deref() == Some(&format!("ask-suggestion-{index}")))
+                .and_then(|element| element.label.clone())
+        })
+        .collect();
+    assert!(
+        (4..=6).contains(&asked.len()),
+        "four to six questions: {asked:?}"
+    );
+    assert!(
+        asked.iter().any(|question| question.starts_with("What if")),
+        "a what-if is one of them: {asked:?}"
+    );
+
+    // The what-if is answered by the app itself: the shock is the question's, the rest is the
+    // app's arithmetic.
+    let at = asked
+        .iter()
+        .position(|question| question.starts_with("What if"))
+        .expect("a what-if");
+    app.click(&format!("ask-suggestion-{at}"));
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("here is what it would leave"),
+        "the app answers a what-if with no model"
+    );
+    assert!(app.exists("ask-0-1-toggle"), "and the change can be played");
+    assert!(app.exists("ask-0-1-bar"));
+}
+
+#[test]
+fn thinking_is_true_from_sending_until_the_answer_finishes() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How is Bitcoin doing?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.rt.state.thinking(), "the app says it is working");
+    assert!(app.exists("ask-stop"), "there is a way to stop it");
+    app.settle();
+    app.settle();
+    assert!(!app.rt.state.thinking());
+    assert!(
+        app.exists("ask-send"),
+        "the input asks again when it is done"
+    );
+}
+
+#[test]
+fn escape_stops_an_answer_in_flight() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(app.rt.state.ask.streaming, "the first block has landed");
+    let shown = app.rt.state.ask.turns[0].blocks.len();
+    assert!((1..5).contains(&shown), "the answer was still arriving");
+
+    app.press(Key::Escape);
+    assert_eq!(app.rt.state.ask.turns[0].phase, stahl::ask::Phase::Stopped);
+    assert!(!app.rt.state.thinking());
+    assert!(app.has_text("Stopped. Ask again whenever you like."));
+    // Nothing else arrives after the stop.
+    let stopped = app.rt.state.ask.turns[0].blocks.len();
+    for _ in 0..90 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(app.rt.state.ask.turns[0].blocks.len(), stopped);
+}
+
+/// A model that writes a figure itself, to check what the page does with it.
+struct MadeUp;
+
+impl stahl::ask::Model for MadeUp {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is 31.4% of the portfolio."}"#.to_string(),
+        )
+    }
+}
+
+/// A model that only quotes the fact table.
+struct Computed;
+
+impl stahl::ask::Model for Computed {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        stahl::ask::Reply::Ready(
+            r#"{"block":"say","text":"Crypto is {class.crypto.share} of the portfolio."}"#
+                .to_string(),
+        )
+    }
+}
+
+#[test]
+fn a_figure_the_model_made_up_is_marked_unverified() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    let help = |app: &Harness, key: &str| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .and_then(|element| element.help.clone())
+            .unwrap_or_default()
+    };
+
+    app.rt.state.model = Arc::new(MadeUp);
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 31.4% of the portfolio."));
+    assert!(
+        help(&app, "ask-0-0-say").contains("Stahl didn't compute"),
+        "the invented figure is marked unverified"
+    );
+
+    app.rt.state.model = Arc::new(Computed);
+    app.click("ask-input");
+    app.type_text("And again?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is 25.1% of the portfolio."));
+    assert!(
+        help(&app, "ask-1-0-say").is_empty(),
+        "a figure from the fact table is not marked"
+    );
+}
+
+#[test]
+fn the_what_if_toggle_shows_today_and_what_the_shock_leaves() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What if crypto halves?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    // The answer settles on what the shock would leave.
+    assert!(app.has_text("What would be left"));
+    assert!(app.has_text("€93,900.00"), "the shocked total");
+    assert!(app.has_text("€13,500.00"), "the difference beside it");
+
+    // "Now" goes back to today.
+    app.click("ask-0-1-now");
+    assert!(app.has_text("€107,400.00"), "today's total");
+    assert!(!app.has_text("€13,500.00"), "no difference to state");
+    assert!(
+        app.rt
+            .state
+            .ask
+            .what_if_at(0, 1)
+            .is_some_and(|what_if| what_if.now)
+    );
+
+    // The right arrow goes forward again, the left one back: the toggle has the keyboard.
+    app.press(Key::Right);
+    assert!(app.has_text("€93,900.00"));
+    app.press(Key::Left);
+    assert!(app.has_text("€107,400.00"));
+
+    // And the details table is a disclosure, closed until asked for.
+    assert!(!app.exists("ask-0-1-details-body"));
+    app.click("ask-0-1-details");
+    assert!(app.exists("ask-0-1-details-body"));
+    assert!(
+        app.has_text("€27,000.00"),
+        "the table has what crypto is worth today"
+    );
+    app.click("ask-0-1-details");
+    assert!(!app.exists("ask-0-1-details-body"));
+}
+
+#[test]
+fn dragging_the_plan_in_an_answer_changes_its_trades_and_carries_the_fraction_over() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("50% of the way to your targets"));
+
+    // Drag the answer's own slider to about 80% of the way.
+    let (x, y) = app.rt.find("ask-0-3-rail").expect("the slider is there");
+    let width = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .map_or(0.0, |play| play.width);
+    assert!(width > 100.0, "the slider measured itself: {width}");
+    let want = x + width * 0.3;
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(want, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(want, y);
+    app.settle();
+
+    let fraction = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .and_then(|play| play.fraction)
+        .expect("the slider took the drag");
+    assert!((0.7..0.9).contains(&fraction), "{fraction}");
+    let percent = (fraction * 100.0).round() as i64;
+    assert!(
+        app.has_text(&format!("{percent}% of the way to your targets")),
+        "the plan is worked out again at the new fraction"
+    );
+    assert!(!app.has_text("50% of the way to your targets"));
+
+    // And the Rebalance page opens at the fraction the owner dragged to.
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert!((app.rt.state.rebalance.fraction - fraction).abs() < 1e-9);
+    assert!(app.has_text(&format!("Go {percent}% of the way")));
+}
+
+#[test]
+fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert_eq!(
+        app.rt.state.rebalance.plan,
+        stahl::state::RebalancePlan::Blend
+    );
+    assert!(
+        (app.rt.state.rebalance.fraction - 0.5).abs() < 1e-9,
+        "half the way, as the answer said"
+    );
+    assert!(app.has_text("Go 50% of the way"));
+}
+
+#[test]
+fn the_palette_asks_counsel_what_was_typed() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(
+        app.has_text("Ask counsel: what changed this month?"),
+        "the typed question is the first row"
+    );
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin did most of the work"));
+}
+
+#[test]
+fn the_next_step_comes_before_counsel_on_the_overview() {
+    let y = |app: &Harness, key: &str| app.rt.find(key).unwrap_or_else(|| panic!("{key}")).1;
+    let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    let order = [
+        "statement-text",
+        "statement-figures",
+        "total-value",
+        "matter-sign-rebalance",
+        "overview-ask",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            y(&app, pair[0]) < y(&app, pair[1]),
+            "{} before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    let app = Harness::boot(true, None);
+    assert!(y(&app, "matter-sign-rebalance") < 640.0);
+    let mut app = Harness::phone();
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    let order = [
+        "statement-text",
+        "total-value",
+        "matter-sign-rebalance",
+        "overview-ask",
+        "statement-figures",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            y(&app, pair[0]) < y(&app, pair[1]),
+            "{} before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    assert!(y(&app, "matter-adjust-rebalance") < 560.0);
+}
+
+#[test]
+fn the_overview_line_asks_what_was_typed_there() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click("overview-ask");
+    app.type_text("How is Bitcoin doing?");
+    app.press(Key::Enter);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Bitcoin is €27,000.00"));
+}
+
+#[test]
+fn a_suggested_question_on_the_overview_asks_it() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    assert!(app.exists("overview-ask-0"));
+    app.click("overview-ask-0");
+    assert_eq!(app.rt.state.page, Page::Ask);
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "Why is Crypto off its target?"
+    );
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Because prices moved and you did not."));
+}
+
+#[test]
+fn a_question_to_a_provider_asks_before_it_goes() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("https://api.example.com/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(app.rt.state.consent.is_some(), "the prompt asks first");
+    assert!(app.exists("consent-panel"));
+    assert!(app.has_text("api.example.com"));
+    assert!(
+        app.has_text("Authorization header"),
+        "the key is not in the body, so the sheet says where it goes"
+    );
+
+    app.click("consent-show");
+    assert!(
+        app.has_text("You are Counsel"),
+        "the exact system prompt is shown"
+    );
+    assert!(app.has_text("\"stream\": true"));
+
+    app.click("consent-cancel");
+    assert!(app.rt.state.consent.is_none());
+    assert_eq!(
+        app.rt.state.ask.input.text, "What changed this month?",
+        "the question goes back in the input"
+    );
+    assert!(app.rt.state.ask.turns.is_empty(), "nothing was sent");
+    assert!(
+        !app.dir.path().join("ask-consent.json").exists(),
+        "nothing was remembered"
+    );
+}
+
+#[test]
+fn a_remote_provider_must_be_https() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://example.com/v1");
+    app.click("settings-save");
+    app.settle();
+    let error = app.rt.state.settings.error.clone().expect("refused");
+    assert!(error.contains("https"), "{error}");
+    assert!(app.has_text("example.com would be reached without encryption"));
+    assert_eq!(
+        app.rt.state.backend.llm_now().map(|llm| llm.url),
+        None,
+        "nothing was saved"
+    );
+}
+
+#[test]
+fn a_question_to_this_computer_needs_no_prompt() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.click(Page::Settings.key());
+    app.click("settings-url");
+    app.type_text("http://127.0.0.1:11434/v1");
+    app.click("settings-model");
+    app.type_text("a-model");
+    app.click("settings-save");
+
+    app.click(Page::Ask.key());
+    assert!(
+        app.has_text("on this computer"),
+        "the line under the input says where it goes"
+    );
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    assert!(
+        app.rt.state.consent.is_none(),
+        "a provider on this machine is not asked about"
+    );
+    // It goes straight out: nothing to allow, and a turn is on its way.
+    app.settle();
+    assert_eq!(app.rt.state.ask.turns.len(), 1);
+    assert_eq!(
+        app.rt.state.ask.turns[0].question,
+        "What changed this month?"
+    );
+}
+
+#[test]
+fn without_a_model_the_app_answers_what_it_knows() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("How much is in crypto?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("Crypto is €27,000.00"));
+    assert!(app.has_text("or 25.1% of the portfolio"));
+    assert!(
+        !app.has_text("needs a model"),
+        "a figure the app knows needs no model"
+    );
+    assert!(app.exists("ask-0-1-figure-0"), "the figures are drawn");
+}
+
+#[test]
+fn without_a_model_an_unknown_question_says_how_to_get_one() {
+    let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Should I buy a house?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("needs a model"));
+    assert!(app.has_text("local one keeps everything on this computer"));
+    app.click("ask-0-1-go-0");
+    assert_eq!(app.rt.state.page, Page::Settings);
+}
+
+#[test]
+fn a_new_record_marks_the_sidebar_until_the_wall_is_seen() {
+    let mut app = Harness::boot(true, None);
+    assert!(
+        app.rt.state.records_unseen > 0,
+        "a portfolio with history has plates the owner has not been shown"
+    );
+    let seen = app
+        .dir
+        .path()
+        .join("portfolio/portfolio/history/main/records-seen.json");
+    assert!(
+        !seen.exists(),
+        "nothing is written before the wall is opened"
+    );
+
+    app.click("nav-records");
+    assert_eq!(app.rt.state.page, Page::Records);
+    assert_eq!(app.rt.state.records_unseen, 0, "the mark goes once seen");
+    assert!(
+        app.rt.state.record_arrival.is_some(),
+        "the newest plate is set onto the wall once"
+    );
+    assert!(app.has_text("newest first"));
+
+    // What was shown is remembered beside the history, by id, with no amounts in it.
+    let written = fs::read_to_string(&seen).unwrap();
+    assert!(written.contains(":begins"), "{written}");
+    assert!(!written.contains('\u{20ac}'), "{written}");
+
+    // Coming back, the wall is simply there: no second ceremony, no mark.
+    app.click(Page::Overview.key());
+    app.click("nav-records");
+    assert_eq!(app.rt.state.records_unseen, 0);
+    assert!(app.rt.state.record_arrival.is_none());
+}
+
+#[test]
+fn a_plate_opens_to_its_moment_and_closes() {
+    let mut app = Harness::boot(true, None);
+    app.click("nav-records");
+    let plates = app.rt.state.records.data.clone().expect("the wall");
+    assert!(plates.len() >= 2, "the demo has a wall: {}", plates.len());
+    let id = plates[0].id.clone();
+
+    app.click(&format!("plate-{id}"));
+    assert_eq!(app.rt.state.record_plate.as_deref(), Some(id.as_str()));
+    assert!(app.exists("record-back"), "a way back to the wall");
+    assert!(app.exists("record-chart"), "the moment, on the chart");
+
+    app.press(Key::Escape);
+    assert!(app.rt.state.record_plate.is_none());
+    assert!(app.exists(&format!("plate-{id}")), "the plate is back");
+}
+
+// --- Time ---
+
+/// The strip's left edge and middle height, in window points.
+fn strip_start(app: &Harness) -> (f32, f32) {
+    let (x, y) = app
+        .rt
+        .find("time-strip")
+        .expect("the time strip is in the toolbar");
+    (x - stahl::time::STRIP / 2.0, y)
+}
+
+#[test]
+fn dragging_the_time_strip_turns_the_whole_app_back_and_escape_returns() {
+    let mut app = Harness::boot(true, None);
+    assert!(app.has_text("€107,400.00"), "today's total");
+    let days = app.rt.state.time.days.len();
+    assert!(days >= 60, "the demo's history is read: {days}");
+    let (left, y) = strip_start(&app);
+    let (x, _) = app.rt.find("time-strip").unwrap();
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=8 {
+        app.rt
+            .pointer_move(x + stahl::time::STRIP / 2.0 - step as f32 * 30.0, y);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_move(left, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(left, y);
+    app.settle();
+    let state = &app.rt.state;
+    assert_eq!(
+        state.time.at,
+        Some(0),
+        "the far left is the first recorded day"
+    );
+    let first = state.time.days[0].total;
+    let total = state.summary.as_ref().unwrap().total_value;
+    assert!((total - first).abs() < 0.01, "the total is that day's");
+    assert!(!app.has_text("€107,400.00"), "today's total is gone");
+    assert!(app.exists("time-band"), "the band says it is the past");
+    assert!(
+        app.has_text("you held"),
+        "the statement speaks about that day"
+    );
+    // The allocation follows too.
+    let shares: f64 = state.allocation.iter().map(|item| item.percent).sum();
+    assert!((shares - 100.0).abs() < 0.01);
+
+    app.press(Key::Escape);
+    assert!(!app.rt.state.in_past(), "escape returns to today");
+    assert!(app.has_text("€107,400.00"));
+    assert!(!app.exists("time-band"));
+}
+
+#[test]
+fn the_keyboard_walks_through_recorded_days() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (x, y) = app.rt.find("time-strip").unwrap();
+    // Focus the strip without moving time: a press at today.
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.pointer_up(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.settle();
+    assert!(!app.rt.state.in_past());
+    app.press(Key::Left);
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 1),
+        "one recorded day back"
+    );
+    app.rt.key(KeyEvent {
+        key: Key::Left,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    app.settle();
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 8),
+        "a week more with shift"
+    );
+    app.press(Key::End);
+    assert!(!app.rt.state.in_past(), "End is today");
+    // And from anywhere, with the main modifier and the brackets.
+    app.command('[', false);
+    assert_eq!(app.rt.state.time.at, Some(days - 1));
+    app.command(']', false);
+    assert!(!app.rt.state.in_past());
+}
+
+#[test]
+fn turning_the_door_back_turns_time_back() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (cx, cy) = app.rt.find("door-sidebar").unwrap();
+    // A quarter turn the other way round from the right to the top: six notches back.
+    app.rt.pointer_down(cx + 10.0, cy);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=12 {
+        let angle = -(step as f32) / 12.0 * std::f32::consts::FRAC_PI_2;
+        app.rt
+            .pointer_move(cx + 10.0 * angle.cos(), cy + 10.0 * angle.sin());
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(cx, cy - 10.0);
+    app.settle();
+    let at = app.rt.state.time.at.expect("the door turned time back");
+    assert!(
+        (days - 7..=days - 5).contains(&at),
+        "a notch a day: {at} of {days}"
+    );
+    assert!(app.exists("time-band"));
+}
+
+#[test]
+fn a_page_about_today_says_so_in_the_past() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    app.click(Page::Rebalance.key());
+    assert!(app.has_text("Rebalance is about today"));
+    assert!(!app.has_text("I have this much to invest"), "no stale plan");
+    app.click("time-now-only-today");
+    assert!(!app.rt.state.in_past());
+    assert!(app.has_text("I have this much to invest"));
+}
+
+#[test]
+fn editing_in_the_past_happens_today() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    assert!(app.rt.state.in_past());
+    app.command('n', false);
+    assert!(app.rt.state.form.is_some(), "the form opens");
+    assert!(!app.rt.state.in_past(), "for today's positions");
+}
+
+// --- Matters for signature ---
+
+/// Press and hold a Sign control for `seconds`, driving real frames between press and release.
+fn hold(app: &mut Harness, key: &str, seconds: f64) {
+    let (x, y) = app
+        .rt
+        .find(key)
+        .unwrap_or_else(|| panic!("nothing to hold at {key}"));
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    for _ in 0..((seconds * 60.0).round() as usize) {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x, y);
+    // One frame shows the hint or the seal; the write lands without running the breath away.
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+}
+
+fn decision_files(app: &Harness) -> Vec<PathBuf> {
+    let dir = app.dir.path().join("portfolio/portfolio/decisions");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect()
+}
+
+#[test]
+fn sign_is_on_the_first_screen_collapsed_and_expanded() {
+    for expanded in [false, true] {
+        let mut app = Harness::boot(true, None);
+        if expanded {
+            // The toggle itself may be below the fold, so open the plan as the demo does.
+            app.rt.state.matters.expanded = Some("rebalance".to_string());
+            app.settle();
+        }
+        let key = "matter-sign-rebalance";
+        let (x, y) = app
+            .rt
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} is not on the page (expanded: {expanded})"));
+        assert!(
+            (0.0..1320.0).contains(&x) && (0.0..860.0).contains(&y),
+            "{key} is at ({x}, {y}), outside the 1320x860 window (expanded: {expanded})"
+        );
+    }
+}
+
+#[test]
+fn one_matter_leads_and_its_alternative_is_one_line() {
+    let mut app = Harness::boot_tall(true);
+    assert!(app.exists("matter-rebalance"));
+    assert!(!app.exists("matter-cash-place"));
+    assert!(!app.exists("matter-sign-cash-place"));
+    assert!(app.has_text("Or instead: Put the excess cash to work"));
+
+    app.click("matter-show-cash-place");
+    assert!(app.exists("matter-cash-place"));
+    assert!(app.exists("matter-alternative-rebalance"));
+    assert!(!app.exists("matter-rebalance"));
+
+    hold(&mut app, "matter-sign-cash-place", 1.2);
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "one decision recorded");
+    assert_eq!(ledger.entries[0].id, "cash-place");
+}
+
+#[test]
+fn a_held_sign_records_a_decision_and_documents_lists_it() {
+    let mut app = Harness::boot_tall(true);
+    assert!(
+        app.exists("matter-rebalance"),
+        "the bank prepared a rebalance"
+    );
+    assert!(app.has_text("Stahl never trades."));
+
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "one decision recorded");
+    assert_eq!(ledger.entries[0].status, stahl::matters::Status::Signed);
+    assert_eq!(ledger.entries[0].id, "rebalance");
+
+    // The card is stamped, then files itself away.
+    assert!(app.exists("matter-seal"), "the seal is on the card");
+    assert!(app.has_text("Signed"));
+    assert!(
+        !app.exists("matter-sign-rebalance"),
+        "the signed card has no Sign control while its seal shows"
+    );
+    for _ in 0..150 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert!(
+        !app.exists("matter-rebalance"),
+        "the signed card has filed itself away"
+    );
+    assert!(app.has_text("Nothing needs your signature today."));
+
+    // The record is on disk, in the shape the Documents page reads.
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(written.starts_with("# Decision: Rebalance halfway to your targets\n"));
+    assert!(written.contains("Status: Signed"));
+    assert!(written.contains("## Decision"));
+    assert!(written.contains("Stahl never trades."));
+
+    // Documents lists it, newest first, and opens it.
+    app.click(Page::Documents.key());
+    assert!(app.has_text("Decision records"));
+    assert!(app.has_text("Rebalance halfway to your targets"));
+    assert!(app.has_text("Signed"));
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    app.click(&format!("decision-{name}"));
+    assert!(app.rt.state.matters.open_decision.is_some());
+    assert!(app.has_text("Context"), "the record opens as Markdown");
+    assert!(app.has_text("Rationale"));
+}
+
+#[test]
+fn an_early_release_signs_nothing_and_explains_the_hold() {
+    let mut app = Harness::boot_tall(true);
+    hold(&mut app, "matter-sign-rebalance", 0.3);
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(decision_files(&app).is_empty());
+    assert!(app.has_text("Hold to sign."));
+    assert!(app.exists("matter-rebalance"), "the matter is still there");
+}
+
+#[test]
+fn the_keyboard_holds_the_same_way() {
+    let mut app = Harness::boot_tall(true);
+    // A click focuses the control and lets go at once; Return then starts the hold.
+    let (x, y) = app
+        .rt
+        .find("matter-sign-rebalance")
+        .expect("the Sign control");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.rt.state.matters.hold.is_none());
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.rt.state.matters.hold.is_some(),
+        "Return holds the control"
+    );
+    for _ in 0..75 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    // The clock alone never signs; letting go after the hold time does.
+    app.rt.key_up(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    app.settle();
+    assert_eq!(
+        app.rt
+            .state
+            .matters
+            .ledger
+            .entries
+            .first()
+            .map(|entry| entry.status),
+        Some(stahl::matters::Status::Signed)
+    );
+}
+
+#[test]
+fn a_declined_matter_stays_hidden_across_a_reload() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-decline-rebalance");
+    app.click("matter-reason-rebalance");
+    app.type_text("Not this month.");
+    app.click("matter-decline-yes-rebalance");
+    assert!(app.rt.state.matters.ledger.entries[0].status == stahl::matters::Status::Declined);
+    assert!(
+        !app.exists("matter-rebalance"),
+        "declined matters leave the list"
+    );
+    // The alternative allocation matter is still there: declining is not signing.
+    assert!(app.exists("matter-cash-place"));
+
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1);
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(written.contains("Status: Declined"));
+    assert!(written.contains("Not this month."));
+
+    // Reloading the same workspace keeps it hidden: the ledger is beside the history.
+    let dir = app.rt.state.open.workspace_dir.clone().unwrap();
+    app.rt.state.load_workspace(dir);
+    app.settle();
+    assert!(!app.exists("matter-rebalance"));
+    assert!(app.rt.state.matters.ledger.entries[0].status == stahl::matters::Status::Declined);
+}
+
+#[test]
+fn a_material_change_brings_a_declined_matter_back() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    assert!(!app.exists("matter-rebalance"));
+
+    // Crypto drifts four more points: past its three-point tolerance.
+    app.rt.update(|state, _| {
+        if let Some(review) = &mut state.review.data {
+            for class in &mut review.allocations {
+                if class.asset_class == "Crypto" {
+                    class.actual_percent += 4.0;
+                    class.drift_percent += 4.0;
+                }
+            }
+        }
+    });
+    app.settle();
+    assert!(
+        app.exists("matter-rebalance"),
+        "a material change reopens it"
+    );
+}
+
+#[test]
+fn signing_without_a_workspace_explains_that_records_need_one() {
+    let app = Harness::boot(false, Some(demo::POSITIONS));
+    // A single file has no policy, so there is nothing to sign; the section says so instead.
+    assert!(app.has_text("Nothing needs your signature today."));
+    assert!(!app.exists("matter-sign-rebalance"));
+}
+
+#[test]
+fn reduced_motion_asks_plainly_instead_of_holding() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.set_system_reduced_motion(true);
+    app.settle();
+    // The control is a plain press now: no hold, a question.
+    app.click("matter-sign-rebalance");
+    assert!(app.rt.state.matters.hold.is_none());
+    assert!(app.exists("matter-confirm-sign"));
+    app.press(Key::Escape);
+    assert!(
+        !app.exists("matter-confirm-sign"),
+        "Escape closes the question"
+    );
+    app.click("matter-sign-rebalance");
+    app.click("matter-confirm-sign");
+    assert_eq!(
+        app.rt
+            .state
+            .matters
+            .ledger
+            .entries
+            .first()
+            .map(|entry| entry.status),
+        Some(stahl::matters::Status::Signed)
+    );
+}
+
+#[test]
+fn no_matter_can_be_signed_on_a_day_in_the_past() {
+    let mut app = Harness::boot_tall(true);
+    assert!(app.exists("matter-sign-rebalance"), "today it can be");
+    app.rt.state.travel(Some(10));
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.rt.state.in_past());
+    assert!(!app.exists("matter-rebalance"), "no card on a past day");
+    assert!(!app.exists("matter-sign-rebalance"));
+    assert!(app.exists("matters-withheld"));
+    assert!(app.has_text("Decisions are signed on today's figures"));
+    // Even a hold that somehow completes records nothing.
+    app.rt.state.sign_matter("rebalance");
+    app.settle();
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(decision_files(&app).is_empty());
+
+    app.rt.state.travel(None);
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(
+        app.exists("matter-sign-rebalance"),
+        "back today, it returns"
+    );
+}
+
+#[test]
+fn a_record_signed_in_privacy_mode_is_written_with_real_amounts() {
+    let mut app = Harness::boot_tall(true);
+    app.click("privacy");
+    assert!(app.rt.state.privacy);
+    assert!(
+        !app.has_text("€"),
+        "the card hides its amounts while privacy is on"
+    );
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(
+        written.contains('€'),
+        "the record has its money:\n{written}"
+    );
+    assert!(
+        !written.contains("••"),
+        "no masks in the record:\n{written}"
+    );
+}
+
+#[test]
+fn declining_in_an_encrypted_portfolio_says_it_is_not_kept() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.open.file_path = Some("portfolio.json.gpg".to_string());
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    let toast = toast.expect("a toast");
+    assert!(toast.contains("this session only"), "{toast}");
+    assert!(!toast.contains("won't bring it again"), "{toast}");
+    assert!(decision_files(&app).is_empty());
+
+    app.click("matter-postpone-cash-place");
+    let toast = app.rt.state.toast.as_ref().map(|toast| toast.0.clone());
+    assert!(toast.unwrap().contains("this session only"));
+}
+
+#[test]
+fn an_unreadable_ledger_is_reported_and_survives_a_decision() {
+    let mut app = Harness::boot_tall(true);
+    let path = app.dir.path().join("portfolio/portfolio/matters.json");
+    fs::write(&path, "{ not a ledger").unwrap();
+    app.rt.state.load_matters();
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    assert!(app.exists("matters-ledger-problem"));
+    assert!(app.has_text("can't be read"));
+
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+    app.settle();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(decision_files(&app).is_empty(), "no record was written");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(app.has_text("Nothing was written."));
+
+    app.click("matter-show-cash-place");
+    app.click("matter-postpone-cash-place");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+}
+
+#[test]
+fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "set-aside.csv");
+    let review = app.rt.state.intake.as_ref().expect("the sheet is up");
+    assert_eq!(review.aside.len(), 4, "{:?}", review.aside);
+    assert!(app.exists("intake-aside"));
+    assert!(app.has_text("Four lines were set aside, and nothing was taken from them."));
+    assert!(app.has_text("yours to make by hand"));
+    assert!(app.exists("intake-aside-3"), "each line is listed");
+    assert!(app.has_text("“Storno Kauf” takes a trade back"));
+    assert!(app.has_text("“Übertrag” changes a count"));
+    assert!(app.has_text("“Umtausch” isn't a kind of trade we know"));
+    assert!(
+        app.exists("intake-accept-all"),
+        "the good rows are still on offer"
+    );
+
+    app.click("intake-accept-all");
+    let after = counts(&app);
+    assert_ne!(after, before, "the good rows were recorded");
+    // The Storno takes a GLD trade back and doesn't say which, so every GLD proposal is doubted
+    // and kept out of Accept all: GLD's count does not move.
+    let gld = |app: &Harness| {
+        app.rt
+            .state
+            .positions
+            .iter()
+            .filter(|position| position.ticker.as_deref() == Some("GLD"))
+            .map(|position| position.amount)
+            .sum::<f64>()
+    };
+    let mut fresh = Harness::boot(true, None);
+    let gld_before = gld(&fresh);
+    dropped(&mut fresh, "set-aside.csv");
+    fresh.click("intake-accept-all");
+    assert_eq!(
+        gld(&fresh),
+        gld_before,
+        "the cancelled purchase isn't taken"
+    );
+    let review = fresh.rt.state.intake.as_ref().expect("the sheet stays up");
+    let ledger = review.ledger.as_ref().unwrap();
+    let proposal = ledger
+        .proposals
+        .iter()
+        .find(|proposal| {
+            matches!(&proposal.change, Change::Trades { holding, .. }
+                if holding.ticker.as_deref() == Some("GLD"))
+        })
+        .expect("the GLD proposal is still listed");
+    assert!(!proposal.in_all);
+    assert!(
+        proposal
+            .doubts
+            .iter()
+            .any(|doubt| doubt.contains("Line 6") && doubt.contains("Storno Kauf"))
+    );
+    assert!(fresh.has_text("takes back a trade of this security"));
+}
+
+#[test]
+fn a_second_undo_past_an_edit_is_refused_and_the_edit_stays() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit between the two imports, with no toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click("intake-accept-1");
+    assert_eq!(app.rt.state.intake_undo.len(), 2);
+    assert_ne!(counts(&app), edited, "the second import changed something");
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert_eq!(counts(&app), edited, "the second import is taken back");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert_eq!(counts(&app), edited, "the edit and the first import stay");
+}
+
+#[test]
+fn a_file_dropped_on_a_past_day_is_compared_with_today() {
+    let mut today = Harness::boot(true, None);
+    dropped(&mut today, "de-transactions.csv");
+    let expected = today
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+
+    let mut past = Harness::boot(true, None);
+    past.rt.state.travel(Some(10));
+    past.settle();
+    assert!(past.rt.state.in_past());
+    dropped(&mut past, "de-transactions.csv");
+    assert!(!past.rt.state.in_past(), "opening a file returns to today");
+    let got = past
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+    assert_eq!(got, expected, "the proposals match today's holdings");
+}
+
+#[test]
+fn an_undo_after_an_unrelated_edit_does_nothing_and_loses_nothing() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit made inside the six seconds, without a toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click_label("Undo");
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert!(
+        app.has_text("can't be undone"),
+        "it says why instead of reverting"
+    );
+    assert!(app.rt.state.dirty);
+    assert_eq!(counts(&app), edited, "the edit and the import both stay");
+}
+
+#[test]
+fn a_pdf_dropped_on_the_window_opens_the_sheet_with_its_reason() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    let file = app.rt.state.open.file_path.clone();
+    let folder = app.rt.state.open.workspace_dir.clone();
+    dropped(&mut app, "statement.pdf");
+    let review = app.rt.state.intake.as_ref().expect("the sheet opens");
+    assert!(
+        review
+            .problem
+            .as_deref()
+            .is_some_and(|why| why.contains("PDF"))
+    );
+    assert!(!app.rt.state.dirty);
+    assert_eq!(counts(&app), before, "nothing was opened in its place");
+    assert_eq!(app.rt.state.open.file_path, file, "the same file is open");
+    assert_eq!(app.rt.state.open.workspace_dir, folder);
+
+    app.click("intake-cancel");
+    dropped(&mut app, "workbook.xlsx");
+    assert!(
+        app.rt
+            .state
+            .intake
+            .as_ref()
+            .is_some_and(|r| r.problem.is_some())
+    );
+}
+
+// --- Signing on a phone ---
+
+impl Harness {
+    /// A finger down on `key`, held for `seconds` of real frames, moved to `(dx, dy)` away in
+    /// ten steps over that time when given, then lifted.
+    fn touch_sign(&mut self, key: &str, seconds: f64, away: Option<(f32, f32)>) {
+        self.tap(key);
+        let (x, y) = self.rt.find(key).expect("Sign is on the page");
+        let frames = (seconds * 60.0).round() as usize;
+        let mut time = 0.0;
+        self.rt.touch(1, TouchPhase::Started, x, y, time);
+        let (mut at_x, mut at_y) = (x, y);
+        for frame in 0..frames {
+            time += 1.0 / 60.0;
+            if let Some((dx, dy)) = away
+                && frame % (frames / 10).max(1) == 0
+            {
+                (at_x, at_y) = (at_x + dx / 10.0, at_y + dy / 10.0);
+                self.rt.touch(1, TouchPhase::Moved, at_x, at_y, time);
+            }
+            self.rt.frame(1.0 / 60.0);
+        }
+        self.rt.touch(1, TouchPhase::Ended, at_x, at_y, time + 0.3);
+        self.rt.frame(1.0 / 60.0);
+        self.rt.state.settle();
+    }
+}
+
+#[test]
+fn on_a_phone_a_drag_from_sign_signs_nothing() {
+    let mut app = Harness::phone();
+    app.touch_sign("matter-sign-rebalance", 1.5, Some((0.0, -120.0)));
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "a drag is a scroll, not a signature"
+    );
+    assert!(app.rt.state.matters.hold.is_none(), "the hold stopped");
+    assert!(!app.exists("matter-seal"));
+    assert!(decision_files(&app).is_empty());
+}
+
+#[test]
+fn on_a_phone_the_hold_stops_showing_the_moment_the_touch_travels() {
+    let mut app = Harness::phone();
+    app.tap("matter-sign-rebalance");
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    for _ in 0..20 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    assert!(
+        app.rt.state.matters.holding("rebalance"),
+        "a hold shows while the finger rests"
+    );
+    app.rt.touch(1, TouchPhase::Moved, x, y - 30.0, 0.4);
+    app.rt.frame(1.0 / 60.0);
+    assert!(!app.rt.state.matters.holding("rebalance"));
+}
+
+#[test]
+fn on_a_phone_a_still_hold_signs_once() {
+    let mut app = Harness::phone();
+    app.touch_sign("matter-sign-rebalance", 1.2, None);
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "signed once");
+    assert_eq!(ledger.entries[0].status, stahl::matters::Status::Signed);
+    assert_eq!(decision_files(&app).len(), 1);
+}
+
+#[test]
+fn on_a_phone_a_press_released_outside_signs_nothing() {
+    let mut app = Harness::phone();
+    app.tap("matter-sign-rebalance");
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_move(x + 80.0, y);
+    for _ in 0..80 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x + 80.0, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(app.rt.state.matters.hold.is_none());
+}
+
+// --- A hold signs only while something is holding it ---
+
+fn nothing_signed(app: &Harness) {
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "nothing is on the ledger"
+    );
+    assert!(decision_files(app).is_empty(), "no decision file");
+}
+
+fn frames(app: &mut Harness, seconds: f64) {
+    for _ in 0..((seconds * 60.0).round() as usize) {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.state.settle();
+}
+
+#[test]
+fn a_key_hold_that_loses_focus_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    frames(&mut app, 1.5);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_up_after_tabbing_away_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    assert!(
+        app.rt.state.matters.hold.is_none(),
+        "another key ends the hold"
+    );
+    frames(&mut app, 1.5);
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_pointer_hold_does_not_survive_navigating_away() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    frames(&mut app, 0.3);
+    assert!(app.rt.state.matters.holding("rebalance"));
+    app.rt.update(|s, _| s.navigate(Page::Holdings));
+    frames(&mut app, 1.5);
+    assert!(app.rt.state.matters.hold.is_none());
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_hold_ends_when_the_palette_opens_or_the_window_loses_focus() {
+    for blur in [false, true] {
+        let mut app = Harness::boot_tall(true);
+        let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+        app.rt.pointer_move(x, y);
+        app.rt.frame(1.0 / 60.0);
+        app.rt.pointer_down(x, y);
+        frames(&mut app, 0.3);
+        if blur {
+            app.rt.window_focus(false);
+        } else {
+            app.rt.update(|s, _| s.open_palette());
+        }
+        frames(&mut app, 1.5);
+        assert!(app.rt.state.matters.hold.is_none(), "blur: {blur}");
+        nothing_signed(&app);
+    }
+}
+
+#[test]
+fn at_a_wide_size_a_finger_that_travels_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x + 5.0, y + 5.0, 0.1);
+    app.rt.touch(1, TouchPhase::Moved, x + 9.0, y + 9.0, 0.2);
+    frames(&mut app, 1.5);
+    app.rt.touch(1, TouchPhase::Ended, x + 9.0, y + 9.0, 1.8);
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_held_for_its_time_and_released_signs() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    frames(&mut app, 1.2);
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "the clock alone signs nothing"
+    );
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    assert_eq!(app.rt.state.matters.ledger.entries.len(), 1);
+    assert_eq!(decision_files(&app).len(), 1);
+}
+
+// --- A decision belongs to the workspace it was made in ---
+
+#[test]
+fn a_decision_finished_after_a_workspace_switch_changes_nothing_in_state() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.matters.decisions_loaded = true;
+    app.rt.state.sign_matter("rebalance");
+    // Another workspace is opened before the write comes back.
+    app.rt.state.open.workspace_dir = Some(
+        app.dir
+            .path()
+            .join("elsewhere")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    app.rt.state.toast = None;
+    app.rt.state.settle();
+    assert!(
+        app.rt.state.toast.is_none(),
+        "no 'Recorded' for the wrong workspace"
+    );
+    assert!(
+        app.rt.state.matters.decisions_loaded,
+        "the other workspace's records were not marked stale"
+    );
+    assert!(app.rt.state.matters.error.is_none());
+}
+
+// --- AI features ---
+
+/// A model that only counts how often it was asked.
+struct CountingModel(Arc<AtomicUsize>);
+
+impl stahl::ask::Model for CountingModel {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        stahl::ask::Reply::Ready(String::new())
+    }
+
+    fn source(&self) -> stahl::ask::Source {
+        stahl::ask::Source::Scripted
+    }
+}
+
+#[test]
+fn ai_features_are_off_by_default_and_hide_counsel() {
+    let mut app = Harness::boot(true, None);
+    assert!(!app.rt.state.ai);
+    assert!(!app.exists(Page::Ask.key()), "no Counsel in the sidebar");
+    assert!(
+        !app.exists("overview-ask"),
+        "no question line on the Overview"
+    );
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(
+        !app.has_text("Ask counsel: what changed this month?"),
+        "no row for a typed question"
+    );
+    app.press(Key::Escape);
+    app.rt.state.navigate(Page::Settings);
+    app.settle();
+    assert!(app.exists("settings-ai"), "the switch is there");
+    assert!(app.has_text("AI features"));
+    assert!(!app.has_text("Provider URL"), "no AI provider card");
+    assert!(!app.exists("settings-url"));
+    assert!(!app.exists("export-skill"));
+}
+
+#[test]
+fn turning_ai_features_on_brings_counsel_back_and_is_remembered() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.navigate(Page::Settings);
+    app.settle();
+    app.click("settings-ai");
+    app.settle();
+    assert!(app.rt.state.ai);
+    assert!(app.exists(Page::Ask.key()));
+    assert!(app.exists("settings-url"));
+    assert!(app.exists("export-skill"));
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(app.has_text("Ask counsel: what changed this month?"));
+    app.press(Key::Escape);
+    // A new backend from the same config directory still has it on.
+    let again = demo::backend(app.dir.path(), None, app._tokio.handle().clone());
+    assert!(again.ai_features());
+    // And off again goes back to the Overview.
+    app.rt.state.navigate(Page::Ask);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    app.rt.state.set_ai(false);
+    assert_eq!(app.rt.state.page, Page::Overview);
+    assert!(!again.ai_features());
+}
+
+#[test]
+fn nothing_can_ask_while_ai_features_are_off() {
+    let mut app = Harness::boot(true, None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    app.rt.state.model = Arc::new(CountingModel(calls.clone()));
+    let page = app.rt.state.page;
+    app.rt.state.ask_about("What changed this month?");
+    app.rt.state.ask_question("What changed this month?");
+    app.rt
+        .state
+        .ask
+        .input
+        .replace_text("What changed this month?");
+    app.rt.state.ask_here();
+    app.rt.state.ask_send();
+    app.settle();
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no request was made");
+    assert_eq!(app.rt.state.page, page);
+    assert!(app.rt.state.ask.turns.is_empty());
+    app.rt.state.navigate(Page::Ask);
+    assert_eq!(
+        app.rt.state.page,
+        Page::Overview,
+        "Counsel goes to the Overview"
+    );
+    assert_eq!(Page::from_name("counsel"), None);
 }
