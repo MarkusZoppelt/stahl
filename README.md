@@ -99,7 +99,7 @@ repository secrets:
 - `DEVELOPER_ID_P12_PASSWORD`: the password it was exported with
 - `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8`: an App Store Connect API key (the `.p8` as is)
 
-Without them, a pull request or a manual run still builds, ad-hoc signed.
+A pull request always builds ad-hoc signed. A manual run signs and notarizes but publishes nothing.
 
 Every push to `main` also builds the iPhone and iPad app and uploads it to TestFlight
 (`.github/workflows/testflight.yml`), signed with the Apple Distribution certificate:
