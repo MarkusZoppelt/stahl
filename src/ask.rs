@@ -819,17 +819,32 @@ pub struct Http {
 /// What the provider may go without saying a word.
 const PATIENCE: Duration = Duration::from_secs(120);
 
+/// The address as the request parser reads it, which is where the request goes. `None` if it
+/// doesn't parse, has no host, or carries a user, a password, a query or a fragment.
+fn parsed(url: &str) -> Option<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url.trim()).ok()?;
+    let plain = parsed.has_host()
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none();
+    plain.then_some(parsed)
+}
+
 /// Why a provider address can't be used, in a sentence, or `None` if it can. A provider away
 /// from this machine must be `https`, so the key and the holdings never travel in the clear.
 pub fn provider_problem(url: &str) -> Option<String> {
-    let url = url.trim();
-    let host = host_of(url);
-    match url
-        .split_once("://")
-        .map(|(scheme, _)| scheme.to_lowercase())
-    {
-        Some(scheme) if scheme == "https" => None,
-        Some(scheme) if scheme == "http" => (!is_local_host(&host)).then(|| {
+    let Some(parsed) = parsed(url) else {
+        return Some(
+            "The provider address should be a plain https:// address, with no user, query or \
+             fragment."
+                .to_string(),
+        );
+    };
+    let host = parsed.host_str().unwrap_or_default();
+    match parsed.scheme() {
+        "https" => None,
+        "http" => (!is_local_host(host)).then(|| {
             format!(
                 "{host} would be reached without encryption. Use an https address; plain http is \
                  for providers on this computer."
@@ -1083,16 +1098,12 @@ impl Model for Http {
     }
 }
 
-/// The host a URL names, without a scheme, a user, a port or a path. An IPv6 address keeps its
-/// own shape, so `[::1]` reads as `::1`.
+/// The host the request parser takes from the address: where the request goes. An IPv6 address
+/// keeps its brackets. Empty if the address can't be used.
 pub fn host_of(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split('/').next().unwrap_or(rest);
-    let authority = authority.rsplit('@').next().unwrap_or(authority);
-    if let Some(after) = authority.strip_prefix('[') {
-        return after.split(']').next().unwrap_or(after).to_string();
-    }
-    authority.split(':').next().unwrap_or(authority).to_string()
+    parsed(url)
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// What arrived in a server-sent-events buffer: the text of its `data:` events, and whether the
@@ -1153,7 +1164,10 @@ impl Source {
 
 /// A host that never leaves the machine.
 pub fn is_local_host(host: &str) -> bool {
-    matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]")
+    matches!(
+        host.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    )
 }
 
 /// How far along a turn is.
@@ -1981,6 +1995,37 @@ mod provider_tests {
     }
 
     #[test]
+    fn the_host_is_the_one_the_request_goes_to() {
+        for bad in [
+            "http://evil.example#@localhost/v1",
+            "http://evil.example?@localhost",
+            "http://evil.example\\@localhost/v1",
+            "http://localhost@evil.example/v1",
+            "https://api.example.com/v1?x=1",
+            "https://api.example.com/v1#top",
+            "https://:pw@api.example.com/v1",
+            "https://",
+        ] {
+            assert!(provider_problem(bad).is_some(), "{bad} should be refused");
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        for good in [
+            "http://localhost:11434/v1",
+            "http://[::1]:8080/v1",
+            "https://api.example.com/v1",
+        ] {
+            assert_eq!(provider_problem(good), None, "{good}");
+            let http = Http::new(good, None, "m", runtime.handle().clone());
+            let sent = reqwest::Url::parse(&http.endpoint()).unwrap();
+            assert_eq!(Some(host_of(good).as_str()), sent.host_str());
+            let Source::Http { host, .. } = http.source() else {
+                panic!("an http source")
+            };
+            assert_eq!(Some(host.as_str()), sent.host_str());
+        }
+    }
+
+    #[test]
     fn stopping_drops_the_request() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
@@ -2018,9 +2063,8 @@ mod provider_tests {
     fn the_host_is_read_without_a_scheme_port_or_path() {
         assert_eq!(host_of("https://api.openai.com/v1"), "api.openai.com");
         assert_eq!(host_of("http://127.0.0.1:8080/v1"), "127.0.0.1");
-        assert_eq!(host_of("http://[::1]:8080"), "::1");
-        assert_eq!(host_of("localhost:11434/v1"), "localhost");
-        assert_eq!(host_of("https://user:pass@host.example/v1"), "host.example");
+        assert_eq!(host_of("http://[::1]:8080"), "[::1]");
+        assert_eq!(host_of("https://user:pass@host.example/v1"), "");
         assert!(is_local_host(&host_of("http://[::1]:11434/v1")));
     }
 
@@ -2074,7 +2118,17 @@ mod builtin_tests {
         state.load_review();
         state.load_briefing();
         state.settle();
+        // A finding whose message holds money: it must not be sent while amounts are hidden.
+        let money = "Cash is €1,234.56 under the minimum";
+        let finding = portfolio_rs::review::Finding {
+            severity: portfolio_rs::review::Severity::Warning,
+            category: "policy".to_string(),
+            message: money.to_string(),
+            detail: None,
+        };
+        state.review.data.as_mut().unwrap().findings.push(finding);
         let open = prompt(&state, &crate::facts::of(&state));
+        assert!(open.contains(money), "shown when not hidden");
         assert!(state.review.data.is_some() && state.briefing.data.is_some());
         assert!(
             open.contains("The briefing Stahl wrote"),
@@ -2085,6 +2139,7 @@ mod builtin_tests {
         let hidden = prompt(&state, &crate::facts::of(&state));
         assert!(!hidden.contains('€') && !hidden.contains('$'), "{hidden}");
         assert!(!hidden.contains("The briefing Stahl wrote"));
+        assert!(!hidden.contains("1,234") && !hidden.contains("under the minimum"));
         let grouped = |text: &str| {
             text.as_bytes().windows(5).any(|w| {
                 w[0].is_ascii_digit()

@@ -4634,6 +4634,12 @@ fn the_keyboard_holds_the_same_way() {
     for _ in 0..75 {
         app.rt.frame(1.0 / 60.0);
     }
+    // The clock alone never signs; letting go after the hold time does.
+    app.rt.key_up(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
     app.settle();
     assert_eq!(
         app.rt
@@ -4850,10 +4856,106 @@ fn lines_the_reader_set_aside_are_counted_listed_and_never_recorded() {
     app.click("intake-accept-all");
     let after = counts(&app);
     assert_ne!(after, before, "the good rows were recorded");
-    let gold = |list: &[(String, f64)]| list.iter().map(|(_, count)| count).sum::<f64>();
-    // Only the one purchase of GLD and the one of TLT or SPY changed anything: the Storno,
-    // the transfer and the unknown kind moved no count.
-    assert!(gold(&after) - gold(&before) <= 3.0 + 1e-9);
+    // The Storno takes a GLD trade back and doesn't say which, so every GLD proposal is doubted
+    // and kept out of Accept all: GLD's count does not move.
+    let gld = |app: &Harness| {
+        app.rt
+            .state
+            .positions
+            .iter()
+            .filter(|position| position.ticker.as_deref() == Some("GLD"))
+            .map(|position| position.amount)
+            .sum::<f64>()
+    };
+    let mut fresh = Harness::boot(true, None);
+    let gld_before = gld(&fresh);
+    dropped(&mut fresh, "set-aside.csv");
+    fresh.click("intake-accept-all");
+    assert_eq!(
+        gld(&fresh),
+        gld_before,
+        "the cancelled purchase isn't taken"
+    );
+    let review = fresh.rt.state.intake.as_ref().expect("the sheet stays up");
+    let ledger = review.ledger.as_ref().unwrap();
+    let proposal = ledger
+        .proposals
+        .iter()
+        .find(|proposal| {
+            matches!(&proposal.change, Change::Trades { holding, .. }
+                if holding.ticker.as_deref() == Some("GLD"))
+        })
+        .expect("the GLD proposal is still listed");
+    assert!(!proposal.in_all);
+    assert!(
+        proposal
+            .doubts
+            .iter()
+            .any(|doubt| doubt.contains("Line 6") && doubt.contains("Storno Kauf"))
+    );
+    assert!(fresh.has_text("takes back a trade of this security"));
+}
+
+#[test]
+fn a_second_undo_past_an_edit_is_refused_and_the_edit_stays() {
+    let mut app = Harness::boot(true, None);
+    dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-0");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    // An edit between the two imports, with no toast of its own.
+    let doomed = app.rt.state.positions.last().unwrap().id;
+    app.rt.state.delete_position(doomed);
+    app.settle();
+    app.rt.state.settle();
+    let edited = counts(&app);
+
+    app.click("intake-accept-1");
+    assert_eq!(app.rt.state.intake_undo.len(), 2);
+    assert_ne!(counts(&app), edited, "the second import changed something");
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert_eq!(counts(&app), edited, "the second import is taken back");
+    assert_eq!(app.rt.state.intake_undo.len(), 1);
+
+    app.rt.state.undo_intake();
+    app.rt.state.settle();
+    app.settle();
+    assert!(
+        app.rt.state.intake_undo.is_empty(),
+        "the stale undo is dropped"
+    );
+    assert_eq!(counts(&app), edited, "the edit and the first import stay");
+}
+
+#[test]
+fn a_file_dropped_on_a_past_day_is_compared_with_today() {
+    let mut today = Harness::boot(true, None);
+    dropped(&mut today, "de-transactions.csv");
+    let expected = today
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+
+    let mut past = Harness::boot(true, None);
+    past.rt.state.travel(Some(10));
+    past.settle();
+    assert!(past.rt.state.in_past());
+    dropped(&mut past, "de-transactions.csv");
+    assert!(!past.rt.state.in_past(), "opening a file returns to today");
+    let got = past
+        .rt
+        .state
+        .intake
+        .as_ref()
+        .and_then(|review| review.ledger.clone())
+        .expect("the ledger");
+    assert_eq!(got, expected, "the proposals match today's holdings");
 }
 
 #[test]
@@ -5001,4 +5103,148 @@ fn on_a_phone_a_press_released_outside_signs_nothing() {
     app.rt.state.settle();
     assert!(app.rt.state.matters.ledger.entries.is_empty());
     assert!(app.rt.state.matters.hold.is_none());
+}
+
+// --- A hold signs only while something is holding it ---
+
+fn nothing_signed(app: &Harness) {
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "nothing is on the ledger"
+    );
+    assert!(decision_files(app).is_empty(), "no decision file");
+}
+
+fn frames(app: &mut Harness, seconds: f64) {
+    for _ in 0..((seconds * 60.0).round() as usize) {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.state.settle();
+}
+
+#[test]
+fn a_key_hold_that_loses_focus_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    frames(&mut app, 1.5);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_up_after_tabbing_away_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    assert!(app.rt.state.matters.holding("rebalance"), "the key holds");
+    app.press(Key::Tab);
+    assert!(
+        app.rt.state.matters.hold.is_none(),
+        "another key ends the hold"
+    );
+    frames(&mut app, 1.5);
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_pointer_hold_does_not_survive_navigating_away() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    frames(&mut app, 0.3);
+    assert!(app.rt.state.matters.holding("rebalance"));
+    app.rt.update(|s, _| s.navigate(Page::Holdings));
+    frames(&mut app, 1.5);
+    assert!(app.rt.state.matters.hold.is_none());
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_hold_ends_when_the_palette_opens_or_the_window_loses_focus() {
+    for blur in [false, true] {
+        let mut app = Harness::boot_tall(true);
+        let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+        app.rt.pointer_move(x, y);
+        app.rt.frame(1.0 / 60.0);
+        app.rt.pointer_down(x, y);
+        frames(&mut app, 0.3);
+        if blur {
+            app.rt.window_focus(false);
+        } else {
+            app.rt.update(|s, _| s.open_palette());
+        }
+        frames(&mut app, 1.5);
+        assert!(app.rt.state.matters.hold.is_none(), "blur: {blur}");
+        nothing_signed(&app);
+    }
+}
+
+#[test]
+fn at_a_wide_size_a_finger_that_travels_signs_nothing() {
+    let mut app = Harness::boot_tall(true);
+    let (x, y) = app.rt.find("matter-sign-rebalance").expect("Sign");
+    app.rt.touch(1, TouchPhase::Started, x, y, 0.0);
+    app.rt.touch(1, TouchPhase::Moved, x + 5.0, y + 5.0, 0.1);
+    app.rt.touch(1, TouchPhase::Moved, x + 9.0, y + 9.0, 0.2);
+    frames(&mut app, 1.5);
+    app.rt.touch(1, TouchPhase::Ended, x + 9.0, y + 9.0, 1.8);
+    frames(&mut app, 0.1);
+    nothing_signed(&app);
+}
+
+#[test]
+fn a_key_held_for_its_time_and_released_signs() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-sign-rebalance");
+    app.press(Key::Text(" ".into()));
+    frames(&mut app, 1.2);
+    assert!(
+        app.rt.state.matters.ledger.entries.is_empty(),
+        "the clock alone signs nothing"
+    );
+    app.rt.key_up(KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+    assert_eq!(app.rt.state.matters.ledger.entries.len(), 1);
+    assert_eq!(decision_files(&app).len(), 1);
+}
+
+// --- A decision belongs to the workspace it was made in ---
+
+#[test]
+fn a_decision_finished_after_a_workspace_switch_changes_nothing_in_state() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.state.matters.decisions_loaded = true;
+    app.rt.state.sign_matter("rebalance");
+    // Another workspace is opened before the write comes back.
+    app.rt.state.open.workspace_dir = Some(
+        app.dir
+            .path()
+            .join("elsewhere")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    app.rt.state.toast = None;
+    app.rt.state.settle();
+    assert!(
+        app.rt.state.toast.is_none(),
+        "no 'Recorded' for the wrong workspace"
+    );
+    assert!(
+        app.rt.state.matters.decisions_loaded,
+        "the other workspace's records were not marked stale"
+    );
+    assert!(app.rt.state.matters.error.is_none());
 }

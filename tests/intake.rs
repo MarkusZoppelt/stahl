@@ -230,6 +230,16 @@ fn a_us_export_reads_month_first_dates_and_leaves_out_a_price_in_the_wrong_curre
     );
     assert_eq!(tlt.1[0].recorded_price(), None);
     assert!(tlt.0.doubts.iter().any(|doubt| doubt.contains("left out")));
+    assert_eq!(tlt.1[0].fees.as_ref().unwrap().value, 0.35);
+    assert_eq!(tlt.1[0].recorded_fees(), None, "fees follow the price");
+    let Some(apply::Op::Append { purchases, .. }) = apply::op(tlt.0, &Choice::of(tlt.0)) else {
+        panic!("the TLT sale is an append");
+    };
+    assert_eq!(purchases[0].price, None);
+    assert_eq!(
+        purchases[0].fees, None,
+        "written with neither price nor fees"
+    );
     let btc = ledger
         .proposals
         .iter()
@@ -501,5 +511,60 @@ fn a_file_with_too_many_rows_is_not_read() {
     match intake::understand(text.as_bytes()) {
         Outcome::Unreadable(why) => assert!(why.contains("rows"), "{why}"),
         other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_cancellation_doubts_every_proposal_for_its_security_and_removes_none() {
+    let (reading, _) = read("set-aside.csv");
+    let ledger = reconcile(&reading, &holdings(demo::POSITIONS));
+    let gld: Vec<_> = ledger
+        .proposals
+        .iter()
+        .filter(|proposal| match &proposal.change {
+            Change::Trades {
+                holding, trades, ..
+            } => holding.ticker.as_deref() == Some("GLD") && !trades.is_empty(),
+            _ => false,
+        })
+        .collect();
+    assert!(!gld.is_empty(), "the GLD purchase is still proposed");
+    for proposal in gld {
+        assert!(!proposal.in_all, "not for Accept all");
+        assert!(
+            proposal.doubts.iter().any(|doubt| doubt.contains("Line 6")),
+            "{:?}",
+            proposal.doubts
+        );
+    }
+    let others = ledger
+        .proposals
+        .iter()
+        .filter(|proposal| matches!(&proposal.change, Change::Trades { holding, .. } if holding.ticker.as_deref() != Some("GLD")))
+        .all(|proposal| !proposal.doubts.iter().any(|doubt| doubt.contains("Line 6")));
+    assert!(others, "other securities are not doubted");
+}
+
+#[test]
+fn a_cancellation_that_names_no_security_doubts_every_proposal() {
+    let file = "Date;Type;Ticker;Quantity;Price\n\
+                2026-11-04;Kauf;GLD;1;199,90\n\
+                2026-11-05;Kauf;TLT;2;88,10\n\
+                2026-11-07;Storno;;1;199,90\n";
+    let Outcome::Read { reading, .. } = intake::understand(file.as_bytes()) else {
+        panic!("should read");
+    };
+    let ledger = reconcile(&reading, &holdings(demo::POSITIONS));
+    assert!(!ledger.proposals.is_empty());
+    for proposal in &ledger.proposals {
+        assert!(!proposal.in_all);
+        assert!(
+            proposal
+                .doubts
+                .iter()
+                .any(|doubt| doubt.contains("names no security")),
+            "{:?}",
+            proposal.doubts
+        );
     }
 }

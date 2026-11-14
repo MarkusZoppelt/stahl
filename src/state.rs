@@ -1469,7 +1469,7 @@ impl State {
                 tx.wake_at(started + RECORD_ARRIVAL_FOR);
             }
         }
-        // A hold on a Sign control fills its ring, and completes or lets go on the clock.
+        // A hold on a Sign control fills its ring; only letting go after its time signs.
         changed |= self.matters_tick();
         if self
             .toast
@@ -2435,7 +2435,7 @@ impl State {
         };
         self.run(
             move |backend| async move {
-                let now = backend
+                backend
                     .restore_positions(undo.json.clone(), &undo.left)
                     .await?;
                 let open = backend.open_document().await;
@@ -2444,20 +2444,18 @@ impl State {
                 } else {
                     None
                 };
-                Ok((undo, now, open, snapshot, backend.config().await))
+                Ok((undo, open, snapshot, backend.config().await))
             },
             |state, result| match result {
-                Ok((undo, now, open, snapshot, config)) => {
+                Ok((undo, open, snapshot, config)) => {
                     state.open = open;
                     state.config = Some(config);
                     if let Some(snapshot) = snapshot {
                         state.apply_snapshot(snapshot);
                     }
                     state.dirty = undo.dirty;
-                    // The import before this one now left the positions as they are.
-                    if let Some(earlier) = state.intake_undo.last_mut() {
-                        earlier.left = now;
-                    }
+                    // The import before this one keeps what it left: if anything was edited
+                    // between the two, its undo must see that and refuse.
                     if let Some(review) = &mut state.intake
                         && review.serial == undo.serial
                     {
@@ -2738,6 +2736,7 @@ impl State {
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
+        self.cancel_hold();
         if page != self.page {
             self.previous_page = self.page;
         }
@@ -3307,6 +3306,7 @@ impl State {
     }
 
     pub fn open_palette(&mut self) {
+        self.cancel_hold();
         let mut query = TextEdit::new("");
         query.focused = true;
         self.palette = Some(Palette { query, selected: 0 });
@@ -3406,6 +3406,8 @@ impl State {
         // A provider on this machine never leaves it. Any other host is asked about once.
         if let crate::ask::Source::Http { model, host } = source
             && !crate::ask::is_local_host(&host)
+            // An address that can't be used is refused at send, with a sentence, not asked about.
+            && !host.is_empty()
             && !self.backend.consented_hosts().contains(&host)
         {
             let body = self.consent_text(&request);

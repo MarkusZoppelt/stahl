@@ -289,7 +289,6 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
     } else {
         let press_id = id.clone();
         let key_id = id.clone();
-        let touch = s.compact;
         control = control
             .on_drag(
                 move |s: &mut State, drag: &mut Drag, _: &mut Tx| match drag.phase {
@@ -297,12 +296,12 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
                     Phase::Move => {
                         // A finger that travels is a scroll, not a signature; so is one that
                         // leaves the control.
-                        if leaves(drag, touch) {
+                        if leaves(drag) {
                             s.cancel_hold();
                         }
                     }
                     Phase::Up => {
-                        if drag.cancelled() || leaves(drag, touch) {
+                        if drag.cancelled() || leaves(drag) {
                             s.cancel_hold();
                         } else {
                             s.release_hold();
@@ -312,6 +311,12 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
             )
             .on_key(move |s: &mut State, event: &KeyEvent, _: &mut Tx| {
                 if !is_sign_key(event) {
+                    // Rune has no blur for an element: any other key (Tab, Escape, arrows)
+                    // ends a key hold before focus can move away, so a later key-up signs
+                    // nothing. The key is not consumed; Rune still moves focus.
+                    if s.matters.hold.as_ref().is_some_and(|hold| hold.key) {
+                        s.cancel_hold();
+                    }
                     return false;
                 }
                 s.begin_hold(&key_id, true);
@@ -332,11 +337,12 @@ fn sign_control(matter: &Matter, s: &State, t: &Theme, reduced: bool) -> El {
     )
 }
 
-/// Whether a press on the Sign control has stopped being a hold: it left the control, or, on a
-/// touch screen, travelled past the slop at which Rune itself calls a touch a drag.
-fn leaves(drag: &Drag, touch: bool) -> bool {
+/// Whether a press on the Sign control has stopped being a hold: it left the control, or it
+/// travelled past the slop. Rune's `Drag` can't tell a finger from a mouse, and the size class
+/// says nothing about the input (an iPad at full width is touched), so the slop applies to both.
+fn leaves(drag: &Drag) -> bool {
     let outside = drag.x < 0.0 || drag.y < 0.0 || drag.x > drag.w || drag.y > drag.h;
-    outside || (touch && drag.dx.hypot(drag.dy) > TOUCH_SLOP)
+    outside || drag.dx.hypot(drag.dy) > TOUCH_SLOP
 }
 
 /// Return or Space, the keyboard's way to hold the Sign control.
