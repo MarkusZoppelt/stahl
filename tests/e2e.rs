@@ -4143,8 +4143,48 @@ fn the_palette_asks_counsel_what_was_typed() {
 }
 
 #[test]
+fn the_next_step_comes_before_counsel_on_the_overview() {
+    let y = |app: &Harness, key: &str| app.rt.find(key).unwrap_or_else(|| panic!("{key}")).1;
+    let app = Harness::boot_tall(true);
+    let order = [
+        "statement-text",
+        "statement-figures",
+        "total-value",
+        "matter-sign-rebalance",
+        "overview-ask",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            y(&app, pair[0]) < y(&app, pair[1]),
+            "{} before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    let app = Harness::boot(true, None);
+    assert!(y(&app, "matter-sign-rebalance") < 640.0);
+    let app = Harness::phone();
+    let order = [
+        "statement-text",
+        "total-value",
+        "matter-sign-rebalance",
+        "overview-ask",
+        "statement-figures",
+    ];
+    for pair in order.windows(2) {
+        assert!(
+            y(&app, pair[0]) < y(&app, pair[1]),
+            "{} before {}",
+            pair[0],
+            pair[1]
+        );
+    }
+    assert!(y(&app, "matter-adjust-rebalance") < 560.0);
+}
+
+#[test]
 fn the_overview_line_asks_what_was_typed_there() {
-    let mut app = Harness::boot(true, None);
+    let mut app = Harness::boot_tall(true);
     app.click("overview-ask");
     app.type_text("How is Bitcoin doing?");
     app.press(Key::Enter);
@@ -4156,7 +4196,7 @@ fn the_overview_line_asks_what_was_typed_there() {
 
 #[test]
 fn a_suggested_question_on_the_overview_asks_it() {
-    let mut app = Harness::boot(true, None);
+    let mut app = Harness::boot_tall(true);
     assert!(app.exists("overview-ask-0"));
     app.click("overview-ask-0");
     assert_eq!(app.rt.state.page, Page::Ask);

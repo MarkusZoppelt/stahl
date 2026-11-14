@@ -49,22 +49,37 @@ fn figure(figure: &Figure, t: &Theme, stack_note: bool) -> El {
         .child(body)
 }
 
-/// One or two sentences on what changed since the last look, and the figures behind them.
+/// The figures behind the statement's sentences, or `None` when it has none.
+pub fn statement_figures(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
+    let statement = s.statement()?;
+    if statement.figures.is_empty() {
+        return None;
+    }
+    let room = ui::room(s, cx);
+    let figures = statement
+        .figures
+        .iter()
+        .map(|each| figure(each, t, room != ui::Room::Wide));
+    Some(match room {
+        // Under the sentence, not stretched across the page, so they read as its evidence.
+        ui::Room::Wide => row()
+            .key("statement-figures")
+            .items_start()
+            .gap(32.0)
+            .max_w(760.0)
+            .children(figures),
+        _ => ui::columns(room, [3, 3, 2], 16.0)
+            .key("statement-figures")
+            .children(figures),
+    })
+}
+
+/// One or two sentences on what changed since the last look. The figures behind them follow
+/// them, except on a phone, where the page puts them after what there is to do.
 pub fn statement(s: &State, t: &Theme, cx: &Cx<State>) -> Option<El> {
     let statement = s.statement()?;
-    let room = ui::room(s, cx);
-    let narrow = room == ui::Room::Narrow;
-    let figures = (!statement.figures.is_empty()).then(|| {
-        let figures = statement
-            .figures
-            .iter()
-            .map(|each| figure(each, t, room != ui::Room::Wide));
-        match room {
-            // Under the sentence, not stretched across the page, so they read as its evidence.
-            ui::Room::Wide => row().items_start().gap(32.0).max_w(760.0).children(figures),
-            _ => ui::columns(room, [3, 3, 2], 16.0).children(figures),
-        }
-    });
+    let narrow = ui::room(s, cx) == ui::Room::Narrow;
+    let figures = (!narrow).then(|| statement_figures(s, t, cx)).flatten();
     Some(
         col()
             .key("statement")
