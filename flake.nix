@@ -61,7 +61,9 @@
           filter = path: type:
             (craneLib.filterCargoSources path type)
             || (pkgs.lib.hasInfix "/assets/" path
-              && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null));
+              && (type == "directory" || builtins.match ".*\\.(ttf|png)" path != null))
+            # The intake tests read sample broker files.
+            || pkgs.lib.hasInfix "/tests/intake" path;
         };
 
         # rune-fx reads Rune's shaders from its sibling crate (`../../rune/src/*.wgsl`), but crane
