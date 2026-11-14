@@ -350,14 +350,14 @@ fn is_sign_key(event: &KeyEvent) -> bool {
     event.key == Key::Enter || matches!(&event.key, Key::Text(text) if text == " ")
 }
 
-/// The seal of a matter: a disc of turned steel with a raised rim, lit by the room's one light.
-/// Unsigned it is blank; signed it carries the date, struck into the metal. Under reduced motion
-/// it arrives in its final state with no movement.
-pub fn seal(s: &State, date: Option<NaiveDate>, size: f32, t: &Theme, reduced: bool) -> El {
+/// The seal of a matter: a disc of turned steel with a raised rim, lit by the room's one light,
+/// carrying the date it was signed, struck into the metal. Under reduced motion it arrives in its
+/// final state with no movement.
+pub fn seal(s: &State, date: NaiveDate, size: f32, t: &Theme, reduced: bool) -> El {
     let k = &t.kit;
     let radius = size / 2.0;
     let (ink, lip) = ui::steel_ink();
-    let transition = if reduced || date.is_none() {
+    let transition = if reduced {
         Transition::none()
     } else {
         Transition::scale(1.35)
@@ -365,11 +365,7 @@ pub fn seal(s: &State, date: Option<NaiveDate>, size: f32, t: &Theme, reduced: b
             .springs(SpringPair::new(STAMP_DOWN, STAMP_DOWN))
     };
     let disc = ui::plate(s, t, Plate::new(0.8), radius)
-        .key(if date.is_some() {
-            "matter-seal"
-        } else {
-            "matter-seal-blank"
-        })
+        .key("matter-seal")
         .size(size, size)
         .radius(radius)
         .continuous_corners()
@@ -391,23 +387,18 @@ pub fn seal(s: &State, date: Option<NaiveDate>, size: f32, t: &Theme, reduced: b
                 .border(1.0, ink.alpha(0.28))
                 .a11y_hidden(),
         );
-    match date {
-        Some(date) => {
-            // The day over the month, each cut into the metal on its own line.
-            let stamp = matters::seal_date(date);
-            let (day, month) = stamp.split_once(' ').unwrap_or((stamp.as_str(), ""));
-            let word = |words: &str| {
-                row().justify_center().w(size - 12.0).child(ui::engraved(
-                    words.to_string(),
-                    k.ty.text_xsmall.tracking(0.4),
-                    ink,
-                    lip,
-                ))
-            };
-            disc.child(col().center().child(word(day)).child(word(month)))
-        }
-        None => disc,
-    }
+    // The day over the month, each cut into the metal on its own line.
+    let stamp = matters::seal_date(date);
+    let (day, month) = stamp.split_once(' ').unwrap_or((stamp.as_str(), ""));
+    let word = |words: &str| {
+        row().justify_center().w(size - 12.0).child(ui::engraved(
+            words.to_string(),
+            k.ty.text_xsmall.tracking(0.4),
+            ink,
+            lip,
+        ))
+    };
+    disc.child(col().center().child(word(day)).child(word(month)))
 }
 
 /// Decline asks for an optional line, so the same matter is not proposed again for the same
@@ -522,17 +513,16 @@ fn matter_card(
                 .transition(Transition::none())
         })
     };
-    // On a wide screen Sign and the seal sit in the head, beside Adjust, so they are on the
+    // On a wide screen Sign sits in the head, beside Adjust, so they are on the
     // first screen however long the plan is. A phone keeps Sign under the card.
     let right = match stamp {
-        Some(stamp) => seal(s, Some(stamp.date), SEAL, t, reduced),
+        Some(stamp) => seal(s, stamp.date, SEAL, t, reduced),
         None if narrow => adjust().unwrap_or_else(el),
         None => row()
             .center_y()
             .gap(12.0)
             .children(adjust())
-            .child(sign_control(matter, s, t, reduced))
-            .child(seal(s, None, SEAL, t, reduced)),
+            .child(sign_control(matter, s, t, reduced)),
     };
     let head = row()
         .key("head")
@@ -767,6 +757,33 @@ fn quiet(s: &State, t: &Theme, with_detail: bool) -> El {
         )
 }
 
+/// The other way to answer a question that is already a card: one line, and a button that swaps
+/// the two. Nothing is recorded.
+fn alternative(matter: &Matter, t: &Theme, narrow: bool) -> El {
+    let id = matter.id.clone();
+    let words = ui::muted(format!("Or instead: {}", matter.title), t).wrap();
+    let button = Button::new("Show this one")
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press(move |s: &mut State| {
+            s.matters.shown = Some(id.clone());
+            s.matters.expanded = None;
+            s.matters.declining = None;
+            s.cancel_hold();
+        })
+        .build(&t.kit)
+        .key(format!("matter-show-{}", matter.id))
+        .transition(Transition::none());
+    let line = if narrow {
+        col().items_start().gap(4.0).child(words).child(button)
+    } else {
+        row().center_y().gap(12.0).child(words).child(button)
+    };
+    line.key(format!("matter-alternative-{}", matter.id))
+        .w_full()
+        .transition(Transition::none())
+}
+
 /// For your signature, and below it, lighter, what needs doing.
 pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
     let prepared = s.prepared();
@@ -779,9 +796,9 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
                 .as_ref()
                 .map(|problem| ui::danger(problem.clone(), t).key("matters-ledger-problem")),
         );
-    let mut cards: Vec<El> = prepared
-        .matters
-        .iter()
+    let (shown, alternatives) = prepared.cards(s.matters.shown.as_deref());
+    let mut cards: Vec<El> = shown
+        .into_iter()
         .enumerate()
         .map(|(index, matter)| matter_card(matter, index, s, t, narrow, reduced, None))
         .collect();
@@ -816,7 +833,18 @@ pub fn section(s: &State, t: &Theme, narrow: bool, reduced: bool) -> El {
             prepared.todo.is_empty() && s.agenda().is_empty(),
         ));
     } else {
-        section = section.child(col().key("matter-cards").w_full().gap(12.0).children(cards));
+        section = section.child(
+            col()
+                .key("matter-cards")
+                .w_full()
+                .gap(12.0)
+                .children(cards)
+                .children(
+                    alternatives
+                        .into_iter()
+                        .map(|matter| alternative(matter, t, narrow)),
+                ),
+        );
     }
     // The reduced-motion path: a plain question instead of the hold.
     if !prepared.todo.is_empty() {

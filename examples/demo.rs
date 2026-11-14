@@ -738,6 +738,11 @@ fn main() {
                 scene(s, Page::Overview);
                 s.matters.expanded = first_matter(s);
             }),
+            // The other way to answer the same question, brought forward.
+            ("matters-alternative", |s| {
+                scene(s, Page::Overview);
+                s.matters.shown = Some("cash-place".to_string());
+            }),
             // On a past day nothing can be signed, and the section says why.
             ("matters-past", |s| past_scene(s, Page::Overview)),
             // A ledger that can't be read is kept and reported, and nothing is written over it.

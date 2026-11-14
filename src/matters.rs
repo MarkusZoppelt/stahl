@@ -60,7 +60,7 @@ pub enum Kind {
 
 impl Kind {
     /// Matters of one group answer the same question, so a signed one settles the others.
-    fn group(self) -> Option<&'static str> {
+    pub fn group(self) -> Option<&'static str> {
         match self {
             Kind::Rebalance | Kind::PlaceCash | Kind::TopUpCash => Some("allocation"),
         }
@@ -184,6 +184,35 @@ pub struct Prepared {
     pub matters: Vec<Matter>,
     /// Data fixes, most important first.
     pub todo: Vec<AgendaItem>,
+}
+
+impl Prepared {
+    /// The matters to show as cards, then the alternatives, each a line. A group answers one
+    /// question, so it gets one card: the `shown` matter if it is prepared, else the first.
+    pub fn cards(&self, shown: Option<&str>) -> (Vec<&Matter>, Vec<&Matter>) {
+        let mut cards: Vec<&Matter> = Vec::new();
+        let mut alternatives = Vec::new();
+        for matter in &self.matters {
+            let Some(group) = matter.kind.group() else {
+                cards.push(matter);
+                continue;
+            };
+            let members = || {
+                self.matters
+                    .iter()
+                    .filter(move |other| other.kind.group() == Some(group))
+            };
+            let lead = members()
+                .find(|other| Some(other.id.as_str()) == shown)
+                .or_else(|| members().next());
+            if lead.is_some_and(|lead| lead.id == matter.id) {
+                cards.push(matter);
+            } else {
+                alternatives.push(matter);
+            }
+        }
+        (cards, alternatives)
+    }
 }
 
 /// Everything [`prepare`] may read.
@@ -1341,6 +1370,8 @@ pub struct MattersPage {
     /// A press that let go too soon, and when: the card says "Hold to sign".
     pub hint: Option<(String, f64)>,
     pub expanded: Option<String>,
+    /// The matter of a group the owner chose to look at instead of the first.
+    pub shown: Option<String>,
     pub declining: Option<Declining>,
     /// The matter the reduced-motion confirmation is about.
     pub confirm_sign: Option<String>,
@@ -1954,6 +1985,27 @@ mod tests {
         let prepared = prepare(&inputs(Some(&review), Some(&policy), &allocation, true));
         assert!(prepared.matters.is_empty());
         assert!(prepared.todo.is_empty());
+    }
+
+    #[test]
+    fn one_group_gets_one_card_and_the_owner_picks_it() {
+        let review = demo_review();
+        let policy = policy(Some(20_000.0));
+        let allocation = [];
+        let prepared = prepare(&inputs(Some(&review), Some(&policy), &allocation, true));
+        let ids = |matters: Vec<&Matter>| -> Vec<String> {
+            matters
+                .into_iter()
+                .map(|matter| matter.id.clone())
+                .collect()
+        };
+        let (cards, others) = prepared.cards(None);
+        assert_eq!(ids(cards), ["rebalance"]);
+        assert_eq!(ids(others), ["cash-place"]);
+        let (cards, others) = prepared.cards(Some("cash-place"));
+        assert_eq!(ids(cards), ["cash-place"]);
+        assert_eq!(ids(others), ["rebalance"]);
+        assert_eq!(prepared.cards(Some("gone")), prepared.cards(None));
     }
 
     #[test]
