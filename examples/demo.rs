@@ -79,6 +79,95 @@ fn main() {
             .and_then(|plates| plates.iter().find(|plate| plate.kind.caption() == caption))
             .map(|plate| plate.id.clone())
     }
+    /// The matter the bank would put first, if there is one.
+    fn first_matter(s: &State) -> Option<String> {
+        s.prepared().matters.first().map(|matter| matter.id.clone())
+    }
+    /// A portfolio whose cash is below the policy's minimum, so the bank has a floor to restore.
+    fn cash_short(s: &mut State) {
+        scene(s, Page::Overview);
+        let Some(dir) = s.open.workspace_dir.clone() else {
+            return;
+        };
+        let path = Path::new(&dir).join("positions.json");
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        fs::write(
+            &path,
+            text.replace("\"Amount\": 30000.0", "\"Amount\": 10000.0"),
+        )
+        .ok();
+        s.load_workspace(dir);
+        s.settle();
+    }
+    /// A matter just signed: the seal is on the card, and the breath before it files away is
+    /// held open so a still can show it.
+    fn signed(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.sign_matter(&id);
+            s.settle();
+            if let Some(stamp) = &mut s.matters.stamp {
+                stamp.started = s.now + 60.0;
+            }
+            s.toast = None;
+        }
+    }
+    /// The decline form, with a reason written in.
+    fn declining(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            let mut reason = rune::TextEdit::new("");
+            reason.replace_text("Not this month. I would rather keep the cash until the spring.");
+            s.matters.declining = Some(stahl::matters::Declining { id, reason });
+        }
+    }
+    /// The Documents page with a record signed a moment ago, and that record open.
+    fn documents_records(s: &mut State) {
+        scene(s, Page::Documents);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.sign_matter(&id);
+            s.settle();
+        }
+        s.load_decisions();
+        s.settle();
+        s.matters.open_decision = s
+            .matters
+            .decisions
+            .first()
+            .map(|decision| decision.path.to_string_lossy().into_owned());
+        s.toast = None;
+    }
+    /// The Documents page after a decline, with the record open.
+    fn documents_declined(s: &mut State) {
+        scene(s, Page::Documents);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.decline_matter(
+                &id,
+                "Not this month; the cash stays put until spring.".to_string(),
+            );
+            s.settle();
+        }
+        s.load_decisions();
+        s.settle();
+        s.matters.open_decision = s
+            .matters
+            .decisions
+            .first()
+            .map(|decision| decision.path.to_string_lossy().into_owned());
+        s.toast = None;
+    }
+    /// A Sign control held down, for the strip from press to filed: render at several `--at`.
+    fn holding(s: &mut State) {
+        scene(s, Page::Overview);
+        s.skip_opening();
+        if let Some(id) = first_matter(s) {
+            s.begin_hold(&id, false);
+        }
+    }
     /// What someone sees on first opening the app, with nothing to reopen.
     fn first_run(s: &mut State) {
         s.reset();
@@ -601,6 +690,131 @@ fn main() {
                 trim_history(s, 1);
             }),
             ("records-empty", |s| empty(s, Page::Records)),
+            // What the bank has prepared: a matter to sign, the plan behind it, and the seal.
+            ("matters-expanded", |s| {
+                scene(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            ("matters-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("matters-signed", signed),
+            ("matters-signed-light", |s| {
+                signed(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // A past decision of the same kind, and what happened since: the drift has moved
+            // enough that the bank brings it back, with the earlier decision named.
+            ("matters-prior", |s| {
+                scene(s, Page::Overview);
+                if let Some(matter) = s
+                    .prepared()
+                    .matters
+                    .into_iter()
+                    .find(|matter| matter.id == "rebalance")
+                {
+                    let mut figures = matter.figures.clone();
+                    if let Some(crypto) = figures.get_mut("class:Crypto") {
+                        *crypto += 3.5;
+                    }
+                    s.matters.ledger.record(stahl::matters::Entry {
+                        id: matter.id.clone(),
+                        kind: matter.kind,
+                        group: Some("allocation".to_string()),
+                        status: stahl::matters::Status::Signed,
+                        at: "2026-10-03".to_string(),
+                        reason: None,
+                        until: None,
+                        summary: "a halfway rebalance".to_string(),
+                        policy: matter.policy.clone(),
+                        figures,
+                        out_of_band: matter.out_of_band.clone(),
+                    });
+                }
+            }),
+            ("matters-private", |s| {
+                scene(s, Page::Overview);
+                s.privacy = true;
+            }),
+            ("matters-reduced", |s| {
+                scene(s, Page::Overview);
+                s.matters.confirm_sign = first_matter(s);
+            }),
+            ("matters-declined", declining),
+            // A press on Sign, held: render at several `--at` times for the strip.
+            ("matters-hold", holding),
+            ("matters-top-up", cash_short),
+            ("matters-todo", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+                s.findings.push(Finding::new(
+                    "stale_prices",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    "2 position(s) have prices older than the stale threshold".to_string(),
+                ));
+            }),
+            ("documents-decisions", documents_records),
+            ("documents-declined", documents_declined),
+            ("documents-decisions-light", |s| {
+                documents_records(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-matters", |s| phone(s, Page::Overview)),
+            ("phone-matters-expanded", |s| {
+                phone(s, Page::Overview);
+                s.matters.expanded = first_matter(s);
+            }),
+            ("phone-matters-todo", |s| {
+                phone(s, Page::Overview);
+                on_target(s);
+                s.findings.push(Finding::new(
+                    "stale_prices",
+                    Severity::Warning,
+                    Category::DataQuality,
+                    "2 position(s) have prices older than the stale threshold".to_string(),
+                ));
+            }),
+            ("phone-matters-declined", |s| {
+                phone(s, Page::Overview);
+                if let Some(id) = first_matter(s) {
+                    let mut reason = rune::TextEdit::new("");
+                    reason.replace_text("Not this month.");
+                    s.matters.declining = Some(stahl::matters::Declining { id, reason });
+                }
+            }),
+            ("phone-matters-light", |s| {
+                phone(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("phone-matters-signed", |s| {
+                phone(s, Page::Overview);
+                s.skip_opening();
+                if let Some(id) = first_matter(s) {
+                    s.sign_matter(&id);
+                    s.settle();
+                    if let Some(stamp) = &mut s.matters.stamp {
+                        stamp.started = s.now + 60.0;
+                    }
+                    s.toast = None;
+                }
+            }),
+            ("phone-documents-decisions", |s| {
+                phone(s, Page::Documents);
+                s.skip_opening();
+                if let Some(id) = first_matter(s) {
+                    s.sign_matter(&id);
+                    s.settle();
+                }
+                s.load_decisions();
+                s.settle();
+                s.toast = None;
+            }),
             // A new plate is set onto the wall and catches the light once: render at several
             // `--at` times to see the strip.
             ("records-arrival", |s| {

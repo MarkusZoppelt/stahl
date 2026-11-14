@@ -64,6 +64,15 @@ impl Harness {
     }
 
     fn boot_with(workspace: bool, file: Option<&str>, updater: Updater) -> Harness {
+        Self::boot_at(workspace, file, updater, (1320.0, 860.0))
+    }
+
+    /// A window tall enough to show the whole Overview, for a hold near the bottom of it.
+    fn boot_tall(workspace: bool) -> Harness {
+        Self::boot_at(workspace, None, Updater::disabled(), (1320.0, 1600.0))
+    }
+
+    fn boot_at(workspace: bool, file: Option<&str>, updater: Updater, size: (f32, f32)) -> Harness {
         offline();
         let tokio = Tokio::new().unwrap();
         let dir = TempDir::new().unwrap();
@@ -81,7 +90,7 @@ impl Harness {
             workspace.then_some(root.as_path()),
             tokio.handle().clone(),
         );
-        let rt = app::headless_with_updater(backend, initial, (1320.0, 860.0), updater);
+        let rt = app::headless_with_updater(backend, initial, size, updater);
         let mut harness = Harness {
             rt,
             dir,
@@ -891,7 +900,7 @@ fn overview_agrees_with_the_review_and_leads_to_the_fix() {
     assert!(app.has_text("4 of 5 asset classes are outside their tolerance"));
     assert_eq!(app.rt.state.agenda_len(), 1);
 
-    app.click("agenda-action-drift");
+    app.click("matter-adjust-rebalance");
     assert_eq!(app.rt.state.page, Page::Rebalance);
 }
 
@@ -1319,7 +1328,7 @@ fn a_chart_follows_the_pointer() {
 
 #[test]
 fn the_same_position_and_class_fly_between_pages_without_clashing() {
-    let mut app = Harness::boot(true, None);
+    let mut app = Harness::boot_tall(true);
     assert!(app.exists("mover-0"));
     assert!(app.exists("legend-0"));
     app.click("mover-0");
@@ -4333,4 +4342,229 @@ fn editing_in_the_past_happens_today() {
     app.command('n', false);
     assert!(app.rt.state.form.is_some(), "the form opens");
     assert!(!app.rt.state.in_past(), "for today's positions");
+}
+
+// --- Matters for signature ---
+
+/// Press and hold a Sign control for `seconds`, driving real frames between press and release.
+fn hold(app: &mut Harness, key: &str, seconds: f64) {
+    let (x, y) = app
+        .rt
+        .find(key)
+        .unwrap_or_else(|| panic!("nothing to hold at {key}"));
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    for _ in 0..((seconds * 60.0).round() as usize) {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x, y);
+    // One frame shows the hint or the seal; the write lands without running the breath away.
+    app.rt.frame(1.0 / 60.0);
+    app.rt.state.settle();
+}
+
+fn decision_files(app: &Harness) -> Vec<PathBuf> {
+    let dir = app.dir.path().join("portfolio/portfolio/decisions");
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "md"))
+        .collect()
+}
+
+#[test]
+fn a_held_sign_records_a_decision_and_documents_lists_it() {
+    let mut app = Harness::boot_tall(true);
+    assert!(
+        app.exists("matter-rebalance"),
+        "the bank prepared a rebalance"
+    );
+    assert!(app.has_text("Stahl never trades."));
+
+    hold(&mut app, "matter-sign-rebalance", 1.2);
+
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "one decision recorded");
+    assert_eq!(ledger.entries[0].status, stahl::matters::Status::Signed);
+    assert_eq!(ledger.entries[0].id, "rebalance");
+
+    // The card is stamped, then files itself away.
+    assert!(app.exists("matter-seal"), "the seal is on the card");
+    assert!(app.has_text("Signed"));
+    assert!(
+        !app.exists("matter-sign-rebalance"),
+        "the signed card has no Sign control while its seal shows"
+    );
+    for _ in 0..150 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert!(
+        !app.exists("matter-rebalance"),
+        "the signed card has filed itself away"
+    );
+    assert!(app.has_text("Nothing needs your signature today."));
+
+    // The record is on disk, in the shape the Documents page reads.
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(written.starts_with("# Decision: Rebalance halfway to your targets\n"));
+    assert!(written.contains("Status: Signed"));
+    assert!(written.contains("## Decision"));
+    assert!(written.contains("Stahl never trades."));
+
+    // Documents lists it, newest first, and opens it.
+    app.click(Page::Documents.key());
+    assert!(app.has_text("Decision records"));
+    assert!(app.has_text("Rebalance halfway to your targets"));
+    assert!(app.has_text("Signed"));
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    app.click(&format!("decision-{name}"));
+    assert!(app.rt.state.matters.open_decision.is_some());
+    assert!(app.has_text("Context"), "the record opens as Markdown");
+    assert!(app.has_text("Rationale"));
+}
+
+#[test]
+fn an_early_release_signs_nothing_and_explains_the_hold() {
+    let mut app = Harness::boot_tall(true);
+    hold(&mut app, "matter-sign-rebalance", 0.3);
+    assert!(app.rt.state.matters.ledger.entries.is_empty());
+    assert!(decision_files(&app).is_empty());
+    assert!(app.has_text("Hold to sign."));
+    assert!(app.exists("matter-rebalance"), "the matter is still there");
+}
+
+#[test]
+fn the_keyboard_holds_the_same_way() {
+    let mut app = Harness::boot_tall(true);
+    // A click focuses the control and lets go at once; Return then starts the hold.
+    let (x, y) = app
+        .rt
+        .find("matter-sign-rebalance")
+        .expect("the Sign control");
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.pointer_up(x, y);
+    app.rt.frame(1.0 / 60.0);
+    assert!(app.rt.state.matters.hold.is_none());
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    app.rt.frame(1.0 / 60.0);
+    assert!(
+        app.rt.state.matters.hold.is_some(),
+        "Return holds the control"
+    );
+    for _ in 0..75 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.settle();
+    assert_eq!(
+        app.rt
+            .state
+            .matters
+            .ledger
+            .entries
+            .first()
+            .map(|entry| entry.status),
+        Some(stahl::matters::Status::Signed)
+    );
+}
+
+#[test]
+fn a_declined_matter_stays_hidden_across_a_reload() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-decline-rebalance");
+    app.click("matter-reason-rebalance");
+    app.type_text("Not this month.");
+    app.click("matter-decline-yes-rebalance");
+    assert!(app.rt.state.matters.ledger.entries[0].status == stahl::matters::Status::Declined);
+    assert!(
+        !app.exists("matter-rebalance"),
+        "declined matters leave the list"
+    );
+    // The alternative allocation matter is still there: declining is not signing.
+    assert!(app.exists("matter-cash-place"));
+
+    let files = decision_files(&app);
+    assert_eq!(files.len(), 1);
+    let written = fs::read_to_string(&files[0]).unwrap();
+    assert!(written.contains("Status: Declined"));
+    assert!(written.contains("Not this month."));
+
+    // Reloading the same workspace keeps it hidden: the ledger is beside the history.
+    let dir = app.rt.state.open.workspace_dir.clone().unwrap();
+    app.rt.state.load_workspace(dir);
+    app.settle();
+    assert!(!app.exists("matter-rebalance"));
+    assert!(app.rt.state.matters.ledger.entries[0].status == stahl::matters::Status::Declined);
+}
+
+#[test]
+fn a_material_change_brings_a_declined_matter_back() {
+    let mut app = Harness::boot_tall(true);
+    app.click("matter-decline-rebalance");
+    app.click("matter-decline-yes-rebalance");
+    assert!(!app.exists("matter-rebalance"));
+
+    // Crypto drifts four more points: past its three-point tolerance.
+    app.rt.update(|state, _| {
+        if let Some(review) = &mut state.review.data {
+            for class in &mut review.allocations {
+                if class.asset_class == "Crypto" {
+                    class.actual_percent += 4.0;
+                    class.drift_percent += 4.0;
+                }
+            }
+        }
+    });
+    app.settle();
+    assert!(
+        app.exists("matter-rebalance"),
+        "a material change reopens it"
+    );
+}
+
+#[test]
+fn signing_without_a_workspace_explains_that_records_need_one() {
+    let app = Harness::boot(false, Some(demo::POSITIONS));
+    // A single file has no policy, so there is nothing to sign; the section says so instead.
+    assert!(app.has_text("Nothing needs your signature today."));
+    assert!(!app.exists("matter-sign-rebalance"));
+}
+
+#[test]
+fn reduced_motion_asks_plainly_instead_of_holding() {
+    let mut app = Harness::boot_tall(true);
+    app.rt.set_system_reduced_motion(true);
+    app.settle();
+    // The control is a plain press now: no hold, a question.
+    app.click("matter-sign-rebalance");
+    assert!(app.rt.state.matters.hold.is_none());
+    assert!(app.exists("matter-confirm-sign"));
+    app.press(Key::Escape);
+    assert!(
+        !app.exists("matter-confirm-sign"),
+        "Escape closes the question"
+    );
+    app.click("matter-sign-rebalance");
+    app.click("matter-confirm-sign");
+    assert_eq!(
+        app.rt
+            .state
+            .matters
+            .ledger
+            .entries
+            .first()
+            .map(|entry| entry.status),
+        Some(stahl::matters::Status::Signed)
+    );
 }

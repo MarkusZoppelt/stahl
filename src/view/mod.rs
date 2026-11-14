@@ -26,6 +26,7 @@ pub mod door;
 pub mod guide;
 mod insights;
 mod intake;
+pub mod matters;
 mod overlays;
 mod overview;
 pub mod past;
@@ -76,6 +77,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         }
         if s.consent.is_some() {
             s.consent_cancel();
+            return true;
+        }
+        if s.matters.confirm_sign.take().is_some() {
             return true;
         }
         if s.ask_stop() {
