@@ -30,6 +30,18 @@ version=$(grep -m1 '^version' "$root/Cargo.toml" | cut -d'"' -f2)
 rm -rf "$work/Stahl.xcarchive" "$EXPORT_PATH"
 mkdir -p "$work"
 
+# Prints the end of an xcodebuild log; on failure also its error lines and the log's path, and exits.
+show_log() {
+  tail -n 5 "$1"
+  if [ "$2" -ne 0 ]; then
+    echo "xcodebuild failed (status $2); error lines:"
+    grep -i 'error:' "$1" | head -n 40 || true
+    echo "full log: $1"
+    exit "$2"
+  fi
+}
+status=0
+
 echo "Stahl $version ($build) for $bundle, team $team"
 
 # A profile file (STAHL_PROFILE_FILE) is installed where Xcode looks, under its UUID.
@@ -66,7 +78,8 @@ xcodebuild -project "$here/Stahl.xcodeproj" -scheme Stahl -configuration Release
   -destination generic/platform=iOS -archivePath "$work/Stahl.xcarchive" archive \
   DEVELOPMENT_TEAM="$team" STAHL_BUNDLE_ID="$bundle" STAHL_RUST_LIB="$lib" \
   INFOPLIST_FILE="$plist" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="Apple Distribution" \
-  PROVISIONING_PROFILE_SPECIFIER="$profile" | tail -n 5
+  PROVISIONING_PROFILE_SPECIFIER="$profile" >"$work/archive.log" 2>&1 || status=$?
+show_log "$work/archive.log" "${status:-0}"
 
 cat >"$work/ExportOptions.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -93,7 +106,8 @@ if $upload; then
     -authenticationKeyIssuerID "$ASC_ISSUER_ID")
 fi
 xcodebuild -exportArchive -archivePath "$work/Stahl.xcarchive" -exportPath "$EXPORT_PATH" \
-  -exportOptionsPlist "$work/ExportOptions.plist" "${auth[@]}" | tail -n 5
+  -exportOptionsPlist "$work/ExportOptions.plist" "${auth[@]}" >"$work/export.log" 2>&1 || status=$?
+show_log "$work/export.log" "${status:-0}"
 
 if $upload; then
   echo "uploaded Stahl $version ($build) to App Store Connect; TestFlight lists it once processed"

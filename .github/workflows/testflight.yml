@@ -109,6 +109,17 @@ jobs:
           ASC_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: ios/testflight.sh --upload "$APPLE_TEAM_ID" "$GITHUB_RUN_NUMBER"
 
+      - name: keep the logs of a failed build
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: testflight-logs
+          path: |
+            ${{ runner.temp }}/stahl-testflight/*.log
+            ${{ runner.temp }}/stahl-testflight/export/*.plist
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: delete the signing material
         if: always()
         run: |
