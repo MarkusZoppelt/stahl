@@ -3776,6 +3776,8 @@ fn the_door_can_be_turned_by_hand_and_by_the_keyboard() {
 #[test]
 fn counsel_answers_a_typed_question_with_blocks() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     assert_eq!(app.rt.state.page, Page::Ask);
     assert!(app.has_text("The door is open, and the light is on."));
@@ -3809,6 +3811,8 @@ fn counsel_answers_a_typed_question_with_blocks() {
 #[test]
 fn the_first_sentence_arrives_word_by_word() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("What changed this month?");
@@ -3862,6 +3866,8 @@ fn the_first_sentence_arrives_word_by_word() {
 #[test]
 fn a_loss_is_said_plainly_and_never_with_the_joke() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     let change = app
         .rt
         .state
@@ -3890,6 +3896,8 @@ fn a_loss_is_said_plainly_and_never_with_the_joke() {
 #[test]
 fn an_empty_page_offers_questions_the_app_can_answer_without_a_model() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.rt.state.model = Arc::new(stahl::ask::Builtin);
     app.click(Page::Ask.key());
     let asked: Vec<String> = (0..6)
@@ -3931,6 +3939,8 @@ fn an_empty_page_offers_questions_the_app_can_answer_without_a_model() {
 #[test]
 fn thinking_is_true_from_sending_until_the_answer_finishes() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("How is Bitcoin doing?");
@@ -3953,6 +3963,8 @@ fn thinking_is_true_from_sending_until_the_answer_finishes() {
 #[test]
 fn escape_stops_an_answer_in_flight() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("What changed this month?");
@@ -4005,6 +4017,8 @@ impl stahl::ask::Model for Computed {
 #[test]
 fn a_figure_the_model_made_up_is_marked_unverified() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     let help = |app: &Harness, key: &str| {
@@ -4043,6 +4057,8 @@ fn a_figure_the_model_made_up_is_marked_unverified() {
 #[test]
 fn the_what_if_toggle_shows_today_and_what_the_shock_leaves() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("What if crypto halves?");
@@ -4088,6 +4104,8 @@ fn the_what_if_toggle_shows_today_and_what_the_shock_leaves() {
 #[test]
 fn dragging_the_plan_in_an_answer_changes_its_trades_and_carries_the_fraction_over() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("Why is my allocation off?");
@@ -4140,6 +4158,8 @@ fn dragging_the_plan_in_an_answer_changes_its_trades_and_carries_the_fraction_ov
 #[test]
 fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Ask.key());
     app.click("ask-input");
     app.type_text("Why is my allocation off?");
@@ -4163,6 +4183,8 @@ fn a_plan_in_an_answer_opens_in_rebalance_as_the_same_plan() {
 #[test]
 fn the_palette_asks_counsel_what_was_typed() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.command('k', false);
     app.type_text("what changed this month?");
     assert!(
@@ -4180,7 +4202,9 @@ fn the_palette_asks_counsel_what_was_typed() {
 #[test]
 fn the_next_step_comes_before_counsel_on_the_overview() {
     let y = |app: &Harness, key: &str| app.rt.find(key).unwrap_or_else(|| panic!("{key}")).1;
-    let app = Harness::boot_tall(true);
+    let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     let order = [
         "statement-text",
         "statement-figures",
@@ -4198,7 +4222,9 @@ fn the_next_step_comes_before_counsel_on_the_overview() {
     }
     let app = Harness::boot(true, None);
     assert!(y(&app, "matter-sign-rebalance") < 640.0);
-    let app = Harness::phone();
+    let mut app = Harness::phone();
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     let order = [
         "statement-text",
         "total-value",
@@ -4220,6 +4246,8 @@ fn the_next_step_comes_before_counsel_on_the_overview() {
 #[test]
 fn the_overview_line_asks_what_was_typed_there() {
     let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click("overview-ask");
     app.type_text("How is Bitcoin doing?");
     app.press(Key::Enter);
@@ -4232,6 +4260,8 @@ fn the_overview_line_asks_what_was_typed_there() {
 #[test]
 fn a_suggested_question_on_the_overview_asks_it() {
     let mut app = Harness::boot_tall(true);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     assert!(app.exists("overview-ask-0"));
     app.click("overview-ask-0");
     assert_eq!(app.rt.state.page, Page::Ask);
@@ -4248,6 +4278,8 @@ fn a_suggested_question_on_the_overview_asks_it() {
 #[test]
 fn a_question_to_a_provider_asks_before_it_goes() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Settings.key());
     app.click("settings-url");
     app.type_text("https://api.example.com/v1");
@@ -4290,6 +4322,8 @@ fn a_question_to_a_provider_asks_before_it_goes() {
 #[test]
 fn a_remote_provider_must_be_https() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Settings.key());
     app.click("settings-url");
     app.type_text("http://example.com/v1");
@@ -4308,6 +4342,8 @@ fn a_remote_provider_must_be_https() {
 #[test]
 fn a_question_to_this_computer_needs_no_prompt() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.click(Page::Settings.key());
     app.click("settings-url");
     app.type_text("http://127.0.0.1:11434/v1");
@@ -4339,6 +4375,8 @@ fn a_question_to_this_computer_needs_no_prompt() {
 #[test]
 fn without_a_model_the_app_answers_what_it_knows() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.rt.state.model = Arc::new(stahl::ask::Builtin);
     app.click(Page::Ask.key());
     app.click("ask-input");
@@ -4358,6 +4396,8 @@ fn without_a_model_the_app_answers_what_it_knows() {
 #[test]
 fn without_a_model_an_unknown_question_says_how_to_get_one() {
     let mut app = Harness::boot(true, None);
+    app.rt.update(|state, _| state.ai = true);
+    app.settle();
     app.rt.state.model = Arc::new(stahl::ask::Builtin);
     app.click(Page::Ask.key());
     app.click("ask-input");
@@ -5341,4 +5381,101 @@ fn a_decision_finished_after_a_workspace_switch_changes_nothing_in_state() {
         "the other workspace's records were not marked stale"
     );
     assert!(app.rt.state.matters.error.is_none());
+}
+
+// --- AI features ---
+
+/// A model that only counts how often it was asked.
+struct CountingModel(Arc<AtomicUsize>);
+
+impl stahl::ask::Model for CountingModel {
+    fn ask(&self, _request: stahl::ask::Request) -> stahl::ask::Reply {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        stahl::ask::Reply::Ready(String::new())
+    }
+
+    fn source(&self) -> stahl::ask::Source {
+        stahl::ask::Source::Scripted
+    }
+}
+
+#[test]
+fn ai_features_are_off_by_default_and_hide_counsel() {
+    let mut app = Harness::boot(true, None);
+    assert!(!app.rt.state.ai);
+    assert!(!app.exists(Page::Ask.key()), "no Counsel in the sidebar");
+    assert!(
+        !app.exists("overview-ask"),
+        "no question line on the Overview"
+    );
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(
+        !app.has_text("Ask counsel: what changed this month?"),
+        "no row for a typed question"
+    );
+    app.press(Key::Escape);
+    app.rt.state.navigate(Page::Settings);
+    app.settle();
+    assert!(app.exists("settings-ai"), "the switch is there");
+    assert!(app.has_text("AI features"));
+    assert!(!app.has_text("Provider URL"), "no AI provider card");
+    assert!(!app.exists("settings-url"));
+    assert!(!app.exists("export-skill"));
+}
+
+#[test]
+fn turning_ai_features_on_brings_counsel_back_and_is_remembered() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.navigate(Page::Settings);
+    app.settle();
+    app.click("settings-ai");
+    app.settle();
+    assert!(app.rt.state.ai);
+    assert!(app.exists(Page::Ask.key()));
+    assert!(app.exists("settings-url"));
+    assert!(app.exists("export-skill"));
+    app.rt.state.navigate(Page::Overview);
+    app.settle();
+    app.command('k', false);
+    app.type_text("what changed this month?");
+    assert!(app.has_text("Ask counsel: what changed this month?"));
+    app.press(Key::Escape);
+    // A new backend from the same config directory still has it on.
+    let again = demo::backend(app.dir.path(), None, app._tokio.handle().clone());
+    assert!(again.ai_features());
+    // And off again goes back to the Overview.
+    app.rt.state.navigate(Page::Ask);
+    assert_eq!(app.rt.state.page, Page::Ask);
+    app.rt.state.set_ai(false);
+    assert_eq!(app.rt.state.page, Page::Overview);
+    assert!(!again.ai_features());
+}
+
+#[test]
+fn nothing_can_ask_while_ai_features_are_off() {
+    let mut app = Harness::boot(true, None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    app.rt.state.model = Arc::new(CountingModel(calls.clone()));
+    let page = app.rt.state.page;
+    app.rt.state.ask_about("What changed this month?");
+    app.rt.state.ask_question("What changed this month?");
+    app.rt
+        .state
+        .ask
+        .input
+        .replace_text("What changed this month?");
+    app.rt.state.ask_here();
+    app.rt.state.ask_send();
+    app.settle();
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "no request was made");
+    assert_eq!(app.rt.state.page, page);
+    assert!(app.rt.state.ask.turns.is_empty());
+    app.rt.state.navigate(Page::Ask);
+    assert_eq!(
+        app.rt.state.page,
+        Page::Overview,
+        "Counsel goes to the Overview"
+    );
+    assert_eq!(Page::from_name("counsel"), None);
 }

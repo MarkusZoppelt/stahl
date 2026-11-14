@@ -496,13 +496,13 @@ fn sidebar(s: &State, t: &Theme) -> El {
                         .truncate(),
                 ),
         );
-    let mut bar = Sidebar::new()
-        .label("Sections")
-        .header(header)
-        .child(nav_row(s, Page::Ask, t))
-        .section(
-            SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
-        );
+    let mut bar = Sidebar::new().label("Sections").header(header);
+    if s.ai {
+        bar = bar.child(nav_row(s, Page::Ask, t));
+    }
+    bar = bar.section(
+        SidebarSection::new("Portfolio").rows(Page::PORTFOLIO.map(|page| nav_row(s, page, t))),
+    );
     bar = if s.is_workspace() {
         bar.section(SidebarSection::new("Plan").rows(Page::PLAN.map(|page| nav_row(s, page, t))))
     } else {
@@ -821,7 +821,7 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     let pane_fits = pane_fits(s, cx);
-    let scroller = if s.page == Page::Ask && !s.in_past() {
+    let scroller = if s.page == Page::Ask && s.ai && !s.in_past() {
         ask::page(s, t, cx)
     } else {
         page_column(

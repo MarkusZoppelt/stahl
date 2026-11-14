@@ -353,7 +353,7 @@ pub fn entries(s: &State) -> Vec<Entry> {
     // A question, or words that match nothing else, become the first row: Enter asks Counsel.
     // A single word the portfolio answers with a figure keeps that figure first.
     let is_question = typed.contains(' ') || typed.ends_with('?');
-    if typed.chars().count() >= 2 && !is_command && (is_question || found.is_empty()) {
+    if s.ai && typed.chars().count() >= 2 && !is_command && (is_question || found.is_empty()) {
         found.insert(
             0,
             Entry {
