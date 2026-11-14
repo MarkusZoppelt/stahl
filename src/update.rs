@@ -49,6 +49,8 @@ const DITTO: &str = "/usr/bin/ditto";
 const CODESIGN: &str = "/usr/bin/codesign";
 const PLUTIL: &str = "/usr/bin/plutil";
 const OPEN: &str = "/usr/bin/open";
+/// The Apple team that signs Stahl's releases.
+const DEVELOPER_TEAM: &str = "GTW932R77D";
 
 /// A pending answer from a [`ReleaseSource`].
 pub type Pending<'a, T> = Pin<Box<dyn Future<Output = Result<T, String>> + Send + 'a>>;
@@ -360,6 +362,20 @@ pub struct Updater {
     relaunch: Relaunch,
     downloads: PathBuf,
     check_on_startup: bool,
+    /// A `codesign` requirement a macOS update must meet. None accepts any valid signature.
+    signer: Option<String>,
+}
+
+/// A `codesign` requirement: signed by a Developer ID Application certificate (Apple's own
+/// anchor, the Developer ID CA intermediate, and the Developer ID Application leaf) whose team
+/// (the leaf's organizational unit) is `team`. An ad-hoc signature, another team's, or a
+/// development or self-signed certificate does not meet it. It says nothing about notarization.
+fn developer_id_requirement(team: &str) -> String {
+    format!(
+        "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists \
+         and certificate leaf[field.1.2.840.113635.100.6.1.13] exists \
+         and certificate leaf[subject.OU] = \"{team}\""
+    )
 }
 
 /// This build's version.
@@ -379,6 +395,7 @@ impl Updater {
             relaunch: Arc::new(|_| Ok(())),
             downloads: env::temp_dir(),
             check_on_startup: false,
+            signer: None,
         }
     }
 
@@ -396,7 +413,14 @@ impl Updater {
             relaunch: Arc::new(|_| Ok(())),
             downloads,
             check_on_startup: true,
+            signer: None,
         }
+    }
+
+    /// Makes a macOS update install only if it meets this `codesign` requirement.
+    pub fn require_signer(mut self, requirement: String) -> Updater {
+        self.signer = Some(requirement);
+        self
     }
 
     /// The real thing, for the app itself.
@@ -426,6 +450,7 @@ impl Updater {
             relaunch: Arc::new(relaunch),
             downloads: downloads_dir(),
             check_on_startup: env::var_os("STAHL_NO_UPDATE_CHECK").is_none(),
+            signer: Some(developer_id_requirement(DEVELOPER_TEAM)),
         }
     }
 
@@ -500,12 +525,14 @@ impl Updater {
         let installation = self.installation.clone();
         let downloads = self.downloads.clone();
         let version = release.version.clone();
+        let signer = self.signer.clone();
         let name = asset.name.clone();
         task::spawn_blocking(move || {
             verify(&file, &name, &sums)?;
             let result = match &installation {
                 Installation::MacApp { bundle } => {
-                    install_mac_app(&file, bundle, &version).map(|()| Installed::Replaced)
+                    install_mac_app(&file, bundle, &version, signer.as_deref())
+                        .map(|()| Installed::Replaced)
                 }
                 Installation::WindowsExe { exe } => {
                     install_windows_exe(&file, exe).map(|()| Installed::Replaced)
@@ -782,9 +809,10 @@ fn plist_value(plist: &Path, key: &str) -> Result<String, String> {
 }
 
 /// Before anything moves: is this really intact, and really the version the release promised?
-/// `codesign` proves it's undamaged. It accepts any valid signature, ad-hoc too, so it doesn't prove
-/// who built it.
-fn check_mac_app(app: &Path, version: &Version) -> Result<(), String> {
+/// `codesign` proves it's undamaged, but accepts any valid signature, ad-hoc too. So when there is a
+/// `signer` requirement (the real app always has one), the signature must also meet it: Stahl's
+/// Developer ID. Without one, who built the app is not checked.
+fn check_mac_app(app: &Path, version: &Version, signer: Option<&str>) -> Result<(), String> {
     run_tool(
         CODESIGN,
         &[
@@ -794,6 +822,23 @@ fn check_mac_app(app: &Path, version: &Version) -> Result<(), String> {
             app.as_os_str(),
         ],
     )?;
+    if let Some(requirement) = signer {
+        let requirement = format!("-R={requirement}");
+        run_tool(
+            CODESIGN,
+            &[
+                "--verify".as_ref(),
+                "--deep".as_ref(),
+                "--strict".as_ref(),
+                requirement.as_ref(),
+                app.as_os_str(),
+            ],
+        )
+        .map_err(|_| {
+            "The downloaded app isn't signed by Stahl's developer, so it wasn't installed."
+                .to_string()
+        })?;
+    }
     let plist = app.join("Contents/Info.plist");
     let identifier = plist_value(&plist, "CFBundleIdentifier")?;
     if identifier != BUNDLE_ID {
@@ -812,7 +857,12 @@ fn check_mac_app(app: &Path, version: &Version) -> Result<(), String> {
     Ok(())
 }
 
-fn install_mac_app(dmg: &Path, bundle: &Path, version: &Version) -> Result<(), String> {
+fn install_mac_app(
+    dmg: &Path,
+    bundle: &Path,
+    version: &Version,
+    signer: Option<&str>,
+) -> Result<(), String> {
     let parent = bundle
         .parent()
         .ok_or_else(|| "the app has no folder".to_string())?;
@@ -852,7 +902,7 @@ fn install_mac_app(dmg: &Path, bundle: &Path, version: &Version) -> Result<(), S
         &["--noqtn".as_ref(), app.as_os_str(), new.as_os_str()],
     )?;
     drop(mounted);
-    check_mac_app(&new, version)?;
+    check_mac_app(&new, version, signer)?;
     let swapped = swap_into_place(&new, bundle, &stage.path().join("old.app"))
         .map_err(|error| format!("can't replace {}: {error}", bundle.display()));
     // The old bundle is the only copy left, so it must outlive this folder.
@@ -1292,6 +1342,13 @@ mod tests {
     }
 
     #[test]
+    fn the_developer_id_requirement_names_the_team() {
+        let requirement = developer_id_requirement(DEVELOPER_TEAM);
+        assert!(requirement.contains("anchor apple generic"));
+        assert!(requirement.contains(r#"certificate leaf[subject.OU] = "GTW932R77D""#));
+    }
+
+    #[test]
     fn the_install_command_is_quoted_for_a_shell() {
         assert_eq!(
             install_command(Path::new("/home/a b/it's.deb")),
@@ -1368,15 +1425,26 @@ mod tests {
         let marker = || fs::read_to_string(bundle.join("Contents/MacOS/stahl")).unwrap();
 
         // The wrong version must not get in, and nothing changes.
-        assert!(install_mac_app(&dmg, &bundle, &version("0.4.0")).is_err());
+        assert!(install_mac_app(&dmg, &bundle, &version("0.4.0"), None).is_err());
         assert!(marker().contains("old"));
         assert_eq!(fs::read_dir(&installed).unwrap().count(), 1, "no debris");
         let _ = fs::remove_dir_all(dmg.with_extension("mount"));
 
-        install_mac_app(&dmg, &bundle, &version("0.3.0")).unwrap();
+        // An ad-hoc signature isn't the team's, so it is refused, and nothing changes.
+        let team = developer_id_requirement(DEVELOPER_TEAM);
+        let refused = install_mac_app(&dmg, &bundle, &version("0.3.0"), Some(&team)).unwrap_err();
+        assert!(
+            refused.contains("isn't signed by Stahl's developer"),
+            "{refused}"
+        );
+        assert!(marker().contains("old"));
+        assert_eq!(fs::read_dir(&installed).unwrap().count(), 1, "no debris");
+        let _ = fs::remove_dir_all(dmg.with_extension("mount"));
+
+        install_mac_app(&dmg, &bundle, &version("0.3.0"), None).unwrap();
         assert!(marker().contains("new"));
         assert_eq!(fs::read_dir(&installed).unwrap().count(), 1, "no debris");
-        check_mac_app(&bundle, &version("0.3.0")).unwrap();
+        check_mac_app(&bundle, &version("0.3.0"), None).unwrap();
         let quarantine = Command::new("/usr/bin/xattr")
             .args(["-p", "com.apple.quarantine"])
             .arg(&bundle)
