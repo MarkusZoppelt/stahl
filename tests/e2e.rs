@@ -4523,7 +4523,7 @@ fn decision_files(app: &Harness) -> Vec<PathBuf> {
 }
 
 #[test]
-fn sign_and_the_seal_are_on_the_first_screen_collapsed_and_expanded() {
+fn sign_is_on_the_first_screen_collapsed_and_expanded() {
     for expanded in [false, true] {
         let mut app = Harness::boot(true, None);
         if expanded {
@@ -4531,17 +4531,35 @@ fn sign_and_the_seal_are_on_the_first_screen_collapsed_and_expanded() {
             app.rt.state.matters.expanded = Some("rebalance".to_string());
             app.settle();
         }
-        for key in ["matter-sign-rebalance", "matter-seal-blank"] {
-            let (x, y) = app
-                .rt
-                .find(key)
-                .unwrap_or_else(|| panic!("{key} is not on the page (expanded: {expanded})"));
-            assert!(
-                (0.0..1320.0).contains(&x) && (0.0..860.0).contains(&y),
-                "{key} is at ({x}, {y}), outside the 1320x860 window (expanded: {expanded})"
-            );
-        }
+        let key = "matter-sign-rebalance";
+        let (x, y) = app
+            .rt
+            .find(key)
+            .unwrap_or_else(|| panic!("{key} is not on the page (expanded: {expanded})"));
+        assert!(
+            (0.0..1320.0).contains(&x) && (0.0..860.0).contains(&y),
+            "{key} is at ({x}, {y}), outside the 1320x860 window (expanded: {expanded})"
+        );
     }
+}
+
+#[test]
+fn one_matter_leads_and_its_alternative_is_one_line() {
+    let mut app = Harness::boot_tall(true);
+    assert!(app.exists("matter-rebalance"));
+    assert!(!app.exists("matter-cash-place"));
+    assert!(!app.exists("matter-sign-cash-place"));
+    assert!(app.has_text("Or instead: Put the excess cash to work"));
+
+    app.click("matter-show-cash-place");
+    assert!(app.exists("matter-cash-place"));
+    assert!(app.exists("matter-alternative-rebalance"));
+    assert!(!app.exists("matter-rebalance"));
+
+    hold(&mut app, "matter-sign-cash-place", 1.2);
+    let ledger = &app.rt.state.matters.ledger;
+    assert_eq!(ledger.entries.len(), 1, "one decision recorded");
+    assert_eq!(ledger.entries[0].id, "cash-place");
 }
 
 #[test]
@@ -4828,6 +4846,7 @@ fn an_unreadable_ledger_is_reported_and_survives_a_decision() {
     assert!(app.rt.state.matters.ledger.entries.is_empty());
     assert!(app.has_text("Nothing was written."));
 
+    app.click("matter-show-cash-place");
     app.click("matter-postpone-cash-place");
     assert_eq!(fs::read_to_string(&path).unwrap(), "{ not a ledger");
     assert!(app.rt.state.matters.ledger.entries.is_empty());
