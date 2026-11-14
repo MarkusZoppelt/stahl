@@ -791,20 +791,23 @@ fn page_column(
         None => scroller,
     };
     col().key("main").w_full().h_full().min_h(0.0).child(
+        // A wide window keeps the page at its reading width and splits what's left on both sides.
         scroller.child(
-            col()
-                .key(key)
-                .w_full()
-                .max_w(1240.0)
-                .px(margin)
-                .pt(20.0)
-                .pb(40.0)
-                .gap(24.0)
-                .transition(ui::page_arrive(travel(s), s.compact))
-                .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
-                .child(heading)
-                .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
-                .child(content),
+            col().w_full().items_center().child(
+                col()
+                    .key(key)
+                    .w_full()
+                    .max_w(1240.0)
+                    .px(margin)
+                    .pt(20.0)
+                    .pb(40.0)
+                    .gap(24.0)
+                    .transition(ui::page_arrive(travel(s), s.compact))
+                    .children(s.error.as_ref().map(|error| ui::danger(error.clone(), t)))
+                    .child(heading)
+                    .children(about.map(|about| ui::caption(about, t).key("page-about").wrap()))
+                    .child(content),
+            ),
         ),
     )
 }
