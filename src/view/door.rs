@@ -1,19 +1,15 @@
-//! The vault door as a living mark: still at rest, its dial turns once when prices land, it
-//! carries a single mark when something needs attention, and when a portfolio opens from the
-//! welcome screen it travels to the mark's place and shrinks to it, the dial turning once as it
-//! lands. Nothing covers the page.
+//! The vault door as a living mark: still at rest, its tumblers turn once when prices land, it
+//! carries a single mark when something needs attention, and a portfolio opens through it, with
+//! the landing page's sequence played over the page. Nothing loops while the app is idle.
 //!
-//! It is built from the shader-lit picture of the door (`ui::door`) and Rune's own transforms:
-//! the dial is the same picture clipped to the dial's disc and turned on a spring, so at rest it
-//! draws exactly the icon, and nothing animates while the app is idle. The welcome door and the
-//! mark share one matched id, so the flight is the same element moving between the two places.
+//! A window with a compositor draws the door with the shader (`crate::fx`); the picture
+//! (`ui::door`) and its turned dial stand in for tests, which never draw, and for iOS.
 
 use std::f32::consts::TAU;
 
-use portfolio_rs::mcp::dto::Severity;
 use rune::{El, Spring, Transition, el};
 
-use crate::{state::State, theme::Theme};
+use crate::{agenda::Weight, state::State, theme::Theme};
 
 use super::ui;
 
@@ -24,24 +20,20 @@ const DIAL: f32 = 0.7969;
 /// A heavy dial: it takes its time and settles with a small give, as steel would.
 pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
 
-/// The flight from the welcome door to the mark: long enough to read as one object travelling,
-/// settling without a bounce, as something heavy would.
-pub const DOOR_LAND: Spring = Spring::new(0.9, 0.0);
-
-/// How many things need the owner's attention, as the Overview's "Needs attention" list counts
-/// them: warnings and critical findings, not information.
+/// How many things need the owner's attention: what the Overview's agenda lists, apart from its
+/// notices. The door and the agenda read the same list, so they never disagree.
 pub fn attention(s: &State) -> usize {
-    s.findings
+    s.agenda()
         .iter()
-        .filter(|finding| !matches!(finding.severity, Severity::Info))
+        .filter(|item| item.weight != Weight::Notice)
         .count()
 }
 
 /// Whether one of the things needing attention is a failure rather than a warning.
 fn attention_is_critical(s: &State) -> bool {
-    s.findings
+    s.agenda()
         .iter()
-        .any(|finding| matches!(finding.severity, Severity::Critical))
+        .any(|item| matches!(item.weight, Weight::Total | Weight::Critical))
 }
 
 /// The angle the dial rests at: one full turn per price refresh and per portfolio opened, so
@@ -65,27 +57,15 @@ pub fn describe(count: usize) -> String {
     }
 }
 
-/// The living door at `size`. `place` keeps the dial's key apart where two doors are on screen.
+/// The magic of the living door at `size`: either the shader's slot, or the picture with its
+/// turned dial for a window without a compositor (tests, which never draw, and iOS).
+/// `place` keeps the dial's key apart where two doors are on screen.
 pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
     let count = if s.has_portfolio() { attention(s) } else { 0 };
-    let dial = size * DIAL;
-    let inset = (size - dial) / 2.0;
     let mut door = el()
         .key(format!("door-{place}"))
         .size(size, size)
-        .child(ui::door(size))
-        .child(
-            // The dial: the same picture, clipped to the dial's disc, so at rest it is invisible.
-            el().key(format!("door-dial-{place}"))
-                .absolute(inset, inset)
-                .size(dial, dial)
-                .radius(dial / 2.0)
-                .clip_rounded(dial / 2.0)
-                .a11y_hidden()
-                .rotate(dial_angle(dial_turns(s)))
-                .rotate_motion(DIAL_TURN)
-                .child(ui::door(size).absolute(-inset, -inset)),
-        );
+        .child(body(s, size, place));
     if count > 0 {
         // One mark on the dial at twelve o'clock, where a combination is read.
         let color = if attention_is_critical(s) {
@@ -110,10 +90,39 @@ pub fn vault(s: &State, t: &Theme, size: f32, place: &str) -> El {
         .label(format!("Stahl Capital. {}", describe(count)))
 }
 
-/// The large door on the welcome screen. It says where it is, so that opening a portfolio can fly
-/// it from here to the mark.
+/// What the door is drawn with: the shader, or the picture and its turned dial.
+fn body(s: &State, size: f32, place: &str) -> El {
+    if s.shaders {
+        // The welcome screen's door is the large door; the mark has its own light and its own
+        // tumblers.
+        if place == "welcome" {
+            crate::fx::door(size, dial_turns(s))
+        } else {
+            crate::fx::mark(size, dial_turns(s))
+        }
+    } else {
+        let dial = size * DIAL;
+        let inset = (size - dial) / 2.0;
+        el().size(size, size).child(ui::door(size)).child(
+            // The dial: the same picture, clipped to the dial's disc, so at rest it is
+            // invisible.
+            el().key(format!("door-dial-{place}"))
+                .absolute(inset, inset)
+                .size(dial, dial)
+                .radius(dial / 2.0)
+                .clip_rounded(dial / 2.0)
+                .a11y_hidden()
+                .rotate(dial_angle(dial_turns(s)))
+                .rotate_motion(DIAL_TURN)
+                .child(ui::door(size).absolute(-inset, -inset)),
+        )
+    }
+}
+
+/// The large door on the welcome screen. It says where it is, so the opening can start from
+/// there when a portfolio opens.
 pub fn welcome(s: &State, t: &Theme, size: f32) -> El {
-    // It leaves at once: the flying door takes its place in the same frame.
+    // It leaves at once: the opening's door takes its place in the same frame.
     vault(s, t, size, "welcome")
         .transition(Transition::none())
         .on_layout(|s: &mut State, rect| {
@@ -123,58 +132,25 @@ pub fn welcome(s: &State, t: &Theme, size: f32) -> El {
         })
 }
 
-/// The mark's place: in the sidebar's header, or the phone's top bar. It holds the mark, except
-/// while the welcome door is flying in to take its place.
+/// The mark's place: in the sidebar's header, or the phone's top bar.
 pub fn mark(s: &State, t: &Theme, size: f32, place: &str) -> El {
-    el().key(format!("door-slot-{place}"))
-        .size(size, size)
-        .on_layout(|s: &mut State, rect| {
-            if s.mark_door != Some(rect) {
-                s.mark_door = Some(rect);
-            }
-        })
-        .children(
-            s.door_flight
-                .is_none()
-                .then(|| vault(s, t, size, place).transition(Transition::none())),
-        )
+    vault(s, t, size, place).transition(Transition::none())
 }
 
-/// The welcome door on its way to the mark, over everything: it starts where the welcome door
-/// was, at its size, and springs to the mark's place and size, its dial turning as it lands. It
-/// is the large door drawn scaled down, so it stays sharp all the way. When it has landed and the
-/// dial has settled, the mark takes its place, at the same angle, and nothing jumps. Nothing
-/// covers the page. Under reduced motion it lands at once.
-pub fn flight(s: &State, t: &Theme) -> Option<El> {
-    s.door_flight?;
-    let from = s.welcome_door?;
-    let size = from[2];
-    // Drawn first exactly where the welcome door was; then, released, it springs to the mark.
-    let (at, scale) = match s.mark_door.filter(|_| s.door_released) {
-        Some(to) => (
-            [
-                to[0] + to[2] / 2.0 - size / 2.0,
-                to[1] + to[3] / 2.0 - size / 2.0,
-            ],
-            to[2] / size,
-        ),
-        None => ([from[0], from[1]], 1.0),
-    };
-    let door = vault(s, t, size, "flying")
-        .absolute(at[0], at[1])
-        .scale(scale)
-        .motion(DOOR_LAND)
-        .scale_motion(DOOR_LAND)
-        .transition(Transition::none());
-    Some(
-        el().key("door-flight-layer")
-            .absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-            .transition(Transition::none())
-            .a11y_hidden()
-            .child(door),
-    )
+/// The door opening onto a portfolio: one full-window slot over the page, which the compositor
+/// paints with the landing page's sequence. Nothing covers the page for long: the halves part, and
+/// the page is there, laid out, underneath. Under reduced motion there is no sequence at all.
+pub fn opening(s: &State) -> Option<El> {
+    // Without a compositor there is no door to open: tests never draw, and iOS keeps the picture.
+    if !s.shaders {
+        return None;
+    }
+    let opening = s.opening?;
+    Some(crate::fx::opening(
+        opening.started,
+        opening.center,
+        opening.radius,
+    ))
 }
 
 #[cfg(test)]

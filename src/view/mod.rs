@@ -115,7 +115,7 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
     } else {
         shell(s, &t, cx, &mut layer)
     };
-    layer.extend(door::flight(s, &t));
+    layer.extend(door::opening(s));
     overlays::build(s, &t, &mut layer);
 
     let body = body

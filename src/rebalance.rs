@@ -1,9 +1,9 @@
 //! What-if allocation, with no trades executed.
 //!
-//! A plan is a split of a fixed total across asset classes. Dragging a boundary
-//! moves money between the two classes it separates. New money is placed by
-//! buying only, a withdrawal by selling only, each as close to the policy
-//! targets as that constraint allows.
+//! A plan is a split of a fixed total across asset classes. A blend moves every class a
+//! fraction of the way to its target; setting one class by hand leaves the difference on
+//! cash. New money is placed by buying only, a withdrawal by selling only, each as close to
+//! the policy targets as that constraint allows. Every one of them keeps the total.
 
 /// Half-width used when a target has no tolerance of its own, as the simulator does.
 pub const DEFAULT_TOLERANCE: f64 = 5.0;
@@ -118,15 +118,6 @@ impl PlaceError {
     }
 }
 
-/// The result of dragging one boundary, including a magnet hold if it snapped.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Drag {
-    pub values: Vec<f64>,
-    /// The left class's value while a magnet is holding the boundary, so the caller can
-    /// keep holding until the pointer leaves.
-    pub held: Option<f64>,
-}
-
 fn finite(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
 }
@@ -137,39 +128,6 @@ fn finite_opt(value: f64) -> Option<f64> {
 
 fn total_of(classes: &[Class]) -> f64 {
     classes.iter().map(Class::held).sum()
-}
-
-/// No class goes below this. Cash, in particular, cannot go below zero.
-pub fn floor_of(_class: &Class) -> f64 {
-    0.0
-}
-
-fn floors(classes: &[Class]) -> Vec<f64> {
-    classes.iter().map(floor_of).collect()
-}
-
-/// Move the boundary between class `index` and the next so the left class becomes `want`,
-/// clamped so neither side goes below its floor. Every other class stays. The total stays.
-pub fn move_boundary(values: &[f64], floors: &[f64], index: usize, want: f64) -> Vec<f64> {
-    let mut out: Vec<f64> = values
-        .iter()
-        .copied()
-        .map(finite)
-        .map(|value| value.max(0.0))
-        .collect();
-    let Some(right) = index.checked_add(1).filter(|right| *right < out.len()) else {
-        return out;
-    };
-    let pair = out[index] + out[right];
-    let floor_l = floors.get(index).copied().unwrap_or(0.0).max(0.0);
-    let floor_r = floors.get(right).copied().unwrap_or(0.0).max(0.0);
-    if floor_l + floor_r > pair {
-        return out;
-    }
-    let left = finite(want).clamp(floor_l, pair - floor_r);
-    out[index] = left;
-    out[right] = pair - left;
-    out
 }
 
 /// Whether `value` is inside the class's tolerance band, at `total`.
@@ -184,122 +142,90 @@ pub fn inside_band(class: &Class, value: f64, total: f64) -> Option<bool> {
     Some((share - target).abs() <= band + 1e-6)
 }
 
-/// Where each boundary sits when every class is on target, as a fraction of the bar.
-///
-/// Boundary `i` follows class `i`. Targets are scaled by their sum, as [`full`] scales
-/// them, and a class with no target ends up at zero, so these are exactly the boundaries
-/// a full rebalance lands on. `None` when no class has a target.
-pub fn target_boundaries(classes: &[Class]) -> Option<Vec<f64>> {
-    let sum: f64 = classes.iter().filter_map(|class| class.target).sum();
-    if sum <= 0.0 {
-        return None;
-    }
-    let mut at = 0.0;
-    Some(
-        classes
-            .iter()
-            .take(classes.len().saturating_sub(1))
-            .map(|class| {
-                at += class.target.unwrap_or(0.0).max(0.0) / sum;
-                at.min(1.0)
-            })
-            .collect(),
-    )
-}
-
-/// The left-class value that puts boundary `index` on its marked target, if moving this
-/// boundary alone can reach it.
-pub fn snap_points(classes: &[Class], values: &[f64], index: usize, total: f64) -> Vec<f64> {
-    let Some(right) = index
-        .checked_add(1)
-        .filter(|right| *right < classes.len() && *right < values.len())
-    else {
-        return Vec::new();
-    };
-    if total <= 0.0 {
-        return Vec::new();
-    }
-    let Some(at) = target_boundaries(classes).and_then(|marks| marks.get(index).copied()) else {
-        return Vec::new();
-    };
-    let before: f64 = values[..index]
+/// Where each class sits when every target is met, in money. The total doesn't change: the
+/// classes with a target share out what the classes without one leave. `None` of them all
+/// leaves the money where it is.
+pub fn at_targets(classes: &[Class]) -> Vec<f64> {
+    let total = total_of(classes);
+    let held: f64 = classes
         .iter()
-        .copied()
-        .map(finite)
-        .map(|value| value.max(0.0))
+        .filter(|class| class.target.is_none())
+        .map(Class::held)
         .sum();
-    let pair = finite(values[index]).max(0.0) + finite(values[right]).max(0.0);
-    let want = at * total - before;
-    let (floor_l, floor_r) = (floor_of(&classes[index]), floor_of(&classes[right]));
-    // A hair of slack, so a boundary already on its mark counts as reachable.
-    if want >= floor_l - 1e-9 && want <= pair - floor_r + 1e-9 {
-        vec![want.clamp(floor_l, pair - floor_r)]
-    } else {
-        Vec::new()
-    }
-}
-
-/// The nearer snap point, when `want` is within `engage_share` of one.
-pub fn nearest_snap(want: f64, points: &[f64], total: f64, engage_share: f64) -> Option<f64> {
-    if total <= 0.0 || engage_share < 0.0 {
-        return None;
-    }
-    let engage = engage_share * total;
-    points
+    let named: f64 = classes.iter().filter_map(|class| class.target).sum();
+    let budget = (total - held).max(0.0);
+    classes
         .iter()
-        .copied()
-        .filter(|point| (want - point).abs() <= engage)
-        .min_by(|a, b| {
-            (want - a)
-                .abs()
-                .partial_cmp(&(want - b).abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+        .map(|class| match class.target {
+            Some(target) if named > 0.0 => target.max(0.0) / named * budget,
+            _ => class.held(),
         })
+        .collect()
 }
 
-/// Drag the boundary at `index` toward `want` for the left class.
+/// A fraction of the way from what each class holds to its target. `0` is the portfolio as
+/// it is, `1` is every target met. A class with no target stays where it is. The total never
+/// changes.
+pub fn blend(classes: &[Class], fraction: f64) -> Plan {
+    let fraction = finite(fraction).clamp(0.0, 1.0);
+    let to = at_targets(classes);
+    let values = classes
+        .iter()
+        .enumerate()
+        .map(|(index, class)| {
+            let held = class.held();
+            match class.target {
+                Some(_) => held + (to[index] - held) * fraction,
+                None => held,
+            }
+        })
+        .collect();
+    plan(classes, values, 0.0)
+}
+
+/// Set one class to `want`, with cash taking up the difference, and the total unchanged.
 ///
-/// `held` is the snap point from the previous move. It keeps holding until `want` is
-/// further than `release_share` away, so the boundary doesn't flicker at the edge.
-pub fn drag(
-    classes: &[Class],
-    values: &[f64],
-    index: usize,
-    want: f64,
-    engage_share: f64,
-    held: Option<f64>,
-    release_share: f64,
-) -> Drag {
-    let total = values
+/// A class can't go below zero and neither can cash, so it rises only as far as the cash
+/// there is. Without a cash class, or when cash is the class being set, the others give up or
+/// take up the difference in proportion to what they hold.
+pub fn set_class(classes: &[Class], values: &[f64], index: usize, want: f64) -> Vec<f64> {
+    let mut out: Vec<f64> = values
         .iter()
         .copied()
-        .map(finite)
-        .map(|value| value.max(0.0))
-        .sum();
-    let floors = floors(classes);
-    let clamped = move_boundary(values, &floors, index, want);
-    let want = clamped.get(index).copied().unwrap_or(want);
-    let release = release_share.max(engage_share) * total;
-    if let Some(held) = held
-        && total > 0.0
-        && (want - held).abs() <= release
-    {
-        return Drag {
-            values: move_boundary(values, &floors, index, held),
-            held: Some(held),
-        };
+        .map(|value| finite(value).max(0.0))
+        .collect();
+    if out.len() != classes.len() || index >= out.len() {
+        return out;
     }
-    let points = snap_points(classes, values, index, total);
-    if let Some(point) = nearest_snap(want, &points, total, engage_share) {
-        return Drag {
-            values: move_boundary(values, &floors, index, point),
-            held: Some(point),
-        };
+    let total: f64 = out.iter().sum();
+    let held = out[index];
+    let want = finite(want).clamp(0.0, total);
+    let cash = classes
+        .iter()
+        .position(|class| class.cash)
+        .filter(|cash| *cash != index);
+    match cash {
+        Some(cash) => {
+            // The class can only rise as far as the cash that can pay for it.
+            let want = want.min(held + out[cash]);
+            out[cash] += held - want;
+            out[index] = want;
+        }
+        None => {
+            let others = total - held;
+            if others <= 0.0 || (want - held).abs() < 1e-12 {
+                return out;
+            }
+            let keep = ((total - want) / others).max(0.0);
+            for (at, value) in out.iter_mut().enumerate() {
+                if at != index {
+                    *value *= keep;
+                }
+            }
+            out[index] = want;
+        }
     }
-    Drag {
-        values: clamped,
-        held: None,
-    }
+    out
 }
 
 fn trades(classes: &[Class], values: &[f64], total: f64) -> Vec<Trade> {
@@ -352,55 +278,6 @@ fn plan(classes: &[Class], values: Vec<f64>, external: f64) -> Plan {
 /// The portfolio as it is: no trades.
 pub fn today(classes: &[Class]) -> Plan {
     plan(classes, classes.iter().map(Class::held).collect(), 0.0)
-}
-
-/// Every class with a target goes to that target. A class with none is sold.
-/// Targets that don't sum to 100 are scaled so the result still sums to the portfolio.
-pub fn full(classes: &[Class]) -> Plan {
-    let total = total_of(classes);
-    let target_sum: f64 = classes.iter().filter_map(|class| class.target).sum();
-    let values = if total <= 0.0 || target_sum <= 0.0 {
-        classes.iter().map(Class::held).collect()
-    } else {
-        classes
-            .iter()
-            .map(|class| class.target.unwrap_or(0.0) / target_sum * total)
-            .collect()
-    };
-    plan(classes, values, 0.0)
-}
-
-/// Classes outside their band move halfway to the target. The rest stay.
-/// The result is scaled so it still sums to the portfolio.
-pub fn conservative(classes: &[Class]) -> Plan {
-    let total = total_of(classes);
-    if total <= 0.0 {
-        return plan(classes, classes.iter().map(|_| 0.0).collect(), 0.0);
-    }
-    let mut values: Vec<f64> = classes
-        .iter()
-        .map(|class| {
-            let actual = class.held() / total * 100.0;
-            let Some(target) = class.target else {
-                return class.held();
-            };
-            let drift = actual - target;
-            let next = if drift.abs() > class.band().unwrap_or(DEFAULT_TOLERANCE) {
-                actual - drift / 2.0
-            } else {
-                actual
-            };
-            next / 100.0 * total
-        })
-        .collect();
-    let sum: f64 = values.iter().sum();
-    if sum > 0.0 {
-        let scale = total / sum;
-        for value in &mut values {
-            *value *= scale;
-        }
-    }
-    plan(classes, values, 0.0)
 }
 
 /// Split `amount` of new money by buying only, or withdraw it by selling only.
@@ -593,67 +470,116 @@ mod tests {
     }
 
     #[test]
-    fn a_drag_moves_only_the_two_classes_and_keeps_the_total() {
+    fn a_blend_moves_every_class_the_same_share_of_the_way_and_keeps_the_total() {
         let classes = book();
-        let start: Vec<f64> = classes.iter().map(Class::held).collect();
-        // Crypto and Cash share 50. Dragging their boundary can't touch the others.
-        let moved = move_boundary(&start, &floors(&classes), 3, 40.0);
-        values_approx(&moved, &[40.0, 5.0, 5.0, 40.0, 10.0]);
-        approx(moved.iter().sum(), 100.0);
+        let plan = blend(&classes, 0.5);
+        // Stocks 40 -> 50 and Crypto 25 -> 10, halfway; Gold is already on target.
+        values_approx(&plan.values, &[45.0, 10.0, 5.0, 17.5, 22.5]);
+        approx(plan.total, 100.0);
+        values_approx(&blend(&classes, 0.0).values, &[40.0, 5.0, 5.0, 25.0, 25.0]);
+        values_approx(&blend(&classes, 1.0).values, &[50.0, 15.0, 5.0, 10.0, 20.0]);
+        // Out of range is the nearest end, not a different plan.
+        values_approx(&blend(&classes, -3.0).values, &[40.0, 5.0, 5.0, 25.0, 25.0]);
+        values_approx(&blend(&classes, 9.0).values, &[50.0, 15.0, 5.0, 10.0, 20.0]);
     }
 
     #[test]
-    fn a_drag_cannot_make_a_class_or_cash_negative() {
+    fn a_blend_leaves_a_class_without_a_target_where_it_is() {
+        let mut classes = drifted();
+        classes.push(Class::new("Art", 20.0));
+        let plan = blend(&classes, 1.0);
+        approx(plan.values[2], 20.0);
+        approx(plan.total, 120.0);
+        // The two that have a target share what Art leaves: 100 of the 120.
+        values_approx(&plan.values[..2], &[50.0, 50.0]);
+        assert!(
+            plan.trades
+                .iter()
+                .all(|trade| trade.asset_class != "Art" || trade.amount < 1e-9)
+        );
+    }
+
+    #[test]
+    fn a_portfolio_already_on_its_targets_has_nothing_to_trade() {
+        let mut classes = book();
+        for (class, value) in classes.iter_mut().zip([50.0, 15.0, 5.0, 10.0, 20.0]) {
+            class.value = value;
+        }
+        assert!(blend(&classes, 1.0).trades.is_empty());
+        assert_eq!(blend(&[Class::new("Art", 10.0)], 0.5).values, vec![10.0]);
+    }
+
+    #[test]
+    fn setting_a_class_takes_the_difference_from_cash_and_keeps_the_total() {
         let classes = book();
         let start: Vec<f64> = classes.iter().map(Class::held).collect();
-        let drained = move_boundary(&start, &floors(&classes), 3, 1_000.0);
-        assert!(drained.iter().all(|value| *value >= 0.0));
-        approx(drained[3] + drained[4], 50.0);
-        approx(drained[4], 0.0);
-        let emptied = move_boundary(&start, &floors(&classes), 3, -40.0);
+        // Stocks 40 -> 50: the 10 comes out of Cash's 25.
+        let moved = set_class(&classes, &start, 0, 50.0);
+        values_approx(&moved, &[50.0, 5.0, 5.0, 25.0, 15.0]);
+        approx(moved.iter().sum(), 100.0);
+        // And the other way: cash takes the 5 that Crypto gives up.
+        let back = set_class(&classes, &start, 3, 20.0);
+        values_approx(&back, &[40.0, 5.0, 5.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn setting_a_class_stops_where_cash_runs_out_and_never_goes_negative() {
+        let classes = book();
+        let start: Vec<f64> = classes.iter().map(Class::held).collect();
+        // 25 of cash is all the Crypto there can be on top of the 25 it holds.
+        values_approx(
+            &set_class(&classes, &start, 3, 80.0),
+            &[40.0, 5.0, 5.0, 50.0, 0.0],
+        );
+        assert!(set_class(&classes, &start, 0, 1_000.0)[4] >= 0.0);
+        let emptied = set_class(&classes, &start, 3, -5.0);
         approx(emptied[3], 0.0);
         approx(emptied[4], 50.0);
-        assert!(classes[4].cash);
+        assert!(emptied.iter().all(|value| *value >= 0.0));
     }
 
     #[test]
-    fn a_boundary_snaps_to_its_marked_target_and_holds() {
-        let classes = drifted();
-        let start = [80.0, 20.0];
-        let near = drag(&classes, &start, 0, 52.0, 0.03, None, 0.05);
-        values_approx(&near.values, &[50.0, 50.0]);
-        assert_eq!(near.held, Some(50.0));
-        // Still holding, a little past the engage distance.
-        let held = drag(&classes, &start, 0, 54.0, 0.03, near.held, 0.05);
-        assert_eq!(held.held, Some(50.0));
-        // Far enough, and it lets go.
-        let released = drag(&classes, &start, 0, 70.0, 0.03, near.held, 0.05);
-        values_approx(&released.values, &[70.0, 30.0]);
-        assert_eq!(released.held, None);
-    }
-
-    #[test]
-    fn the_marks_are_where_a_full_rebalance_lands() {
-        let classes = book();
-        let marks = target_boundaries(&classes).unwrap();
-        values_approx(&marks, &[0.5, 0.65, 0.7, 0.8]);
-        let plan = full(&classes);
-        let mut at = 0.0;
-        for (index, mark) in marks.iter().enumerate() {
-            at += plan.values[index] / plan.total;
-            approx(at, *mark);
-        }
-        assert_eq!(target_boundaries(&[Class::new("Art", 1.0)]), None);
-    }
-
-    #[test]
-    fn a_snap_point_puts_the_boundary_on_its_mark_or_is_unreachable() {
-        let classes = book();
+    fn setting_a_class_with_no_cash_class_moves_the_others_in_proportion() {
+        let classes = vec![
+            Class::new("Stocks", 60.0).target(50.0),
+            Class::new("Bonds", 20.0).target(30.0),
+            Class::new("Gold", 20.0).target(20.0),
+        ];
         let start: Vec<f64> = classes.iter().map(Class::held).collect();
-        // Boundary 3 (Crypto | Cash) marks 80. Before it: 40 + 5 + 5 = 50, so Crypto 30.
-        values_approx(&snap_points(&classes, &start, 3, 100.0), &[30.0]);
-        // Boundary 0 marks 50, but Stocks and Bonds share only 45, so it can't get there.
-        assert!(snap_points(&classes, &start, 0, 100.0).is_empty());
+        let moved = set_class(&classes, &start, 0, 40.0);
+        // The 20 Stocks gives up is shared by Bonds and Gold as 60:40 of what they hold.
+        values_approx(&moved, &[40.0, 30.0, 30.0]);
+        approx(moved.iter().sum(), 100.0);
+        // Setting cash itself is the same as having no cash: the others take it up.
+        let book = book();
+        let start: Vec<f64> = book.iter().map(Class::held).collect();
+        let cash = set_class(&book, &start, 4, 10.0);
+        approx(cash.iter().sum(), 100.0);
+        assert!((cash[4] - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn setting_a_class_ignores_a_mismatched_book() {
+        let classes = book();
+        let short = vec![1.0, 2.0];
+        assert_eq!(set_class(&classes, &short, 0, 5.0), short);
+        assert_eq!(
+            set_class(&classes, &[1.0; 5], 9, 5.0),
+            vec![1.0; 5],
+            "an index past the end changes nothing"
+        );
+    }
+
+    #[test]
+    fn the_targets_are_where_a_full_rebalance_lands() {
+        let classes = book();
+        values_approx(&at_targets(&classes), &[50.0, 15.0, 5.0, 10.0, 20.0]);
+        let plan = blend(&classes, 1.0);
+        values_approx(&plan.values, &at_targets(&classes));
+        // A class with no target keeps what it holds, and the rest share what is left.
+        let mut with_art = drifted();
+        with_art.push(Class::new("Art", 20.0));
+        values_approx(&at_targets(&with_art), &[50.0, 50.0, 20.0]);
     }
 
     #[test]
@@ -791,11 +717,8 @@ mod tests {
     }
 
     #[test]
-    fn a_full_rebalance_lands_on_target_and_keeps_the_total() {
-        let plan = full(&book());
-        values_approx(&plan.values, &[50.0, 15.0, 5.0, 10.0, 20.0]);
-        approx(plan.total, 100.0);
-        approx(plan.external, 0.0);
+    fn a_full_blend_buys_and_sells_the_same_amount() {
+        let plan = blend(&book(), 1.0);
         let bought: f64 = plan
             .trades
             .iter()
@@ -808,33 +731,8 @@ mod tests {
             .filter(|trade| trade.action == Action::Reduce)
             .map(|trade| trade.amount)
             .sum();
-        approx(bought, sold);
-    }
-
-    #[test]
-    fn a_full_rebalance_sells_a_class_with_no_target() {
-        let mut classes = drifted();
-        classes.push(Class::new("Art", 20.0));
-        let plan = full(&classes);
-        values_approx(&plan.values, &[60.0, 60.0, 0.0]);
-        assert!(
-            plan.trades
-                .iter()
-                .any(|trade| { trade.asset_class == "Art" && trade.action == Action::Reduce })
-        );
-    }
-
-    #[test]
-    fn a_conservative_plan_moves_only_what_is_outside_its_band() {
-        let plan = conservative(&book());
-        // Gold is inside ±2 of 5, so it barely moves (only the scaling that keeps the total).
-        assert!((plan.values[2] - 5.0).abs() < 0.2);
-        // Stocks was 10 points under, so it moves toward 50 but not all the way.
-        assert!(plan.values[0] > 40.0 && plan.values[0] < 50.0);
-        // Crypto was 15 points over.
-        assert!(plan.values[3] < 25.0 && plan.values[3] > 10.0);
-        approx(plan.total, 100.0);
-        approx(plan.external, 0.0);
+        approx(bought, 20.0);
+        approx(sold, 20.0);
     }
 
     #[test]
@@ -842,7 +740,7 @@ mod tests {
         let mut classes = drifted();
         classes[0].value = 50.004;
         classes[1].value = 49.996;
-        let plan = full(&classes);
+        let plan = blend(&classes, 1.0);
         assert!(plan.trades.is_empty());
         let same = place(&drifted(), 0.0).unwrap();
         assert!(same.trades.is_empty());
@@ -851,7 +749,7 @@ mod tests {
 
     #[test]
     fn the_markdown_names_the_plan_and_says_it_never_trades() {
-        let plan = full(&drifted());
+        let plan = blend(&drifted(), 1.0);
         let text = to_markdown(
             &plan,
             &drifted(),

@@ -15,7 +15,7 @@ use portfolio_rs::{
 };
 use stahl::{
     app, demo,
-    state::{Confirm, FolderPrompt, Page, PendingOpen, RebalanceOrigin, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
     statement::Since,
     update::Installation,
 };
@@ -178,19 +178,33 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
-            ("rebalance-dragged", |s| {
+            ("rebalance-partway", |s| {
                 scene(s, Page::Rebalance);
-                // Ten points out of Crypto, into Cash.
-                stahl::view::rebalance::nudge(s, 3, -20);
+                stahl::view::rebalance::set_blend(s, 0.6);
             }),
-            ("rebalance-full", |s| {
+            ("rebalance-partway-light", |s| {
                 scene(s, Page::Rebalance);
-                s.rebalance.origin = RebalanceOrigin::Full;
+                stahl::view::rebalance::set_blend(s, 0.6);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("rebalance-target", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 1.0);
+            }),
+            ("rebalance-adjusted", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 0.6);
+                stahl::view::rebalance::set_share(s, 0, 55.0);
             }),
             ("rebalance-invest", |s| {
                 scene(s, Page::Rebalance);
-                s.rebalance.amount.replace_text("2000");
-                s.rebalance.origin = RebalanceOrigin::Flow(2000.0);
+                stahl::view::rebalance::set_amount(s, 2000.0);
+            }),
+            ("rebalance-private", |s| {
+                scene(s, Page::Rebalance);
+                stahl::view::rebalance::set_blend(s, 0.6);
+                s.privacy = true;
             }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {
@@ -225,6 +239,11 @@ fn main() {
                 s.open_form(Some(0));
             }),
             ("welcome", first_run),
+            ("welcome-light", |s| {
+                first_run(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("new-workspace", |s| {
                 first_run(s);
                 s.open_new_workspace();
@@ -368,11 +387,16 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
-            // Launched into a portfolio, the door's dial turns once, a frame after it is painted
-            // at rest, so the frames from 0.05 s to 1.2 s show it turning.
-            ("door-turn", |s| scene(s, Page::Overview)),
-            // The welcome door flies to the mark. Held on the welcome screen until 0.08s, after
-            // the large door has been painted, then the shell mounts and the door travels.
+            // Launched into a portfolio: the opening has already played, and a refresh turns the
+            // mark's tumblers once, so the frames from 0.05 s to 1.2 s show them turning.
+            ("door-turn", |s| {
+                scene(s, Page::Overview);
+                s.skip_opening();
+                s.price_updates += 1;
+            }),
+            // The welcome door opens onto the portfolio. Held on the welcome screen until 0.08 s,
+            // after the large door has been painted, then the shell mounts and the door opens
+            // from where the welcome door was.
             ("door-open", |s| {
                 scene(s, Page::Overview);
                 s.hold_welcome_until = Some(0.08);

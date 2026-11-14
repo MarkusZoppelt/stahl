@@ -154,6 +154,8 @@ fn configured(spec: AppSpec<State>, init: impl FnOnce() -> State + 'static) -> A
         // Closing with unsaved changes brings the window back to ask.
         .keep_running()
         .on_close(State::on_window_close)
+        // The vault door, drawn by the shader at its effect slot rather than shown as a picture.
+        .compositor(crate::fx::Gfx::default())
         .on_focus(|s, focused, _| {
             if focused {
                 s.refresh_if_stale();

@@ -73,7 +73,11 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
 /// The door behind the top of a page pulled past its top: it grows into view with the pull, and
 /// spins while the prices it asked for come in.
 fn pull_door(s: &State) -> El {
-    let door = ui::door(28.0);
+    let door = if s.shaders {
+        crate::fx::pull(28.0)
+    } else {
+        ui::door(28.0)
+    };
     let door = if s.pull_refreshing && s.loading {
         door.looping(LoopSpec::rotation(1.2))
     } else {

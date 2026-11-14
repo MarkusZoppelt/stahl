@@ -5,6 +5,7 @@ pub mod app;
 pub mod backend;
 pub mod demo;
 pub mod format;
+pub mod fx;
 pub mod icons;
 pub mod rebalance;
 pub mod state;
