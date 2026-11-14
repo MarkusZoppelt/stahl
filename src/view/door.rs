@@ -23,20 +23,17 @@ pub const NOTCH: f32 = TAU / 24.0;
 /// A heavy dial: it takes its time and settles with a small give, as steel would.
 pub const DIAL_TURN: Spring = Spring::new(1.1, 0.12);
 
-/// How many things need the owner's attention: what the Overview's agenda lists, apart from its
-/// notices. The door and the agenda read the same list, so they never disagree.
+/// How many things need the owner's attention: the cards the Overview draws and its to-dos that
+/// are not notices. The door and the page read the same lists, so they never disagree.
 pub fn attention(s: &State) -> usize {
-    s.agenda()
-        .iter()
-        .filter(|item| item.weight != Weight::Notice)
-        .count()
+    s.attention().len()
 }
 
 /// Whether one of the things needing attention is a failure rather than a warning.
 fn attention_is_critical(s: &State) -> bool {
-    s.agenda()
+    s.attention()
         .iter()
-        .any(|item| matches!(item.weight, Weight::Total | Weight::Critical))
+        .any(|weight| matches!(weight, Weight::Total | Weight::Critical))
 }
 
 /// The angle the dial rests at: one full turn per price refresh and per portfolio opened, so
