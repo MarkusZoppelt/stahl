@@ -55,6 +55,14 @@ fn main() {
         s.navigate(page);
         s.settle();
     }
+    /// Today's move set to `percent`, with the amount it means, for the room's light.
+    fn day(s: &mut State, percent: f64) {
+        if let Some(summary) = s.summary.as_mut() {
+            let before = summary.total_value / (1.0 + percent / 100.0);
+            summary.day_change = summary.total_value - before;
+            summary.day_change_percent = percent;
+        }
+    }
     /// The plate the wall has at its top, if any.
     fn newest_plate(s: &State) -> Option<String> {
         s.records
@@ -95,6 +103,19 @@ fn main() {
         s.settle();
         s.navigate(page);
         s.settle();
+    }
+    /// A page on the lowest day Stahl recorded, as the time strip or the door would leave it.
+    fn past_scene(s: &mut State, page: Page) {
+        scene(s, page);
+        s.skip_opening();
+        let lowest = s
+            .time
+            .days
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total.total_cmp(&b.1.total))
+            .map(|(index, _)| index);
+        s.travel(lowest);
     }
     /// A newer release waiting, as if a check at startup had found it.
     fn update_scene(s: &mut State, installation: Installation, dialog: bool) {
@@ -154,6 +175,28 @@ fn main() {
         s.since = Some(Since::First);
         s.change = None;
         s.history = None;
+    }
+    /// A broker's file from `tests/intake/`, copied beside the open portfolio and imported, as
+    /// dropping it on the window does.
+    fn intake(s: &mut State, name: &str) {
+        let Some(parent) = s
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(s.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+        else {
+            return;
+        };
+        let target = parent.join(name);
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name);
+        if fs::copy(source, &target).is_err() {
+            return;
+        }
+        s.open_intake(&target);
+        s.settle();
     }
     /// A portfolio on its targets, so the agenda has nothing to ask.
     fn on_target(s: &mut State) {
@@ -399,6 +442,27 @@ fn main() {
                 scene(s, Page::Holdings);
                 s.open_form(Some(0));
             }),
+            // A broker's file, read and compared with the positions: what it holds, and one row
+            // per change, each with the file's own line under it.
+            ("intake-review", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+            }),
+            ("intake-review-light", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // A file the app can't read: one plain sentence saying why.
+            ("intake-unreadable", |s| {
+                scene(s, Page::Holdings);
+                intake(s, "statement.pdf");
+            }),
+            ("phone-intake-review", |s| {
+                phone(s, Page::Holdings);
+                intake(s, "de-transactions.csv");
+            }),
             ("welcome", first_run),
             ("welcome-light", |s| {
                 first_run(s);
@@ -636,6 +700,16 @@ fn main() {
                 s.set_theme(ThemeMode::Light);
                 s.settle();
             }),
+            // The room's light on a day that is down, and on one that didn't move: the demo's
+            // prices are fixtures, so the day's move is set on the summary the light reads.
+            ("overview-down-day", |s| {
+                scene(s, Page::Overview);
+                day(s, -0.9);
+            }),
+            ("overview-flat-day", |s| {
+                scene(s, Page::Overview);
+                day(s, 0.0);
+            }),
             // Launched into a portfolio: the opening has already played, and a refresh turns the
             // mark's tumblers once, so the frames from 0.05 s to 1.2 s show them turning.
             ("door-turn", |s| {
@@ -783,11 +857,38 @@ fn main() {
             ("counsel-halves", |s| {
                 ask_scripted(s, "What if crypto halves?")
             }),
+            ("counsel-halves-light", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            // The same answer with the owner holding it on today, and with the table open.
+            ("counsel-halves-now", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.what_if_show(0, 1, true);
+            }),
+            ("counsel-halves-details", |s| {
+                ask_scripted(s, "What if crypto halves?");
+                s.ask.what_if_details(0, 1);
+            }),
+            ("phone-counsel-halves", |s| {
+                s.compact = true;
+                ask_scripted(s, "What if crypto halves?");
+            }),
             ("counsel-money", |s| {
                 ask_scripted(s, "Where should €2,000 go?")
             }),
             ("counsel-allocation", |s| {
                 ask_scripted(s, "Why is my allocation off?")
+            }),
+            // The answer's own slider, dragged most of the way to target.
+            ("counsel-plan-dragged", |s| {
+                ask_scripted(s, "Why is my allocation off?");
+                s.ask.plan_set(0, 3, 0.8);
+            }),
+            ("phone-counsel-plan", |s| {
+                s.compact = true;
+                ask_scripted(s, "Why is my allocation off?");
             }),
             ("counsel-bitcoin", |s| {
                 ask_scripted(s, "How is Bitcoin doing?")
@@ -804,6 +905,18 @@ fn main() {
                 s.ask_advance(10.0);
                 s.navigate(Page::Holdings);
                 s.navigate(Page::Ask);
+            }),
+            // Two answers on one page: the second chart has to measure the room it really has.
+            ("counsel-two", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                ask_answer(s, "What changed this month?", ASK_CHANGE);
+                s.skip_opening();
+            }),
+            // The same, with the second answer arriving for real.
+            ("counsel-two-arrive", |s| {
+                ask_answer(s, "Why is my allocation off?", ASK_ALLOCATION);
+                s.skip_opening();
+                s.ask_question("What changed this month?");
             }),
             ("counsel-span", |s| {
                 ask_answer(s, "When did it move?", ASK_SPAN)
@@ -877,6 +990,33 @@ fn main() {
                 s.ask_question("How much is in crypto?");
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // Time turned back: the whole app on the lowest recorded day.
+            ("past", |s| past_scene(s, Page::Overview)),
+            ("past-light", |s| {
+                past_scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("past-holdings", |s| past_scene(s, Page::Holdings)),
+            ("past-holdings-map", |s| {
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-allocation", |s| past_scene(s, Page::Allocation)),
+            ("past-rebalance", |s| past_scene(s, Page::Rebalance)),
+            ("phone-past", |s| {
+                s.compact = true;
+                past_scene(s, Page::Overview);
+            }),
+            ("phone-past-holdings", |s| {
+                s.compact = true;
+                past_scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("past-private", |s| {
+                past_scene(s, Page::Overview);
+                s.privacy = true;
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

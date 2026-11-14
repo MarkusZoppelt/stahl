@@ -124,7 +124,8 @@ fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
                     .build(k)
                     .key("total-value"),
             )
-            .children(s.shaders.then(|| crate::fx::sheen(1.0, run))),
+            // A recorded day's total is paper, not the live steel: no sheen on it.
+            .children((s.shaders && !s.in_past()).then(|| crate::fx::sheen(1.0, run))),
         )
         .child(
             row()
@@ -144,7 +145,7 @@ fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
                     .value(summary.day_change)
                     .build(k),
                 )
-                .child(ui::muted("today", t)),
+                .child(ui::muted(s.when().word(), t)),
         )
 }
 
@@ -153,14 +154,25 @@ fn hero_figures(s: &State, t: &Theme, room: ui::Room) -> El {
     let Some(summary) = &s.summary else {
         return col();
     };
-    let figures = [
-        ui::stat(
+    // In the past, cost wasn't recorded, so profit isn't known: the distance to today is.
+    let first = match s.today_total().filter(|_| s.in_past()) {
+        Some(today) => ui::stat(
+            "Since then",
+            s.signed_money(today - summary.total_value),
+            Some(t.change(today - summary.total_value)),
+            t,
+        )
+        .help("Today's total less this day's: the market and any money added or taken since"),
+        None => ui::stat(
             "Unrealized PnL",
             s.signed_money(summary.total_pnl),
             Some(t.change(summary.total_pnl)),
             t,
         )
         .help(guide::UNREALIZED_PNL),
+    };
+    let figures = [
+        first,
         ui::stat("Securities", s.money(summary.securities_value), None, t),
         ui::stat("Cash", s.money(summary.cash_value), None, t),
     ];
@@ -284,11 +296,11 @@ fn movers_card(s: &State, t: &Theme) -> El {
         size(b).total_cmp(&size(a))
     });
     ui::ledger(t)
-        .child(ui::title("Top movers today", t))
+        .child(ui::title(format!("Top movers {}", s.when().word()), t))
         .children(
             movers
                 .is_empty()
-                .then(|| ui::muted("No price movements today.", t)),
+                .then(|| ui::muted(format!("No price movements {}.", s.when().word()), t)),
         )
         .child(
             col()
@@ -453,9 +465,10 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .w_full()
         .gap(if narrow { 16.0 } else { 24.0 })
         .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
-        .child(ask::overview_line(s, t, narrow))
+        // Questions and decisions are about today; a past day only shows what was.
+        .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
         .child(hero(s, t, cx, !narrow))
-        .child(ui::entering(overview::agenda(s, t, narrow), 2))
+        .children((!s.in_past()).then(|| ui::entering(overview::agenda(s, t, narrow), 2)))
         .children(narrow.then(|| hero_figures(s, t, room)))
         .child(
             ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })
@@ -510,7 +523,7 @@ const ROOM_FOR_COUNT: f32 = 480.0;
 fn header_cell(
     s: &State,
     key: &'static str,
-    label: &'static str,
+    label: &str,
     sort: SortBy,
     right: bool,
     grow: f32,
@@ -826,9 +839,11 @@ fn sparkline(
     progress: f32,
     t: &Theme,
 ) -> Option<El> {
+    // The lines are the month up to today: not a past day's.
     let values = position.position_id.as_deref().and_then(|id| {
         s.history
             .as_ref()
+            .filter(|_| !s.in_past())
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;
@@ -1042,10 +1057,10 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let rows = holding_rows(s);
     let end = rows.len().saturating_sub(1);
     let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
-    let has_lines = s
-        .history
-        .as_ref()
-        .is_some_and(|history| !history.series.is_empty());
+    let has_lines = !s.in_past()
+        && s.history
+            .as_ref()
+            .is_some_and(|history| !history.series.is_empty());
     let columns = Columns {
         // On a phone the line would push the value into an ellipsis: the map has the lines there.
         lines: has_lines && Columns::for_width(width).pnl,
@@ -1077,6 +1092,12 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .on_press(|s: &mut State| s.open_form(None))
         .build(k)
         .key("add-position");
+    let import = Button::new("Import")
+        .icon(&icons::DOWNLOAD)
+        .help("Compare a file from your broker with these positions")
+        .on_press_tx(|s: &mut State, tx: &mut Tx| s.ask_for_intake(tx))
+        .build(k)
+        .key("import-intake");
     let view = SegmentedControl::new(&["Table", "Map"], Some(usize::from(s.holdings_map)))
         .label("View")
         .fit()
@@ -1103,6 +1124,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .gap(8.0)
                     .child(view)
                     .child(search)
+                    .child(import)
                     .child(add),
             )
     } else {
@@ -1112,21 +1134,26 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .w_full()
                 .gap(8.0)
                 .child(search.grow(1.0).min_w(0.0))
+                .child(import)
                 .child(add),
         )
     };
-    let map = s.holdings_map.then(|| {
-        let measured = cx.layout_size("holdings-map").map(|[width, _]| width);
-        let map_width = measured.unwrap_or((width - 64.0).max(1.0));
-        col()
+    let map =
+        s.holdings_map.then(|| {
+            let measured = cx.layout_size("holdings-map").map(|[width, _]| width);
+            let map_width = measured.unwrap_or((width - 64.0).max(1.0));
+            col()
             .w_full()
             .gap(8.0)
             .child(
                 ui::caption(
-                    if has_lines {
+                    if s.in_past() {
+                        format!("Area is value, and the tint is the change {}.", s.when().word())
+                    } else if has_lines {
                         "Area is value, the tint is today's change, and lines are the past month."
+                            .to_string()
                     } else {
-                        "Area is value, and the tint is today's change."
+                        "Area is value, and the tint is today's change.".to_string()
                     },
                     t,
                 )
@@ -1140,7 +1167,7 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 super::treemap::height(s, cx.layout_size("main")),
                 s.draw_progress(cx.is_reduced_motion()),
             ))
-    });
+        });
     let table = (!s.holdings_map).then(|| {
         ui::card(t)
             .padding(8.0)
@@ -1187,13 +1214,20 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                             .pnl
                             .then(|| header_cell(s, "sort-pnl", "PnL", SortBy::Pnl, true, 1.0, t)),
                     )
-                    .children(
-                        columns.today.then(|| {
-                            header_cell(s, "sort-day", "Today", SortBy::Day, true, 1.0, t)
-                        }),
-                    )
+                    .children(columns.today.then(|| {
+                        header_cell(s, "sort-day", &s.when().title(), SortBy::Day, true, 1.0, t)
+                    }))
                     .children(columns.impact.then(|| {
-                        header_cell(s, "sort-impact", "Of today", SortBy::Impact, true, 1.0, t).help(
+                        header_cell(
+                            s,
+                            "sort-impact",
+                            &s.when().of(),
+                            SortBy::Impact,
+                            true,
+                            1.0,
+                            t,
+                        )
+                        .help(
                             "How many percentage points of the portfolio this holding moved today",
                         )
                     })),
@@ -1322,12 +1356,12 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .child(detail("Invested", s.optional_money(position.invested), t))
                 .child(detail("PnL", pnl, t))
                 .child(detail(
-                    "Today",
+                    s.when().title(),
                     format::optional_percent(position.day_change_percent),
                     t,
                 ))
                 .child(detail(
-                    "Of today",
+                    s.when().of(),
                     day_points(
                         day_amount(position),
                         s.summary.as_ref().map_or(0.0, |summary| {

@@ -97,6 +97,9 @@ impl crate::ask::Model for ScriptedModel {
     }
 }
 
+/// The asset classes the demo's portfolio holds, for a question that names one.
+const CLASSES: [&str; 5] = ["Stocks", "Bonds", "Gold", "Crypto", "Cash"];
+
 /// The answer to `question`, as JSON Lines. Questions are matched on the words a person would
 /// use; anything else gets the demo's own version of "I can't answer that".
 pub fn scripted(question: &str) -> String {
@@ -104,6 +107,18 @@ pub fn scripted(question: &str) -> String {
     let has = |words: &[&str]| words.iter().any(|word| question.contains(word));
     if has(&["half", "halve", "halves", "what if", "fall"]) && has(&["crypto", "bitcoin"]) {
         return SCRIPT_HALVES.to_string();
+    }
+    // Any other what-if: the shock is the question's, the rest is the app's, as with a model.
+    if let Some(shocks) = crate::scenario::asked(&question, CLASSES) {
+        let shock = crate::ask::line(&crate::ask::Block::Scenario { shocks });
+        return [
+            r#"{"block":"say","text":"Here is what that would leave, and what it would do to your plan."}"#
+                .to_string(),
+            shock,
+            r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"}]}"#.to_string(),
+        ]
+        .join("\n")
+            + "\n";
     }
     if has(&["2,000", "2000", "new money", "invest", "where should"]) {
         return SCRIPT_NEW_MONEY.to_string();
@@ -120,9 +135,10 @@ pub fn scripted(question: &str) -> String {
     SCRIPT_ELSE.to_string()
 }
 
-/// A month of small moves, and the one class worth a look.
+/// A month of small moves, and the one class worth a look. The demo's change is a gain, so the
+/// sentence says "up"; a loss says so plainly and drops the joke (see [`crate::ask::builtin`]).
 const SCRIPT_CHANGE: &str = concat!(
-    r#"{"block":"say","text":"Since {since.date}, the total has moved by {since.change}. {since.leader} did most of the work, which will surprise nobody."}"#,
+    r#"{"block":"say","text":"Since {since.date} you are up {since.change}. {since.leader} did most of the work, which will surprise nobody."}"#,
     "\n",
     r#"{"block":"figures","ids":["total","since.change","today.change","cash.value"]}"#,
     "\n",
@@ -136,11 +152,11 @@ const SCRIPT_CHANGE: &str = concat!(
 
 /// A shock, and what it would leave.
 const SCRIPT_HALVES: &str = concat!(
-    r#"{"block":"say","text":"A halving is the kind of day worth planning for. Here is what it would leave, and what a move toward your targets would ask of you."}"#,
+    r#"{"block":"say","text":"If crypto fell by half, here is what would be left, and what it would do to your plan."}"#,
     "\n",
     r#"{"block":"scenario","shocks":[{"class":"Crypto","percent":-50}]}"#,
     "\n",
-    r#"{"block":"say","text":"Nothing needs signing today. The plan is there for when it does."}"#,
+    r#"{"block":"say","text":"It would also, for once, put crypto close to where your policy wants it. An expensive way to rebalance."}"#,
     "\n",
     r#"{"block":"go","steps":[{"label":"Open Rebalance","page":"rebalance"},{"label":"What is my crypto target?","ask":"What is my crypto target?"}]}"#,
     "\n",
@@ -186,7 +202,7 @@ const SCRIPT_BITCOIN: &str = concat!(
 
 /// What the demo says when the question is outside what it was written for.
 const SCRIPT_ELSE: &str = concat!(
-    r#"{"block":"say","text":"That one needs a model. This portfolio can answer what changed, where new money goes, and what a shock would leave. Add a model in Settings; a local one keeps everything on this computer."}"#,
+    r#"{"block":"say","text":"That one needs a model. Stahl can still tell you what changed, where new money would go, and what a shock would leave. Add a model in Settings; a local one keeps everything on this computer."}"#,
     "\n",
     r#"{"block":"figures","ids":["total","today.change"]}"#,
     "\n",

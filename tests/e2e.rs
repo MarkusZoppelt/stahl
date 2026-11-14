@@ -175,6 +175,29 @@ impl Harness {
         self.rt.find(key).is_some()
     }
 
+    /// Click the first visible element whose text is exactly `label`, for a control with no key.
+    fn click_label(&mut self, label: &str) {
+        let (x, y) = self
+            .rt
+            .elements()
+            .into_iter()
+            .find(|element| {
+                element.text.as_deref() == Some(label)
+                    && element.visible[2] > 0.0
+                    && element.visible[3] > 0.0
+            })
+            .map(|element| {
+                let [x, y, width, height] = element.rect;
+                (x + width / 2.0, y + height / 2.0)
+            })
+            .unwrap_or_else(|| panic!("nothing to click labelled {label}"));
+        self.rt.pointer_move(x, y);
+        self.rt.frame(1.0 / 60.0);
+        self.rt.pointer_down(x, y);
+        self.rt.pointer_up(x, y);
+        self.settle();
+    }
+
     fn has_text(&self, wanted: &str) -> bool {
         self.rt.elements().iter().any(|element| {
             element
@@ -341,6 +364,146 @@ fn adding_a_position_is_unsaved_until_saved() {
     assert!(!app.rt.state.dirty);
     assert!(fs::read_to_string(&path).unwrap().contains("Apple"));
     assert!(!app.exists("save"));
+}
+
+/// A broker's file from `tests/intake/`, dropped on the window as the platform hands it over.
+fn dropped(app: &mut Harness, name: &str) -> PathBuf {
+    let path = app.dir.path().join(name);
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/intake")
+            .join(name),
+        &path,
+    )
+    .unwrap();
+    app.rt.drop_files(vec![path.clone()], Some((660.0, 430.0)));
+    app.settle();
+    path
+}
+
+/// Every position's id and count, which an import changes and an undo puts back.
+fn counts(app: &Harness) -> Vec<(String, f64)> {
+    app.rt
+        .state
+        .positions
+        .iter()
+        .map(|position| {
+            (
+                position.position_id.clone().unwrap_or_default(),
+                position.amount,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn accepting_a_broker_file_changes_the_positions_and_undo_puts_them_back() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+
+    dropped(&mut app, "de-transactions.csv");
+    assert!(app.rt.state.intake.is_some(), "the review sheet is up");
+    assert!(app.has_text("Two purchases, one sale and one holding we have not seen before."));
+    assert!(app.exists("intake-accept-all"));
+    assert!(app.exists("intake-accept-0"));
+    assert!(
+        app.has_text("line 5:"),
+        "each change shows the file's own row"
+    );
+
+    app.click("intake-accept-all");
+    assert!(
+        app.rt.state.intake.is_none(),
+        "taking everything puts the sheet away"
+    );
+    assert!(app.rt.state.dirty, "an import is unsaved until it is saved");
+    assert!(app.rt.state.intake_undo.is_some());
+    assert!(app.exists("toast"));
+    let after = counts(&app);
+    assert_ne!(before, after, "the positions changed");
+    assert!(
+        app.rt
+            .state
+            .positions
+            .iter()
+            .any(|position| position.ticker.as_deref() == Some("NGSC")),
+        "the holding the file added is on record"
+    );
+
+    app.click_label("Undo");
+    assert!(!app.rt.state.dirty, "the undo leaves nothing unsaved");
+    assert!(app.rt.state.intake_undo.is_none(), "one undo only");
+    assert_eq!(counts(&app), before, "the positions are as they were");
+}
+
+#[test]
+fn one_row_can_be_accepted_on_its_own() {
+    let mut app = Harness::boot(true, None);
+    let before = counts(&app);
+    dropped(&mut app, "de-transactions.csv");
+
+    app.click("intake-accept-0");
+    assert!(
+        app.rt.state.intake.is_some(),
+        "the sheet stays open for the rest"
+    );
+    assert!(app.has_text("Recorded"), "the row says what happened to it");
+    assert!(app.rt.state.dirty);
+    assert_ne!(counts(&app), before, "that one change is on record");
+    assert!(app.rt.state.intake_undo.is_some());
+
+    app.click("intake-leave-1");
+    assert!(!app.exists("intake-row-1"), "a row left is not asked again");
+    app.click("intake-dismiss");
+    assert!(app.rt.state.intake.is_none());
+}
+
+#[test]
+fn the_same_broker_file_twice_proposes_nothing_the_second_time() {
+    let mut app = Harness::boot(true, None);
+    let path = dropped(&mut app, "de-transactions.csv");
+    app.click("intake-accept-all");
+    assert!(app.rt.state.dirty);
+
+    app.rt.drop_files(vec![path], Some((660.0, 430.0)));
+    app.settle();
+    let review = app.rt.state.intake.as_ref().expect("the sheet still opens");
+    let ledger = review.ledger.as_ref().expect("the file still reads");
+    assert!(
+        ledger.proposals.iter().all(|proposal| !proposal.ready),
+        "{:#?}",
+        ledger.proposals
+    );
+    assert!(ledger.agreed > 0);
+    assert!(!app.exists("intake-accept-all"), "there is nothing to take");
+    assert!(app.has_text("every line is already on your record"));
+}
+
+#[test]
+fn an_unreadable_file_says_why_and_offers_nothing_to_take() {
+    let mut app = Harness::boot(true, None);
+    app.command('2', false);
+    let path = app.dir.path().join("statement.pdf");
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/intake/statement.pdf"),
+        &path,
+    )
+    .unwrap();
+    app.click("import-intake");
+    assert_eq!(
+        app.rt.file_dialog().expect("the import dialog is open").0,
+        FileDialogKind::Open
+    );
+    app.rt
+        .resolve_file_dialog(Some(path))
+        .expect("the dialog is answered");
+    app.settle();
+
+    assert!(app.has_text("This is a PDF."));
+    assert!(!app.exists("intake-accept-all"));
+    app.click("intake-cancel");
+    assert!(app.rt.state.intake.is_none(), "Close puts the sheet away");
+    assert!(!app.rt.state.dirty, "an unreadable file changes nothing");
 }
 
 #[test]
@@ -3447,7 +3610,7 @@ fn counsel_answers_a_typed_question_with_blocks() {
     let mut app = Harness::boot(true, None);
     app.click(Page::Ask.key());
     assert_eq!(app.rt.state.page, Page::Ask);
-    assert!(app.has_text("What would you like to know?"));
+    assert!(app.has_text("The door is open, and the light is on."));
 
     app.click("ask-input");
     app.type_text("What changed this month?");
@@ -3473,6 +3636,128 @@ fn counsel_answers_a_typed_question_with_blocks() {
         "the figure block shows the app's own total"
     );
     assert!(!app.rt.state.thinking(), "nothing is still in flight");
+}
+
+#[test]
+fn the_first_sentence_arrives_word_by_word() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    let sentence = |app: &Harness| {
+        app.rt
+            .elements()
+            .iter()
+            .find(|element| element.key.as_deref() == Some("ask-0-0-say"))
+            .and_then(|element| element.text.clone())
+            .unwrap_or_default()
+    };
+    app.rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods::default(),
+    });
+    // The block lands a third of a second after the question, with its first words only.
+    for _ in 0..21 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let early = sentence(&app);
+    let words = early.split_whitespace().count();
+    assert!(
+        (1..6).contains(&words),
+        "the sentence has only started: {early:?}"
+    );
+    for _ in 0..12 {
+        app.rt.frame(1.0 / 60.0);
+    }
+    let later = sentence(&app);
+    assert!(
+        later.split_whitespace().count() > words,
+        "more words have arrived: {early:?} then {later:?}"
+    );
+    // And it finishes, as the sentence that was arriving from its start. The day it names is
+    // the last one looked at, so it moves with the calendar.
+    app.settle();
+    let finished = sentence(&app);
+    assert!(
+        finished.starts_with(&later),
+        "what is shown is the sentence from its start: {later:?} then {finished:?}"
+    );
+    assert!(
+        finished.starts_with("Since ")
+            && finished.ends_with(
+                " you are up €291.41. Bitcoin did most of the work, which will surprise nobody."
+            ),
+        "{finished:?}"
+    );
+}
+
+#[test]
+fn a_loss_is_said_plainly_and_never_with_the_joke() {
+    let mut app = Harness::boot(true, None);
+    let change = app
+        .rt
+        .state
+        .change
+        .as_mut()
+        .expect("the demo looked at this portfolio before");
+    change.start = change.end + 300.0;
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What changed this month?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("you are down €300.00"),
+        "the loss is stated, without a second sign"
+    );
+    assert!(
+        !app.has_text("surprise nobody"),
+        "the joke is only for a gain"
+    );
+    assert!(!app.has_text("you are up"));
+}
+
+#[test]
+fn an_empty_page_offers_questions_the_app_can_answer_without_a_model() {
+    let mut app = Harness::boot(true, None);
+    app.rt.state.model = Arc::new(stahl::ask::Builtin);
+    app.click(Page::Ask.key());
+    let asked: Vec<String> = (0..6)
+        .filter(|index| app.exists(&format!("ask-suggestion-{index}")))
+        .filter_map(|index| {
+            app.rt
+                .elements()
+                .iter()
+                .find(|element| element.key.as_deref() == Some(&format!("ask-suggestion-{index}")))
+                .and_then(|element| element.label.clone())
+        })
+        .collect();
+    assert!(
+        (4..=6).contains(&asked.len()),
+        "four to six questions: {asked:?}"
+    );
+    assert!(
+        asked.iter().any(|question| question.starts_with("What if")),
+        "a what-if is one of them: {asked:?}"
+    );
+
+    // The what-if is answered by the app itself: the shock is the question's, the rest is the
+    // app's arithmetic.
+    let at = asked
+        .iter()
+        .position(|question| question.starts_with("What if"))
+        .expect("a what-if");
+    app.click(&format!("ask-suggestion-{at}"));
+    app.settle();
+    app.settle();
+    assert!(
+        app.has_text("here is what it would leave"),
+        "the app answers a what-if with no model"
+    );
+    assert!(app.exists("ask-0-1-toggle"), "and the change can be played");
+    assert!(app.exists("ask-0-1-bar"));
 }
 
 #[test]
@@ -3585,6 +3870,103 @@ fn a_figure_the_model_made_up_is_marked_unverified() {
         help(&app, "ask-1-0-say").is_empty(),
         "a figure from the fact table is not marked"
     );
+}
+
+#[test]
+fn the_what_if_toggle_shows_today_and_what_the_shock_leaves() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("What if crypto halves?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+
+    // The answer settles on what the shock would leave.
+    assert!(app.has_text("What would be left"));
+    assert!(app.has_text("€93,900.00"), "the shocked total");
+    assert!(app.has_text("€13,500.00"), "the difference beside it");
+
+    // "Now" goes back to today.
+    app.click("ask-0-1-now");
+    assert!(app.has_text("€107,400.00"), "today's total");
+    assert!(!app.has_text("€13,500.00"), "no difference to state");
+    assert!(
+        app.rt
+            .state
+            .ask
+            .what_if_at(0, 1)
+            .is_some_and(|what_if| what_if.now)
+    );
+
+    // The right arrow goes forward again, the left one back: the toggle has the keyboard.
+    app.press(Key::Right);
+    assert!(app.has_text("€93,900.00"));
+    app.press(Key::Left);
+    assert!(app.has_text("€107,400.00"));
+
+    // And the details table is a disclosure, closed until asked for.
+    assert!(!app.exists("ask-0-1-details-body"));
+    app.click("ask-0-1-details");
+    assert!(app.exists("ask-0-1-details-body"));
+    assert!(
+        app.has_text("€27,000.00"),
+        "the table has what crypto is worth today"
+    );
+    app.click("ask-0-1-details");
+    assert!(!app.exists("ask-0-1-details-body"));
+}
+
+#[test]
+fn dragging_the_plan_in_an_answer_changes_its_trades_and_carries_the_fraction_over() {
+    let mut app = Harness::boot(true, None);
+    app.click(Page::Ask.key());
+    app.click("ask-input");
+    app.type_text("Why is my allocation off?");
+    app.press(Key::Enter);
+    app.settle();
+    app.settle();
+    assert!(app.has_text("50% of the way to your targets"));
+
+    // Drag the answer's own slider to about 80% of the way.
+    let (x, y) = app.rt.find("ask-0-3-rail").expect("the slider is there");
+    let width = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .map_or(0.0, |play| play.width);
+    assert!(width > 100.0, "the slider measured itself: {width}");
+    let want = x + width * 0.3;
+    app.rt.pointer_move(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_move(want, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(want, y);
+    app.settle();
+
+    let fraction = app
+        .rt
+        .state
+        .ask
+        .plan_at(0, 3)
+        .and_then(|play| play.fraction)
+        .expect("the slider took the drag");
+    assert!((0.7..0.9).contains(&fraction), "{fraction}");
+    let percent = (fraction * 100.0).round() as i64;
+    assert!(
+        app.has_text(&format!("{percent}% of the way to your targets")),
+        "the plan is worked out again at the new fraction"
+    );
+    assert!(!app.has_text("50% of the way to your targets"));
+
+    // And the Rebalance page opens at the fraction the owner dragged to.
+    app.click("ask-0-3-open-plan");
+    assert_eq!(app.rt.state.page, Page::Rebalance);
+    assert!((app.rt.state.rebalance.fraction - fraction).abs() < 1e-9);
+    assert!(app.has_text(&format!("Go {percent}% of the way")));
 }
 
 #[test]
@@ -3812,4 +4194,143 @@ fn a_plate_opens_to_its_moment_and_closes() {
     app.press(Key::Escape);
     assert!(app.rt.state.record_plate.is_none());
     assert!(app.exists(&format!("plate-{id}")), "the plate is back");
+}
+
+// --- Time ---
+
+/// The strip's left edge and middle height, in window points.
+fn strip_start(app: &Harness) -> (f32, f32) {
+    let (x, y) = app
+        .rt
+        .find("time-strip")
+        .expect("the time strip is in the toolbar");
+    (x - stahl::time::STRIP / 2.0, y)
+}
+
+#[test]
+fn dragging_the_time_strip_turns_the_whole_app_back_and_escape_returns() {
+    let mut app = Harness::boot(true, None);
+    assert!(app.has_text("€107,400.00"), "today's total");
+    let days = app.rt.state.time.days.len();
+    assert!(days >= 60, "the demo's history is read: {days}");
+    let (left, y) = strip_start(&app);
+    let (x, _) = app.rt.find("time-strip").unwrap();
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=8 {
+        app.rt
+            .pointer_move(x + stahl::time::STRIP / 2.0 - step as f32 * 30.0, y);
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_move(left, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_up(left, y);
+    app.settle();
+    let state = &app.rt.state;
+    assert_eq!(
+        state.time.at,
+        Some(0),
+        "the far left is the first recorded day"
+    );
+    let first = state.time.days[0].total;
+    let total = state.summary.as_ref().unwrap().total_value;
+    assert!((total - first).abs() < 0.01, "the total is that day's");
+    assert!(!app.has_text("€107,400.00"), "today's total is gone");
+    assert!(app.exists("time-band"), "the band says it is the past");
+    assert!(
+        app.has_text("you held"),
+        "the statement speaks about that day"
+    );
+    // The allocation follows too.
+    let shares: f64 = state.allocation.iter().map(|item| item.percent).sum();
+    assert!((shares - 100.0).abs() < 0.01);
+
+    app.press(Key::Escape);
+    assert!(!app.rt.state.in_past(), "escape returns to today");
+    assert!(app.has_text("€107,400.00"));
+    assert!(!app.exists("time-band"));
+}
+
+#[test]
+fn the_keyboard_walks_through_recorded_days() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (x, y) = app.rt.find("time-strip").unwrap();
+    // Focus the strip without moving time: a press at today.
+    app.rt.pointer_down(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.rt.pointer_up(x + stahl::time::STRIP / 2.0 - 1.0, y);
+    app.settle();
+    assert!(!app.rt.state.in_past());
+    app.press(Key::Left);
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 1),
+        "one recorded day back"
+    );
+    app.rt.key(KeyEvent {
+        key: Key::Left,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    app.settle();
+    assert_eq!(
+        app.rt.state.time.at,
+        Some(days - 8),
+        "a week more with shift"
+    );
+    app.press(Key::End);
+    assert!(!app.rt.state.in_past(), "End is today");
+    // And from anywhere, with the main modifier and the brackets.
+    app.command('[', false);
+    assert_eq!(app.rt.state.time.at, Some(days - 1));
+    app.command(']', false);
+    assert!(!app.rt.state.in_past());
+}
+
+#[test]
+fn turning_the_door_back_turns_time_back() {
+    let mut app = Harness::boot(true, None);
+    let days = app.rt.state.time.days.len();
+    let (cx, cy) = app.rt.find("door-sidebar").unwrap();
+    // A quarter turn the other way round from the right to the top: six notches back.
+    app.rt.pointer_down(cx + 10.0, cy);
+    app.rt.frame(1.0 / 60.0);
+    for step in 1..=12 {
+        let angle = -(step as f32) / 12.0 * std::f32::consts::FRAC_PI_2;
+        app.rt
+            .pointer_move(cx + 10.0 * angle.cos(), cy + 10.0 * angle.sin());
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(cx, cy - 10.0);
+    app.settle();
+    let at = app.rt.state.time.at.expect("the door turned time back");
+    assert!(
+        (days - 7..=days - 5).contains(&at),
+        "a notch a day: {at} of {days}"
+    );
+    assert!(app.exists("time-band"));
+}
+
+#[test]
+fn a_page_about_today_says_so_in_the_past() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    app.click(Page::Rebalance.key());
+    assert!(app.has_text("Rebalance is about today"));
+    assert!(!app.has_text("I have this much to invest"), "no stale plan");
+    app.click("time-now-only-today");
+    assert!(!app.rt.state.in_past());
+    assert!(app.has_text("I have this much to invest"));
+}
+
+#[test]
+fn editing_in_the_past_happens_today() {
+    let mut app = Harness::boot(true, None);
+    app.command('[', false);
+    assert!(app.rt.state.in_past());
+    app.command('n', false);
+    assert!(app.rt.state.form.is_some(), "the form opens");
+    assert!(!app.rt.state.in_past(), "for today's positions");
 }

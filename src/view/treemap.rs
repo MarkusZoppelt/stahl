@@ -1,10 +1,14 @@
 //! A squarified treemap of the holdings. Area is value. The layout is a pure function.
 
 use portfolio_rs::state::PositionDto;
-use rune::{Beat, Color, El, Key, KeyEvent, Sequence, Tx, col, el, text, tok::motion::LEAD};
+use rune::{
+    Beat, Color, El, Key, KeyEvent, Sequence, Tx, col, color::srgb_encode, el, text,
+    tok::motion::LEAD,
+};
 
 use crate::{
     format,
+    fx::Plate,
     state::{Page, State},
     theme::{HOLDING_TITLE, NUMBER, SECTION, Theme},
     view::{portfolio, ui},
@@ -457,12 +461,27 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
             let big_name = w >= 320.0 && h >= 200.0;
             let label = match (change, points) {
                 (Some(_), Some(_)) => {
-                    format!("{name}, {own} today, {share} of the portfolio's move")
+                    format!(
+                        "{name}, {own} {}, {share} of the portfolio's move",
+                        s.when().word()
+                    )
                 }
-                (Some(_), None) => format!("{name}, {own} today"),
+                (Some(_), None) => format!("{name}, {own} {}", s.when().word()),
                 _ => name.clone(),
             };
-            el().key(format!("tile-{id}"))
+            // With a compositor a tile is a steel plate, dark in the dark and pale on paper, leaning
+            // to today's gain or loss as the wash did; hover raises it in the shader.
+            let wash = wash(change, largest, t.up, t.down);
+            let steel = s.shaders.then(|| {
+                let plate = Plate::new(if t.dark { 0.18 } else { 0.86 });
+                let plate = match wash {
+                    Some(c) => plate.tint([c.r, c.g, c.b].map(srgb_encode), c.a * 1.6),
+                    None => plate,
+                };
+                ui::steel(s, plate, 8.0)
+            });
+            let tile = el()
+                .key(format!("tile-{id}"))
                 .matched(format!("position-{id}"))
                 .role("gridcell")
                 .label(label)
@@ -472,17 +491,28 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                 .size(w, h)
                 .radius(8.0)
                 .clip_rounded(8.0)
-                .fill(t.card)
-                .border(
-                    1.0,
-                    if selected {
-                        k.c.text_base
-                    } else {
-                        k.c.border_muted
-                    },
-                )
-                .hover(k.c.hover)
-                .motion(LEAD)
+                .children(steel);
+            let tile = if s.shaders {
+                tile.children(selected.then(|| {
+                    el().absolute(0.0, 0.0)
+                        .size(w, h)
+                        .radius(8.0)
+                        .border(1.0, k.c.text_base)
+                        .a11y_hidden()
+                }))
+            } else {
+                tile.fill(t.card)
+                    .border(
+                        1.0,
+                        if selected {
+                            k.c.text_base
+                        } else {
+                            k.c.border_muted
+                        },
+                    )
+                    .hover(k.c.hover)
+            };
+            tile.motion(LEAD)
                 .press_scale(0.985)
                 .on_press(move |s: &mut State| s.select_position(id))
                 .on_key(move |s: &mut State, event: &KeyEvent, tx: &mut Tx| {
@@ -506,9 +536,8 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                     tx.scroll_into_view(format!("tile-{next}"));
                     true
                 })
-                .children(s.shaders.then(|| crate::fx::lift(8.0)))
                 .children(
-                    wash(change, largest, t.up, t.down)
+                    wash.filter(|_| !s.shaders)
                         .map(|wash| el().absolute(0.0, 0.0).size(w, h).fill(wash).a11y_hidden()),
                 )
                 .child(
@@ -552,16 +581,12 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .mt(14.0)
                                     .gap(20.0)
                                     // Cash has no move today: no dashes, just its share.
-                                    .children(
-                                        change
-                                            .is_some()
-                                            .then(|| figure("Today", own.clone(), own_color, t)),
-                                    )
-                                    .children(
-                                        points.is_some().then(|| {
-                                            figure("Of today", share.clone(), share_color, t)
-                                        }),
-                                    )
+                                    .children(change.is_some().then(|| {
+                                        figure(&s.when().title(), own.clone(), own_color, t)
+                                    }))
+                                    .children(points.is_some().then(|| {
+                                        figure(&s.when().of(), share.clone(), share_color, t)
+                                    }))
                                     .child(figure("Of portfolio", weight, k.c.text_base, t)),
                             ),
                         Detail::Figures => body
@@ -571,16 +596,17 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                                     .color(k.c.text_muted)
                                     .truncate(),
                             )
-                            .children(
-                                change
-                                    .is_some()
-                                    .then(|| labelled(own.clone(), "today", own_color, t).mt(6.0)),
-                            )
-                            .children(
-                                points
-                                    .is_some()
-                                    .then(|| labelled(share.clone(), "of today", share_color, t)),
-                            )
+                            .children(change.is_some().then(|| {
+                                labelled(own.clone(), &s.when().word(), own_color, t).mt(6.0)
+                            }))
+                            .children(points.is_some().then(|| {
+                                labelled(
+                                    share.clone(),
+                                    &s.when().of().to_lowercase(),
+                                    share_color,
+                                    t,
+                                )
+                            }))
                             // The first figure to go when the tile is short.
                             .children(
                                 (h >= WEIGHT_ROOM)
@@ -619,9 +645,11 @@ fn tile_line(
     if room < 22.0 {
         return None;
     }
+    // The lines are the month up to today: not a past day's.
     let values = position.position_id.as_deref().and_then(|id| {
         s.history
             .as_ref()
+            .filter(|_| !s.in_past())
             .and_then(|history| history.series(id))
             .map(<[f64]>::to_vec)
     })?;

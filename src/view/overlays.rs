@@ -1,6 +1,8 @@
 //! What floats above the window: the command palette, dialogs, toasts, and the parse failure.
 
-use rune::{El, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, tok::motion::LEAD};
+use rune::{
+    Cx, El, Icon, Key, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, tok::motion::LEAD,
+};
 use rune_kit::{
     Button, ButtonVariant, Checkbox, ControlSize, Dialog, Keybind, TextInput, Toast, ToastRegion,
 };
@@ -19,7 +21,7 @@ use crate::{
     },
 };
 
-pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
+pub fn build(s: &State, t: &Theme, cx: &Cx<State>, layer: &mut Vec<El>) {
     if s.palette.is_some() {
         palette(s, t, layer);
     }
@@ -38,17 +40,19 @@ pub fn build(s: &State, t: &Theme, layer: &mut Vec<El>) {
     if let Some(confirm) = &s.confirm {
         confirmation(confirm, t, layer);
     }
+    if s.intake.is_some() {
+        super::intake::sheet(s, t, cx, layer);
+    }
     updates::build(s, t, layer);
     if let Some((message, _)) = &s.toast {
-        layer.push(
-            ToastRegion::new()
-                .toast(
-                    Toast::new("toast", message.clone())
-                        .icon(&t.kit, &icons::CHECK_CIRCLE)
-                        .build(&t.kit),
-                )
-                .build(&t.kit),
-        );
+        let mut toast = Toast::new("toast", message.clone()).icon(&t.kit, &icons::CHECK_CIRCLE);
+        // An import can be put back for a few seconds, from the toast that says it landed.
+        if s.intake_undo.is_some() {
+            toast = toast.action(&t.kit, "Undo", false, |s: &mut State, _: &mut Tx| {
+                s.undo_intake();
+            });
+        }
+        layer.push(ToastRegion::new().toast(toast.build(&t.kit)).build(&t.kit));
     }
 }
 
@@ -182,6 +186,12 @@ pub fn entries(s: &State) -> Vec<Entry> {
                 &icons::PLUS,
                 Some((false, "N")),
                 Command::AddPosition,
+            ),
+            action(
+                "Import Broker File…",
+                &icons::DOWNLOAD,
+                None,
+                Command::Import,
             ),
             action("Save", &icons::SAVE, Some((false, "S")), Command::Save),
         ]);

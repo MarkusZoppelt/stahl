@@ -6,7 +6,7 @@
 
 use std::{
     collections::HashMap,
-    mem,
+    fs, mem,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -21,6 +21,7 @@ use portfolio_rs::{
     doctor::WorkspaceHealth,
     mcp::dto::Finding,
     policy::Policy,
+    position::parse_purchase_date,
     review::Review,
     simulate::RebalanceSimulation,
     state::{
@@ -38,6 +39,12 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    intake::{
+        self,
+        apply::{self as intake_apply, Choice},
+        reconcile::{self, Bought, Holding, Ledger},
+        text::Sheet,
+    },
     records::Record,
     statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
@@ -118,6 +125,8 @@ pub struct Opening {
 }
 
 const TOAST_FOR: Duration = Duration::from_millis(2600);
+/// Longer, because the Undo beside it is worth a moment's thought.
+const UNDO_FOR: Duration = Duration::from_secs(6);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Page {
@@ -447,6 +456,55 @@ impl PositionForm {
     }
 }
 
+/// What the owner did with one change a broker's file proposes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Decision {
+    /// Still to decide.
+    Pending,
+    /// Recorded.
+    Accepted,
+    /// Not taken.
+    Left,
+}
+
+/// A broker's file, read and compared with the positions: what it asks for, or why it can't be
+/// used. The review sheet is drawn from this and nothing else.
+pub struct IntakeReview {
+    /// The file's name, as the owner knows it.
+    pub file: String,
+    /// The rows it was read from, so each change can show the file's own line.
+    pub sheet: Option<Sheet>,
+    /// What the file means for the record. `None` when it can't be read.
+    pub ledger: Option<Ledger>,
+    /// Why the file can't be used, in plain words.
+    pub problem: Option<String>,
+    /// One decision per proposal in `ledger`.
+    pub decided: Vec<Decision>,
+    /// A change is being written, so a second press mustn't start another.
+    pub busy: bool,
+}
+
+impl IntakeReview {
+    fn problem(file: String, why: String) -> IntakeReview {
+        IntakeReview {
+            file,
+            sheet: None,
+            ledger: None,
+            problem: Some(why),
+            decided: Vec::new(),
+            busy: false,
+        }
+    }
+}
+
+/// The positions as they were before an import, so the toast's Undo can put them back.
+pub struct IntakeUndo {
+    json: String,
+    dirty: bool,
+    /// The proposals it took, to put them back to undecided.
+    taken: Vec<usize>,
+}
+
 /// The New Workspace form.
 pub struct NewWorkspaceForm {
     pub name: TextEdit,
@@ -513,6 +571,7 @@ pub enum Command {
     Theme,
     Sidebar,
     AddPosition,
+    Import,
     CopyBriefing,
     CheckForUpdates,
     /// Ask Counsel this question, from the palette.
@@ -812,6 +871,10 @@ pub struct State {
     pub drop_hover: bool,
     pub palette: Option<Palette>,
     pub form: Option<PositionForm>,
+    /// A broker's file waiting for the owner's approval.
+    pub intake: Option<IntakeReview>,
+    /// The positions from before the last import, while its Undo is offered.
+    pub intake_undo: Option<IntakeUndo>,
     pub new_workspace: Option<NewWorkspaceForm>,
     pub guide: bool,
     /// Set when a folder was opened and it is not a workspace. The previous portfolio stays in
@@ -887,6 +950,8 @@ pub struct State {
     pub since: Option<Since>,
     /// The portfolio since then, from the stored valuations.
     pub change: Option<Change>,
+    /// Where the owner is in time: today, or a recorded day in the past.
+    pub time: crate::time::Time,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -1105,6 +1170,8 @@ impl State {
             drop_hover: false,
             palette: None,
             form: None,
+            intake: None,
+            intake_undo: None,
             new_workspace: None,
             guide: false,
             folder_prompt: None,
@@ -1182,6 +1249,7 @@ impl State {
             seen_for: None,
             since: None,
             change: None,
+            time: crate::time::Time::default(),
         }
     }
 
@@ -1197,7 +1265,7 @@ impl State {
 
     // --- Running work off the UI thread ---
 
-    fn run<T, F>(
+    pub(crate) fn run<T, F>(
         &mut self,
         work: impl FnOnce(Backend) -> F,
         done: impl FnOnce(&mut State, BackendResult<T>) + Send + 'static,
@@ -1253,8 +1321,25 @@ impl State {
         let mut changed = self.drain() || mem::take(&mut self.settled);
         changed |= self.drain_ask();
         changed |= self.ask_advance(now);
+        changed |= self.ask_reveal(now);
         if let Some((at, _)) = self.ask.queued.front() {
             tx.wake_at(*at);
+        }
+        if let Some(reveal) = self.ask.reveal.as_ref().filter(|reveal| !reveal.done()) {
+            tx.wake_at(reveal.next_at());
+        }
+        // A block that has just landed shows what it says for a beat, then moves to what the
+        // shock leaves or counts its figures up. The frames keep coming until it has.
+        if let Some(landed) = self
+            .ask
+            .turns
+            .last()
+            .and_then(|turn| turn.landed.last())
+            .copied()
+            && now < landed + crate::ask::PLAY_HOLD
+        {
+            tx.wake_at(landed + crate::ask::PLAY_HOLD);
+            changed = true;
         }
         if self.ask_settle > 0 {
             self.ask_settle -= 1;
@@ -1311,7 +1396,8 @@ impl State {
         }
         if self.toast_armed {
             self.toast_armed = false;
-            tx.wake_after(TOAST_FOR + Duration::from_millis(50));
+            let shown_for = self.toast_for();
+            tx.wake_after(shown_for + Duration::from_millis(50));
         }
         // A new plate's arrival plays once: after it, the plate is simply on the wall.
         if let Some((_, started)) = &self.record_arrival {
@@ -1325,9 +1411,10 @@ impl State {
         if self
             .toast
             .as_ref()
-            .is_some_and(|(_, shown)| shown.elapsed() >= TOAST_FOR)
+            .is_some_and(|(_, shown)| shown.elapsed() >= self.toast_for())
         {
             self.toast = None;
+            self.intake_undo = None;
             changed = true;
         }
         // A save or revert asked for from the unsaved-changes dialog finishes in `drain`, above.
@@ -1351,8 +1438,23 @@ impl State {
     }
 
     pub fn show_toast(&mut self, message: impl Into<String>) {
+        self.intake_undo = None;
+        self.show_undo_toast(message);
+    }
+
+    /// A toast with an Undo beside it, which puts the positions back as they were.
+    fn show_undo_toast(&mut self, message: impl Into<String>) {
         self.toast = Some((message.into(), Instant::now()));
         self.toast_armed = true;
+    }
+
+    /// How long the toast stays: an Undo is worth more than a word of confirmation.
+    fn toast_for(&self) -> Duration {
+        if self.intake_undo.is_some() {
+            UNDO_FOR
+        } else {
+            TOAST_FOR
+        }
     }
 
     /// A tap on the door in the phone's top bar turns it a quarter. A full turn seals the vault.
@@ -1656,6 +1758,8 @@ impl State {
     }
 
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        // Today's figures land as today's, and the day being looked at is shown again over them.
+        let past = self.leave_past_for_news();
         self.summary = Some(snapshot.summary);
         self.positions = snapshot.positions;
         self.quotes = snapshot.quotes;
@@ -1669,6 +1773,8 @@ impl State {
         self.load_page();
         self.load_since();
         self.load_record_mark();
+        self.travel(past);
+        self.load_days();
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -1901,8 +2007,12 @@ impl State {
 
     /// A different portfolio is open now, so nothing fetched for the last one still applies.
     fn opened_another(&mut self) {
+        self.travel(None);
+        self.time = crate::time::Time::default();
         self.dirty = false;
         self.form = None;
+        self.intake = None;
+        self.intake_undo = None;
         self.folder_prompt = None;
         self.selected = None;
         self.inspector.set_open(false);
@@ -1939,6 +2049,278 @@ impl State {
             return;
         }
         self.show_file_dialog(tx);
+    }
+
+    /// Ask for a broker's file to compare with the positions.
+    pub fn ask_for_intake(&mut self, tx: &mut Tx) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        let directory = self
+            .open
+            .workspace_dir
+            .as_deref()
+            .or(self.open.file_path.as_deref())
+            .and_then(|path| Path::new(path).parent())
+            .filter(|parent| parent.is_dir())
+            .map(Path::to_path_buf);
+        let options = FileDialogOptions {
+            title: "Import a Broker File".into(),
+            directory,
+            ..Default::default()
+        }
+        .filter("Broker export", &["csv", "tsv", "txt"]);
+        if self.platform_picker {
+            self.ask_platform(PickKind::File, options.title, |state, path| {
+                state.open_intake(Path::new(&path));
+            });
+            return;
+        }
+        tx.open_file(options, |state: &mut State, result, _| match result {
+            Ok(Some(path)) => state.open_intake(&path),
+            Ok(None) => {}
+            Err(error) => state.error = Some(error.to_string()),
+        });
+    }
+
+    /// Read a broker's file and compare it with the positions, for the owner to approve.
+    pub fn open_intake(&mut self, path: &Path) {
+        if !self.has_portfolio() || self.open.parse_error.is_some() {
+            return;
+        }
+        self.intake_undo = None;
+        let file = path.to_string_lossy().into_owned();
+        let name = file_name(&file).to_string();
+        self.run(
+            move |_backend| async move {
+                fs::read(&file).map_err(|error| format!("This file can't be read: {error}"))
+            },
+            move |state, result| match result {
+                Ok(bytes) => state.read_intake(name, &bytes),
+                Err(error) => state.intake = Some(IntakeReview::problem(name, error)),
+            },
+        );
+    }
+
+    /// What was made of a file's bytes, compared with the positions on record.
+    fn read_intake(&mut self, file: String, bytes: &[u8]) {
+        let review = match intake::understand(bytes) {
+            intake::Outcome::Read { sheet, reading, .. } => {
+                let ledger = reconcile::reconcile(&reading, &self.intake_holdings());
+                // The sheet is over Holdings: what the file changes is in the table behind it.
+                self.navigate(Page::Holdings);
+                IntakeReview {
+                    file,
+                    decided: vec![Decision::Pending; ledger.proposals.len()],
+                    sheet: Some(sheet),
+                    ledger: Some(ledger),
+                    problem: None,
+                    busy: false,
+                }
+            }
+            intake::Outcome::Unreadable(why) => IntakeReview::problem(file, why),
+            intake::Outcome::Unmapped { missing, .. } => IntakeReview::problem(
+                file,
+                format!(
+                    "This table can be read, but nothing in it says {}. A different export from \
+                     your broker may name its columns.",
+                    intake::spoken(&missing)
+                ),
+            ),
+        };
+        self.intake = Some(review);
+    }
+
+    /// The positions as reconciling a broker's file needs them.
+    fn intake_holdings(&self) -> Vec<Holding> {
+        self.positions
+            .iter()
+            .map(|position| Holding {
+                id: position
+                    .position_id
+                    .clone()
+                    .unwrap_or_else(|| position.id.to_string()),
+                name: position.name.clone(),
+                ticker: position.ticker.clone(),
+                class: position.asset_class.clone(),
+                quantity: position.amount,
+                purchases: position
+                    .purchases
+                    .iter()
+                    .map(|purchase| Bought {
+                        date: purchase
+                            .date
+                            .as_deref()
+                            .and_then(parse_purchase_date)
+                            .map(|date| date.date_naive()),
+                        quantity: purchase.quantity,
+                        price: purchase.price,
+                    })
+                    .collect(),
+                currency: self
+                    .quote(position)
+                    .and_then(|quote| quote.currency.clone()),
+            })
+            .collect()
+    }
+
+    /// Record one change the sheet proposed.
+    pub fn accept_intake(&mut self, index: usize) {
+        self.write_intake(vec![index], false);
+    }
+
+    /// Record every change that needs no second look, and put the sheet away.
+    pub fn accept_all_intake(&mut self) {
+        let indices = self.intake.as_ref().map_or_else(Vec::new, |review| {
+            let Some(ledger) = &review.ledger else {
+                return Vec::new();
+            };
+            ledger
+                .proposals
+                .iter()
+                .enumerate()
+                .filter(|(index, proposal)| {
+                    proposal.in_all && review.decided.get(*index) == Some(&Decision::Pending)
+                })
+                .map(|(index, _)| index)
+                .collect()
+        });
+        self.write_intake(indices, true);
+    }
+
+    /// Refuse one change, so the sheet stops asking about it.
+    pub fn leave_intake(&mut self, index: usize) {
+        if let Some(review) = &mut self.intake
+            && let Some(decision) = review.decided.get_mut(index)
+        {
+            *decision = Decision::Left;
+        }
+    }
+
+    /// Write the changes at `indices`, then re-read what they affect, keeping the positions from
+    /// before them so the toast's Undo can put them back.
+    fn write_intake(&mut self, indices: Vec<usize>, close: bool) {
+        let Some(review) = self.intake.as_mut() else {
+            return;
+        };
+        if review.busy {
+            return;
+        }
+        let Some(ledger) = &review.ledger else {
+            return;
+        };
+        let mut ops = Vec::new();
+        let mut taken = Vec::new();
+        for index in indices {
+            let Some(proposal) = ledger.proposals.get(index) else {
+                continue;
+            };
+            if review.decided.get(index) != Some(&Decision::Pending) || !proposal.ready {
+                continue;
+            }
+            if let Some(op) = intake_apply::op(proposal, &Choice::of(proposal)) {
+                ops.push(op);
+                taken.push(index);
+            }
+        }
+        if ops.is_empty() {
+            return;
+        }
+        review.busy = true;
+        let was_dirty = self.dirty;
+        let count = taken.len();
+        self.run(
+            move |backend| async move {
+                let before = backend.apply_intake(ops).await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((before, open, snapshot, backend.config().await))
+            },
+            move |state, result| {
+                if let Some(review) = &mut state.intake {
+                    review.busy = false;
+                }
+                match result {
+                    Ok((before, open, snapshot, config)) => {
+                        state.open = open;
+                        state.config = Some(config);
+                        if let Some(snapshot) = snapshot {
+                            state.apply_snapshot(snapshot);
+                        }
+                        state.dirty = true;
+                        if let Some(review) = &mut state.intake {
+                            for &index in &taken {
+                                if let Some(decision) = review.decided.get_mut(index) {
+                                    *decision = Decision::Accepted;
+                                }
+                            }
+                        }
+                        if close {
+                            state.intake = None;
+                        }
+                        state.intake_undo = Some(IntakeUndo {
+                            json: before,
+                            dirty: was_dirty,
+                            taken,
+                        });
+                        state.show_undo_toast(if count == 1 {
+                            "Imported. Save to keep it.".to_string()
+                        } else {
+                            format!("{count} changes imported. Save to keep them.")
+                        });
+                    }
+                    Err(error) => state.error = Some(error),
+                }
+            },
+        );
+    }
+
+    /// Put the positions back as they were before the last import.
+    pub fn undo_intake(&mut self) {
+        let Some(undo) = self.intake_undo.take() else {
+            return;
+        };
+        self.run(
+            move |backend| async move {
+                backend.restore_positions(undo.json).await?;
+                let open = backend.open_document().await;
+                let snapshot = if open.parse_error.is_none() {
+                    Some(backend.snapshot().await)
+                } else {
+                    None
+                };
+                Ok((
+                    undo.dirty,
+                    undo.taken,
+                    open,
+                    snapshot,
+                    backend.config().await,
+                ))
+            },
+            |state, result| match result {
+                Ok((dirty, taken, open, snapshot, config)) => {
+                    state.open = open;
+                    state.config = Some(config);
+                    if let Some(snapshot) = snapshot {
+                        state.apply_snapshot(snapshot);
+                    }
+                    state.dirty = dirty;
+                    if let Some(review) = &mut state.intake {
+                        for index in taken {
+                            if let Some(decision) = review.decided.get_mut(index) {
+                                *decision = Decision::Pending;
+                            }
+                        }
+                    }
+                    state.show_toast("Import undone");
+                }
+                Err(error) => state.error = Some(error),
+            },
+        );
     }
 
     fn show_file_dialog(&mut self, tx: &mut Tx) {
@@ -2476,6 +2858,9 @@ impl State {
 
     /// What changed since the owner last looked, in words, or `None` with nothing worth saying.
     pub fn statement(&self) -> Option<Statement> {
+        if let Some(statement) = self.past_statement() {
+            return Some(statement);
+        }
         let summary = self.summary.as_ref()?;
         let currency = self.currency();
         let encrypted = self
@@ -2555,6 +2940,8 @@ impl State {
         if !self.has_portfolio() {
             return;
         }
+        // Positions are edited as they are today.
+        self.return_to_today();
         let position = existing.and_then(|id| self.positions.iter().find(|p| p.id == id));
         self.form = Some(PositionForm::new(position));
     }
@@ -2627,6 +3014,7 @@ impl State {
     }
 
     pub fn delete_position(&mut self, id: usize) {
+        self.return_to_today();
         self.selected = None;
         self.inspector.set_open(false);
         self.change_and_reload(
@@ -2744,6 +3132,7 @@ impl State {
                 self.open_form(None);
             }
             Command::Ask(question) => self.ask_about(question),
+            Command::Import => self.ask_for_intake(tx),
             Command::CopyBriefing => self.copy_briefing(tx),
             Command::CheckForUpdates => self.check_for_updates(false),
             Command::Close => self.reset(),
@@ -2781,6 +3170,11 @@ impl State {
     /// An answer is on its way: true from sending until it finishes, fails or is stopped.
     pub fn thinking(&self) -> bool {
         self.ask.thinking
+    }
+
+    /// The owner pressed "Now" or "Then" on a what-if: hold it there.
+    pub fn what_if_show(&mut self, turn: usize, block: usize, now: bool) {
+        self.ask.what_if_show(turn, block, now);
     }
 
     /// The model that answers questions. The real app wires the provider here; the demo and the
@@ -3043,11 +3437,16 @@ impl State {
     }
 
     /// Show every block that is due, and finish the turn when none are left. True when one landed.
+    ///
+    /// `now` is the clock the queue is read against. A block is stamped with the app's own clock
+    /// ([`State::now`]), which is the same in a frame and never a jump a caller made.
     pub fn ask_advance(&mut self, now: f64) -> bool {
         if self.ask.queued.is_empty() {
             return false;
         }
         let table = crate::facts::of(self);
+        let (hidden, currency) = (self.privacy, self.currency());
+        let landed_at = self.now;
         let mut landed = false;
         while self.ask.queued.front().is_some_and(|(at, _)| *at <= now) {
             let (_, block) = self.ask.queued.pop_front().expect("just checked");
@@ -3056,22 +3455,98 @@ impl State {
             // span it marks is measured the same way the Performance chart's is.
             if keep && let crate::ask::Block::Chart { span, .. } = &block {
                 self.restart_draw = true;
+                // A chart measures the room it has on the frame after it is laid out. Two more
+                // frames, so it takes its width before anyone looks at it, whatever else is on
+                // the page above it.
+                self.ask_settle = self.ask_settle.max(2);
                 if let Some(span) = span {
                     self.measure.span = Some((span[0], span[1]));
                 }
             }
+            // The answer's first sentence arrives word by word, and the rest waits for it.
+            let mut sentence = None;
             if let Some(turn) = self.ask.current_mut() {
                 if keep {
-                    turn.blocks.push(block);
+                    if turn.first_say(&block) {
+                        sentence =
+                            Some(crate::ask::spoken(block.text(), &table, hidden, &currency));
+                    }
+                    turn.land(block, landed_at);
                 }
                 turn.phase = crate::ask::Phase::Streaming;
             }
+            if let Some(sentence) = sentence {
+                self.begin_reveal(sentence, landed_at);
+            }
             landed = true;
         }
-        if landed && self.ask.queued.is_empty() {
-            self.ask_done();
+        if landed {
+            self.ask_finish_if_ready();
         }
         landed
+    }
+
+    /// The sentence that just landed is revealed word by word, and the blocks after it wait
+    /// until its words are on the page.
+    fn begin_reveal(&mut self, sentence: String, now: f64) {
+        let total = sentence.split_whitespace().count();
+        if total < 2 {
+            return;
+        }
+        let Some(turn) = self.ask.turns.len().checked_sub(1) else {
+            return;
+        };
+        let Some(block) = self.ask.turns[turn].blocks.len().checked_sub(1) else {
+            return;
+        };
+        let reveal = crate::ask::Reveal {
+            turn,
+            block,
+            // The block lands with its first word on the page, so nothing is ever an empty box.
+            words: 1,
+            total,
+            started: now,
+        };
+        let ends = reveal.ends_at();
+        self.ask.reveal = Some(reveal);
+        // The rest of the answer follows the sentence closely, then keeps its own rhythm.
+        for (index, (at, _)) in self.ask.queued.iter_mut().enumerate() {
+            *at = ends + crate::ask::AFTER_SENTENCE + crate::ask::NEXT_BLOCK * index as f64;
+        }
+    }
+
+    /// Put the sentence's next words on the page. True when the page changed.
+    pub fn ask_reveal(&mut self, now: f64) -> bool {
+        let Some(reveal) = self.ask.reveal.as_ref() else {
+            return false;
+        };
+        if reveal.done() {
+            self.ask.reveal = None;
+            return true;
+        }
+        let due = (((now - reveal.started) / reveal.step()).floor() as usize + 1).min(reveal.total);
+        if due <= reveal.words {
+            return false;
+        }
+        let done = due >= reveal.total;
+        if let Some(reveal) = &mut self.ask.reveal {
+            reveal.words = due;
+        }
+        if done {
+            self.ask.reveal = None;
+            self.ask_finish_if_ready();
+        }
+        true
+    }
+
+    /// Finish the turn when nothing is left to arrive: no block queued and no words left.
+    fn ask_finish_if_ready(&mut self) {
+        if !self.ask.queued.is_empty() || self.ask.reveal.as_ref().is_some_and(|r| !r.done()) {
+            return;
+        }
+        if self.ask.turns.last().is_some_and(|turn| !turn.finished()) {
+            self.ask_done();
+        }
     }
 
     /// Read what the model has sent. True when anything arrived.
@@ -3091,10 +3566,13 @@ impl State {
     /// A piece of a provider's answer: whole lines become blocks as they complete.
     fn ask_text(&mut self, text: &str) {
         let blocks = self.ask.lines.push(text);
+        let now = self.now;
         if !blocks.is_empty()
             && let Some(turn) = self.ask.current_mut()
         {
-            turn.blocks.extend(blocks);
+            for block in blocks {
+                turn.land(block, now);
+            }
             turn.phase = crate::ask::Phase::Streaming;
         }
         self.ask.partial = crate::ask::partial_say(self.ask.lines.partial());
@@ -3103,14 +3581,18 @@ impl State {
     /// The answer has finished.
     fn ask_done(&mut self) {
         let leftovers = self.ask.lines.finish();
+        let now = self.now;
         if let Some(turn) = self.ask.current_mut() {
-            turn.blocks.extend(leftovers);
+            for block in leftovers {
+                turn.land(block, now);
+            }
             turn.phase = crate::ask::Phase::Done;
         }
         self.ask.thinking = false;
         self.ask.streaming = false;
         self.ask.partial = None;
         self.ask.cancel = None;
+        self.ask.reveal = None;
         // The page is its final height now: two more frames let anything that measures its room
         // take the right size, without drawing the chart in a second time.
         self.ask_settle = 2;
@@ -3124,6 +3606,7 @@ impl State {
         self.ask.streaming = false;
         self.ask.partial = None;
         self.ask.cancel = None;
+        self.ask.reveal = None;
         if let Some(turn) = self.ask.current_mut() {
             turn.phase = crate::ask::Phase::Failed;
             turn.error = Some(why);
@@ -3142,6 +3625,7 @@ impl State {
         self.ask.streaming = false;
         self.ask.queued.clear();
         self.ask.partial = None;
+        self.ask.reveal = None;
         if let Some(turn) = self.ask.current_mut() {
             turn.phase = crate::ask::Phase::Stopped;
         }
@@ -3158,6 +3642,7 @@ impl State {
         }
         let question = last.question.clone();
         self.ask.turns.pop();
+        self.ask.reveal = None;
         self.ask.input.replace_text(&question);
         self.ask_send();
     }

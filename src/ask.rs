@@ -251,18 +251,49 @@ pub fn pieces(text: &str, table: &Table) -> Vec<Piece> {
 /// The plain text of a `say`, as a screen reader and a test read it: each figure replaced by what
 /// it shows, each gap by a dash.
 pub fn spoken(text: &str, table: &Table, hidden: bool, currency: &str) -> String {
-    pieces(text, table)
-        .into_iter()
-        .map(|piece| match piece {
-            Piece::Text(words) => words,
-            Piece::Chip(id) => table.get(&id).map_or_else(
-                || "—".to_string(),
-                |fact| fact.value.render(hidden, currency),
-            ),
-            Piece::Gap(_) => "—".to_string(),
-            Piece::Unverified(digits) => digits,
+    let mut out = String::new();
+    for piece in pieces(text, table) {
+        match piece {
+            Piece::Text(words) => out.push_str(&words),
+            Piece::Chip(id) => {
+                let shown = table.get(&id).map_or_else(
+                    || "—".to_string(),
+                    |fact| figure(fact, &out, hidden, currency),
+                );
+                out.push_str(&shown);
+            }
+            Piece::Gap(_) => out.push('—'),
+            Piece::Unverified(digits) => out.push_str(&digits),
+        }
+    }
+    out
+}
+
+/// Words that already say which way a figure went. The figure after one is written without its
+/// sign, as the Statement writes amounts in prose: "you are up €291", never "up +€291".
+const DIRECTIONS: [&str; 6] = ["up", "down", "higher", "lower", "gained", "lost"];
+
+/// Whether the words just before a figure carry its direction.
+pub fn directed(words: &str) -> bool {
+    words
+        .split_whitespace()
+        .next_back()
+        .map(|word| {
+            word.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
         })
-        .collect()
+        .is_some_and(|word| DIRECTIONS.contains(&word.as_str()))
+}
+
+/// A figure as a sentence writes it, given the words before it: unsigned after a word that
+/// already says the direction, so a loss never reads "down -€291".
+pub fn figure(fact: &crate::facts::Fact, before: &str, hidden: bool, currency: &str) -> String {
+    use crate::facts::Value;
+    match (&fact.value, directed(before)) {
+        (Value::SignedMoney(value), true) => Value::Money(value.abs()).render(hidden, currency),
+        (Value::SignedPercent(value), true) => Value::Percent(value.abs()).render(hidden, currency),
+        (value, _) => value.render(hidden, currency),
+    }
 }
 
 /// The ids a `say` names, for a test to check the answer only quotes what exists.
@@ -386,6 +417,35 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
     let keywords = keywords(question);
     let mut blocks = Vec::new();
 
+    // A what-if the question names itself. The shock is the question's; what follows from it is
+    // the app's own arithmetic, so this needs no model.
+    if let Some(shocks) = crate::scenario::asked(
+        question,
+        crate::view::rebalance::load_classes(s)
+            .iter()
+            .map(|class| class.name.as_str()),
+    ) {
+        let list = shocks
+            .iter()
+            .map(|shock| {
+                if shock.percent < 0.0 {
+                    format!("{} falls {:.0}%", shock.class, -shock.percent)
+                } else {
+                    format!("{} rises {:.0}%", shock.class, shock.percent)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        blocks.push(Block::Say {
+            text: format!("If {list}, here is what it would leave."),
+        });
+        blocks.push(Block::Scenario { shocks });
+        blocks.push(Block::Go {
+            steps: vec![step_for(Page::Rebalance, "Open Rebalance")],
+        });
+        return blocks;
+    }
+
     // A figure the palette already answers: the total, today, a class, a holding.
     let figure = keywords
         .iter()
@@ -469,14 +529,37 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
         return blocks;
     }
 
-    // What changed since the last look, in the app's own figures.
+    // What changed since the last look, in the app's own figures. The words carry the direction,
+    // so the figure is written without a sign, and a loss is said plainly: no joke on a bad day.
     let asks_change = keywords
         .iter()
         .any(|word| ["changed", "change", "since", "today", "moved"].contains(&word.as_str()));
     if asks_change && s.change.is_some() {
-        blocks.push(Block::Say {
-            text: "Since {since.date}, the total has moved by {since.change}.".to_string(),
-        });
+        let total = s
+            .change
+            .as_ref()
+            .map_or(0.0, crate::statement::Change::total);
+        let leader = table.get("since.leader").is_some();
+        let text = if total > 0.005 {
+            if leader {
+                "Since {since.date} you are up {since.change}. {since.leader} did most of the work, \
+                 which will surprise nobody."
+                    .to_string()
+            } else {
+                "Since {since.date} you are up {since.change}.".to_string()
+            }
+        } else if total < -0.005 {
+            if leader {
+                "Since {since.date} you are down {since.change}. {since.leader} accounted for most \
+                 of it."
+                    .to_string()
+            } else {
+                "Since {since.date} you are down {since.change}.".to_string()
+            }
+        } else {
+            "Since {since.date} the total is where it was.".to_string()
+        };
+        blocks.push(Block::Say { text });
         blocks.push(Block::Figures {
             ids: ["since.change", "since.percent", "total", "today.change"]
                 .into_iter()
@@ -521,8 +604,8 @@ pub fn builtin(s: &crate::state::State, question: &str) -> Vec<Block> {
 
     // Nothing this portfolio can work out on its own.
     blocks.push(Block::Say {
-        text: "That one needs a model. This portfolio can answer what it holds, how it moved, \
-               and what needs a look. Add a model in Settings to ask anything; a local one keeps \
+        text: "That one needs a model. Stahl can still tell you what the portfolio holds, how it \
+               moved, and what needs a look. Add a model in Settings to ask anything; a local one keeps \
                everything on this computer."
             .to_string(),
     });
@@ -584,6 +667,57 @@ pub fn line(block: &Block) -> String {
 /// rest are, on the app's clock.
 pub const FIRST_BLOCK: f64 = 0.3;
 pub const NEXT_BLOCK: f64 = 0.42;
+
+/// How long after a sentence's last word the next block lands: the answer follows its own lede
+/// closely, then keeps the rhythm above.
+pub const AFTER_SENTENCE: f64 = 0.18;
+
+/// A figures block shows its figures at zero for this long, then counts them up.
+pub const COUNT_HOLD: f64 = 0.12;
+
+/// A what-if sits at today for this long, then plays the change. Long enough to read the total
+/// before it moves, short enough that the answer never feels stuck.
+pub const PLAY_HOLD: f64 = 0.4;
+
+/// The byte length of the first `count` words of `text`, as a sentence revealed word by word is
+/// cut. The whole string when it has fewer.
+pub fn upto_words(text: &str, count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let mut words = 0;
+    let mut in_word = false;
+    for (at, character) in text.char_indices() {
+        if character.is_whitespace() {
+            if in_word {
+                words += 1;
+                in_word = false;
+                if words == count {
+                    return at;
+                }
+            }
+        } else {
+            in_word = true;
+        }
+    }
+    text.len()
+}
+
+/// A figure at zero, for the moment before it counts up. `None` for a figure that isn't a
+/// number: a name or a day has nothing to count.
+pub fn zero(fact: &crate::facts::Fact, hidden: bool, currency: &str) -> Option<String> {
+    use crate::facts::Value;
+    let value = match &fact.value {
+        Value::Money(_) => Value::Money(0.0),
+        Value::SignedMoney(_) => Value::SignedMoney(0.0),
+        Value::Percent(_) => Value::Percent(0.0),
+        Value::SignedPercent(_) => Value::SignedPercent(0.0),
+        Value::Points(_) => Value::Points(0.0),
+        Value::Count(_) => Value::Count(0),
+        Value::Day { .. } | Value::Name(_) => return None,
+    };
+    Some(value.render(hidden, currency))
+}
 
 /// The `say` a half-arrived line is writing, for text that appears as it streams. `None` when
 /// the line isn't a `say`, or hasn't reached its words yet.
@@ -977,6 +1111,9 @@ pub enum Phase {
 pub struct Turn {
     pub question: String,
     pub blocks: Vec<Block>,
+    /// When each block landed on the app's clock, at the same index as [`Turn::blocks`]. A block
+    /// with no time here was on the page from the start (a scripted scene), and is drawn settled.
+    pub landed: Vec<f64>,
     pub phase: Phase,
     /// What went wrong, in plain words.
     pub error: Option<String>,
@@ -987,14 +1124,101 @@ impl Turn {
         Turn {
             question: question.into(),
             blocks: Vec::new(),
+            landed: Vec::new(),
             phase: Phase::Waiting,
             error: None,
         }
     }
 
+    /// Add a block that has just landed.
+    pub fn land(&mut self, block: Block, now: f64) {
+        self.blocks.push(block);
+        self.landed.push(now);
+    }
+
+    /// When block `at` landed, if the page has a time for it.
+    pub fn landed_at(&self, at: usize) -> Option<f64> {
+        self.landed.get(at).copied()
+    }
+
+    /// How long ago block `at` landed, on the app's clock. `None` when it was already there.
+    pub fn age(&self, at: usize, now: f64) -> Option<f64> {
+        self.landed_at(at).map(|landed| (now - landed).max(0.0))
+    }
+
+    /// Whether this is the turn's first sentence, the one that arrives word by word.
+    pub fn first_say(&self, block: &Block) -> bool {
+        matches!(block, Block::Say { .. })
+            && !self.blocks.iter().any(|b| matches!(b, Block::Say { .. }))
+    }
+
     pub fn finished(&self) -> bool {
         matches!(self.phase, Phase::Done | Phase::Stopped | Phase::Failed)
     }
+}
+
+/// The first sentence of an answer, arriving word by word rather than as a finished paragraph.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reveal {
+    /// The turn and the block within it that the sentence belongs to.
+    pub turn: usize,
+    pub block: usize,
+    /// How many words of it are on the page, and how many it has in all.
+    pub words: usize,
+    pub total: usize,
+    /// When it started, on the app's clock.
+    pub started: f64,
+}
+
+impl Reveal {
+    /// About how long a whole sentence takes to arrive, however long it is.
+    pub const FOR: f64 = 0.5;
+    /// The shortest and longest a single word may take, so a very long sentence still reads as
+    /// words and a very short one is not a flicker.
+    const STEP: std::ops::RangeInclusive<f64> = 0.012..=0.05;
+
+    /// How long one word of this sentence takes.
+    pub fn step(&self) -> f64 {
+        (Self::FOR / self.total.max(1) as f64).clamp(*Self::STEP.start(), *Self::STEP.end())
+    }
+
+    /// When the next word is due.
+    pub fn next_at(&self) -> f64 {
+        self.started + self.words as f64 * self.step()
+    }
+
+    /// When the last word is due.
+    pub fn ends_at(&self) -> f64 {
+        self.started + self.total as f64 * self.step()
+    }
+
+    pub fn done(&self) -> bool {
+        self.words >= self.total
+    }
+}
+
+/// A what-if block, as the page is playing it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WhatIf {
+    pub turn: usize,
+    pub block: usize,
+    /// The owner is holding it on today, rather than on what the shock would leave.
+    pub now: bool,
+    /// The table behind "Details" is open.
+    pub details: bool,
+}
+
+/// A plan block the owner is playing with.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlanPlay {
+    pub turn: usize,
+    pub block: usize,
+    /// The fraction the owner dragged the slider to, if they have.
+    pub fraction: Option<f64>,
+    /// The slider's width in points, measured once it is on the page.
+    pub width: f32,
+    /// A pointer is on the slider.
+    pub dragging: bool,
 }
 
 /// The session's conversation. Nothing here is written to disk.
@@ -1017,6 +1241,12 @@ pub struct Conversation {
     pub chart: Option<(crate::backend::Period, crate::backend::History)>,
     /// The answer being read, line by line, from a provider.
     pub lines: Lines,
+    /// The sentence being revealed word by word, if one is.
+    pub reveal: Option<Reveal>,
+    /// The what-if blocks on the page, and where the owner has put them.
+    pub what_if: Vec<WhatIf>,
+    /// The plan blocks the owner has played with.
+    pub plan: Vec<PlanPlay>,
 }
 
 impl Default for Conversation {
@@ -1041,6 +1271,87 @@ impl Conversation {
             generation: 0,
             chart: None,
             lines: Lines::new(),
+            reveal: None,
+            what_if: Vec::new(),
+            plan: Vec::new(),
+        }
+    }
+
+    /// A what-if block, if the page has played with it.
+    pub fn what_if_at(&self, turn: usize, block: usize) -> Option<&WhatIf> {
+        self.what_if
+            .iter()
+            .find(|what_if| what_if.turn == turn && what_if.block == block)
+    }
+
+    fn what_if_mut(&mut self, turn: usize, block: usize) -> &mut WhatIf {
+        if let Some(index) = self
+            .what_if
+            .iter()
+            .position(|what_if| what_if.turn == turn && what_if.block == block)
+        {
+            return &mut self.what_if[index];
+        }
+        self.what_if.push(WhatIf {
+            turn,
+            block,
+            now: false,
+            details: false,
+        });
+        self.what_if.last_mut().expect("just pushed")
+    }
+
+    /// Hold a what-if on today, or let it show what the shock leaves.
+    pub fn what_if_show(&mut self, turn: usize, block: usize, now: bool) {
+        self.what_if_mut(turn, block).now = now;
+    }
+
+    /// Open or close the table behind a what-if's "Details".
+    pub fn what_if_details(&mut self, turn: usize, block: usize) {
+        let what_if = self.what_if_mut(turn, block);
+        what_if.details = !what_if.details;
+    }
+
+    /// A plan block, if the owner has played with it.
+    pub fn plan_at(&self, turn: usize, block: usize) -> Option<&PlanPlay> {
+        self.plan
+            .iter()
+            .find(|play| play.turn == turn && play.block == block)
+    }
+
+    fn plan_mut(&mut self, turn: usize, block: usize) -> &mut PlanPlay {
+        if let Some(index) = self
+            .plan
+            .iter()
+            .position(|play| play.turn == turn && play.block == block)
+        {
+            return &mut self.plan[index];
+        }
+        self.plan.push(PlanPlay {
+            turn,
+            block,
+            fraction: None,
+            width: 0.0,
+            dragging: false,
+        });
+        self.plan.last_mut().expect("just pushed")
+    }
+
+    /// The fraction the owner dragged a plan's slider to.
+    pub fn plan_set(&mut self, turn: usize, block: usize, fraction: f64) {
+        self.plan_mut(turn, block).fraction = Some(fraction.clamp(0.0, 1.0));
+    }
+
+    /// A pointer took the slider, or let it go.
+    pub fn plan_drag(&mut self, turn: usize, block: usize, dragging: bool) {
+        self.plan_mut(turn, block).dragging = dragging;
+    }
+
+    /// The slider's width, measured once it is on the page.
+    pub fn plan_measure(&mut self, turn: usize, block: usize, width: f32) {
+        let play = self.plan_mut(turn, block);
+        if (play.width - width).abs() > 0.5 {
+            play.width = width;
         }
     }
 
@@ -1243,13 +1554,45 @@ mod tests {
         let table = table();
         assert_eq!(
             spoken("You are up {today.change}.", &table, false, "EUR"),
-            "You are up +€280.00."
+            "You are up €280.00.",
+            "the words carry the direction, so the figure does not repeat it"
+        );
+        assert_eq!(
+            spoken("It moved by {today.change}.", &table, false, "EUR"),
+            "It moved by +€280.00.",
+            "with no direction in the words, the figure keeps its sign"
         );
         assert_eq!(
             spoken("You are up {today.change}.", &table, true, "EUR"),
             "You are up ••••••."
         );
         assert_eq!(spoken("Gap {nope.here}.", &table, false, "EUR"), "Gap —.");
+    }
+
+    #[test]
+    fn a_loss_after_the_word_down_is_not_written_with_a_second_sign() {
+        let mut table = table();
+        table.insert(Fact {
+            id: "since.change".to_string(),
+            label: "the change".to_string(),
+            short: "Since".to_string(),
+            value: Value::SignedMoney(-291.41),
+            class: None,
+        });
+        assert_eq!(
+            spoken(
+                "Since Friday you are down {since.change}.",
+                &table,
+                false,
+                "EUR"
+            ),
+            "Since Friday you are down €291.41.",
+            "never \"down -€291.41\""
+        );
+        assert_eq!(
+            spoken("You are up {since.change}.", &table, false, "EUR"),
+            "You are up €291.41."
+        );
     }
 
     #[test]
@@ -1268,6 +1611,83 @@ mod tests {
             "only a say has words to show"
         );
         assert_eq!(partial_say("{\"block\":\"say\""), None);
+    }
+
+    #[test]
+    fn a_sentence_is_cut_after_the_words_that_have_arrived() {
+        let sentence = "Since Saturday you are up.";
+        assert_eq!(upto_words(sentence, 0), 0);
+        assert_eq!(&sentence[..upto_words(sentence, 1)], "Since");
+        assert_eq!(&sentence[..upto_words(sentence, 2)], "Since Saturday");
+        assert_eq!(
+            upto_words(sentence, 99),
+            sentence.len(),
+            "more words than there are is the whole sentence"
+        );
+        assert_eq!(upto_words("", 3), 0);
+        // A figure with a space in it counts as two words, as the page's text does.
+        let figures = "Up €291.41 or 12.8 points.";
+        assert_eq!(&figures[..upto_words(figures, 2)], "Up €291.41");
+    }
+
+    #[test]
+    fn a_reveal_gives_a_sentence_about_half_a_second_whatever_its_length() {
+        let reveal = |total| Reveal {
+            turn: 0,
+            block: 0,
+            words: 1,
+            total,
+            started: 1.0,
+        };
+        // Ten words, half a second: 50 ms each, the slowest a word may take.
+        assert!((reveal(10).step() - 0.05).abs() < 1e-9);
+        assert!(reveal(20).ends_at() - 1.0 <= 0.55);
+        assert!(
+            reveal(200).step() >= 0.012,
+            "a long sentence still reads as words"
+        );
+        assert!(!reveal(20).done());
+        assert!(
+            Reveal {
+                words: 20,
+                ..reveal(20)
+            }
+            .done()
+        );
+    }
+
+    #[test]
+    fn a_figure_counts_up_from_zero_only_where_there_is_a_number() {
+        let table = table();
+        assert_eq!(
+            zero(table.get("total").unwrap(), false, "EUR").unwrap(),
+            "€0.00"
+        );
+        assert_eq!(
+            zero(table.get("today.change").unwrap(), false, "EUR").unwrap(),
+            "€0.00"
+        );
+        assert_eq!(
+            zero(table.get("class.stocks.share").unwrap(), false, "EUR").unwrap(),
+            "0.0%"
+        );
+        let name = Fact {
+            id: "policy.name".to_string(),
+            label: String::new(),
+            short: String::new(),
+            value: Value::Name("Balanced Growth".to_string()),
+            class: None,
+        };
+        assert_eq!(
+            zero(&name, false, "EUR"),
+            None,
+            "a name has nothing to count"
+        );
+        // Privacy hides the zero as it hides any amount.
+        assert_eq!(
+            zero(table.get("total").unwrap(), true, "EUR").unwrap(),
+            crate::format::HIDDEN
+        );
     }
 
     #[test]

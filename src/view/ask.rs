@@ -13,11 +13,14 @@ use crate::{
     format, icons,
     state::{Page, State},
     theme::{FIGURE, LEDE, LEDE_COMPACT, SECTION, Theme},
-    view::{charts, rebalance as plan, ui},
+    view::{charts, ui},
 };
 
 /// What a question looks like: a little quieter than the answer's first sentence.
 const QUESTION: TextStyle = SECTION;
+
+/// How long a word of the first sentence takes to fade in as it lands.
+const REVEAL_FADE: f32 = 0.18;
 
 /// The one sentence that explains an unverified figure.
 const UNVERIFIED: &str = "Underlined figures were written by the model. Stahl didn't compute them.";
@@ -134,38 +137,42 @@ pub fn overview_line(s: &State, t: &Theme, narrow: bool) -> El {
     )
 }
 
-/// What Counsel says before anything has been asked.
+/// What Counsel says before anything has been asked: the door, in words, and the questions this
+/// portfolio makes worth asking.
 fn empty(s: &State, t: &Theme) -> El {
     let k = &t.kit;
-    let questions = suggestions(s);
+    let questions = questions(s);
     col()
         .key("ask-empty")
         .w_full()
-        .gap(16.0)
-        .pt(if s.compact { 8.0 } else { 24.0 })
+        .max_w(680.0)
+        .gap(if s.compact { 20.0 } else { 28.0 })
+        .pt(if s.compact { 8.0 } else { 32.0 })
         .child(
-            text("What would you like to know?")
-                .font(if s.compact { LEDE_COMPACT } else { LEDE })
-                .color(k.c.text_base)
-                .wrap(),
-        )
-        .child(
-            text(
-                "Ask in your own words. The answer is built from your own figures and screens, \
-                 and every number in it is one Stahl computed.",
-            )
-            .font(k.ty.ui)
-            .color(k.c.text_muted)
-            .wrap()
-            .max_w(560.0),
+            col()
+                .gap(10.0)
+                .child(
+                    text("The door is open, and the light is on.")
+                        .font(if s.compact { LEDE_COMPACT } else { LEDE })
+                        .color(k.c.text_base)
+                        .wrap(),
+                )
+                .child(
+                    text(
+                        "Ask anything about your portfolio. Every figure in the answer is one \
+                         Stahl computed.",
+                    )
+                    .font(k.ty.ui)
+                    .color(k.c.text_muted)
+                    .wrap()
+                    .max_w(520.0),
+                ),
         )
         .children((!questions.is_empty()).then(|| {
             col()
                 .key("ask-empty-suggestions")
                 .w_full()
-                .max_w(560.0)
-                .gap(8.0)
-                .pt(4.0)
+                .child(ui::rule(t))
                 .children(
                     questions
                         .into_iter()
@@ -175,35 +182,76 @@ fn empty(s: &State, t: &Theme) -> El {
         }))
 }
 
-/// A question worth asking, as a row you can press.
+/// The questions an empty page offers: what the portfolio raises, and what a what-if would show.
+/// Every one is answerable from the app's own figures, with no model.
+pub fn questions(s: &State) -> Vec<String> {
+    let mut out = suggestions(s);
+    if let Some(class) = what_if_class(s) {
+        out.push(format!("What if {class} falls 20%?"));
+    }
+    if s.summary
+        .as_ref()
+        .is_some_and(|summary| summary.cash_value.abs() >= 0.005)
+    {
+        out.push("How much cash do I hold?".to_string());
+    }
+    out.dedup();
+    out.truncate(6);
+    out
+}
+
+/// The class worth pushing in a what-if: the one furthest from its target, or the largest when
+/// the policy doesn't say.
+fn what_if_class(s: &State) -> Option<String> {
+    let drifted = s.review.data.as_ref().and_then(|review| {
+        review
+            .allocations
+            .iter()
+            .max_by(|a, b| a.drift_percent.abs().total_cmp(&b.drift_percent.abs()))
+            .map(|class| class.asset_class.clone())
+    });
+    drifted.or_else(|| {
+        s.allocation
+            .iter()
+            .max_by(|a, b| a.value.total_cmp(&b.value))
+            .map(|class| class.asset_class.clone())
+    })
+}
+
+/// A question worth asking, as a line in a ledger: a rule under it, and room around it.
 fn suggestion(question: String, index: usize, t: &Theme) -> El {
     let k = &t.kit;
     let shown = question.clone();
     ui::entering(
-        row()
-            .center_y()
-            .key(format!("ask-suggestion-{index}"))
-            .role("button")
-            .label(question.clone())
-            .focusable(true)
+        col()
             .w_full()
-            .gap(10.0)
-            .px(12.0)
-            .py(9.0)
-            .radius(6.0)
-            .border(1.0, k.c.border_muted)
-            .hover(k.c.hover)
-            .press_scale(ui::PRESS_ROW)
-            .on_press(move |s: &mut State| s.ask_question(shown.clone()))
-            .child(icon(&icons::SPARKLES, 14.0).color(k.c.icon_muted))
             .child(
-                text(question)
-                    .font(k.ty.ui)
-                    .color(k.c.text_base)
-                    .grow(1.0)
-                    .truncate(),
+                row()
+                    .center_y()
+                    .key(format!("ask-suggestion-{index}"))
+                    .role("button")
+                    .label(question.clone())
+                    .focusable(true)
+                    .w_full()
+                    .gap(12.0)
+                    .px(10.0)
+                    .py(13.0)
+                    .radius(6.0)
+                    .hover(k.c.hover)
+                    .press_scale(ui::PRESS_ROW)
+                    .on_press(move |s: &mut State| s.ask_question(shown.clone()))
+                    .child(icon(&icons::SPARKLES, 14.0).color(k.c.text_faint))
+                    .child(
+                        text(question)
+                            .font(k.ty.ui)
+                            .color(k.c.text_base)
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .truncate(),
+                    )
+                    .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(k.c.text_faint)),
             )
-            .child(icon(&icons::CHEVRON_RIGHT, 14.0).color(k.c.text_faint)),
+            .child(ui::rule(t)),
         index,
     )
 }
@@ -262,6 +310,17 @@ pub fn suggestions(s: &State) -> Vec<String> {
     out
 }
 
+/// Where a block sits in an answer: which turn, which block, and how long ago it landed. What
+/// the page draws around it depends on all three.
+#[derive(Clone)]
+pub struct Slot {
+    /// The block's key, which names every element it draws.
+    pub key: String,
+    pub turn: usize,
+    pub at: usize,
+    pub age: Option<f64>,
+}
+
 fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) -> El {
     let table = crate::facts::of(s);
     let mut first_say = true;
@@ -270,8 +329,13 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
         .iter()
         .enumerate()
         .filter_map(|(at, block)| {
-            let key = format!("ask-{index}-{at}");
-            let el = block_view(s, t, cx, block, &table, &mut first_say, &key)?;
+            let slot = Slot {
+                key: format!("ask-{index}-{at}"),
+                turn: index,
+                at,
+                age: turn.age(at, s.now),
+            };
+            let el = block_view(s, t, cx, block, &table, &mut first_say, &slot)?;
             Some(ui::entering(el, at))
         })
         .collect();
@@ -285,7 +349,8 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
                 .font(QUESTION)
                 .color(t.kit.c.text_muted)
                 .wrap()
-                .selectable(true),
+                .selectable(true)
+                .transition(ui::arrive()),
         )
         .children(blocks);
     let current = index + 1 == s.ask.turns.len();
@@ -294,8 +359,8 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
         && let Some(text) = s.ask.partial.as_deref()
         && !text.is_empty()
     {
-        answer =
-            answer.child(say(text, first_say, &table, s, t).key(format!("ask-{index}-partial")));
+        answer = answer
+            .child(say(text, first_say, &table, s, t, None).key(format!("ask-{index}-partial")));
     }
     if let Some(status) = status(s, t, turn, index) {
         answer = answer.child(status);
@@ -306,9 +371,11 @@ fn turn_view(s: &State, t: &Theme, cx: &Cx<State>, turn: &Turn, index: usize) ->
 /// What a turn says while it is waiting, stopped or failed.
 fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
     let k = &t.kit;
-    let _ = s;
     match turn.phase {
-        ask::Phase::Waiting => Some(
+        // The sidebar's door already turns its tumblers while a question is out, so the page
+        // shows nothing but the question until the first word. On a phone the door is small,
+        // so a quiet line stands in for it.
+        ask::Phase::Waiting if s.compact => Some(
             row()
                 .key(format!("ask-waiting-{index}"))
                 .role("status")
@@ -325,6 +392,7 @@ fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
                 })))
                 .child(ui::caption("Reading your portfolio", t)),
         ),
+        ask::Phase::Waiting => None,
         ask::Phase::Failed => Some(
             col()
                 .key(format!("ask-failed-{index}"))
@@ -366,7 +434,7 @@ fn status(s: &State, t: &Theme, turn: &Turn, index: usize) -> Option<El> {
         ),
         ask::Phase::Streaming => None,
         ask::Phase::Done if turn.blocks.is_empty() => {
-            Some(ui::caption("There was nothing to show for that.", t))
+            Some(ui::caption("There was nothing in that answer to show.", t))
         }
         ask::Phase::Done => None,
     }
@@ -379,16 +447,24 @@ fn block_view(
     block: &Block,
     table: &Table,
     first_say: &mut bool,
-    key: &str,
+    slot: &Slot,
 ) -> Option<El> {
-    let key = key.to_string();
+    let key = slot.key.clone();
     match block {
         Block::Say { text: words } => {
-            let el = say(words, *first_say, table, s, t).key(format!("{key}-say"));
+            // The first sentence of an answer arrives as words, not as a finished paragraph.
+            let visible = s
+                .ask
+                .reveal
+                .as_ref()
+                .filter(|reveal| reveal.turn == slot.turn && reveal.block == slot.at)
+                .filter(|_| !cx.is_reduced_motion())
+                .map(|reveal| reveal.words);
+            let el = say(words, *first_say, table, s, t, visible).key(format!("{key}-say"));
             *first_say = false;
             Some(el)
         }
-        Block::Figures { ids } => figures(ids, table, s, t, &key, ui::room(s, cx)),
+        Block::Figures { ids } => figures(ids, table, s, t, &key, ui::room(s, cx), slot),
         Block::Chart { period, span } => chart(s, t, cx, period.as_deref(), *span, &key),
         Block::Holdings { class, sort, map } => {
             if *map == Some(true) {
@@ -405,56 +481,84 @@ fn block_view(
             }
         }
         Block::Allocation => Some(allocation(s, t, &key)),
-        Block::Plan { fraction, amount } => Some(plan_block(s, t, *fraction, *amount, &key)),
-        Block::Scenario { shocks } => Some(scenario_block(s, t, shocks, &key)),
+        Block::Plan { fraction, amount } => {
+            Some(super::answer::plan_block(s, t, *fraction, *amount, slot))
+        }
+        Block::Scenario { shocks } => Some(super::answer::scenario(
+            s,
+            t,
+            shocks,
+            slot,
+            cx.is_reduced_motion(),
+        )),
         Block::Go { steps } => Some(go(steps, t, &key)),
     }
 }
 
-/// A sentence with its figures filled in from the fact table.
-fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
+/// How a sentence's figures are set: the app's own figures a little heavier, a figure the model
+/// wrote underlined in the warning colour.
+enum Mark {
+    Strong,
+    Unverified,
+}
+
+/// A sentence with its figures filled in from the fact table. `visible` cuts it after that many
+/// words, for the first sentence as it arrives.
+fn say(
+    words: &str,
+    first: bool,
+    table: &Table,
+    s: &State,
+    t: &Theme,
+    visible: Option<usize>,
+) -> El {
     let pieces = ask::pieces(words, table);
     let mut content = String::new();
-    let mut spans = Vec::new();
+    let mut marks: Vec<(usize, usize, Mark)> = Vec::new();
     let mut unverified = false;
+    let currency = s.currency();
     for piece in pieces {
         match piece {
             Piece::Text(text) => content.push_str(&text),
             Piece::Chip(id) => {
                 let start = content.len();
-                let shown = table
-                    .get(&id)
-                    .map_or_else(|| "—".to_string(), |fact| shown(fact, s));
-                content.push_str(&shown);
-                spans.push(
-                    Span::new(start, content.len())
-                        .weight(560.0)
-                        .color(t.kit.c.text_base),
+                let shown = table.get(&id).map_or_else(
+                    || "—".to_string(),
+                    |fact| ask::figure(fact, &content, s.privacy, &currency),
                 );
+                content.push_str(&shown);
+                marks.push((start, content.len(), Mark::Strong));
             }
             Piece::Gap(_) => {
                 let start = content.len();
                 content.push('—');
-                spans.push(
-                    Span::new(start, content.len())
-                        .color(t.warn)
-                        .underline(t.warn),
-                );
+                marks.push((start, content.len(), Mark::Unverified));
                 unverified = true;
             }
             Piece::Unverified(digits) => {
                 let start = content.len();
                 content.push_str(&digits);
-                spans.push(
-                    Span::new(start, content.len())
-                        .color(t.warn)
-                        .underline(t.warn),
-                );
+                marks.push((start, content.len(), Mark::Unverified));
                 unverified = true;
             }
         }
     }
-    let body = rich(content, spans)
+    if let Some(count) = visible {
+        content.truncate(ask::upto_words(&content, count));
+    }
+    let shown = content.len();
+    let spans: Vec<Span> = marks
+        .into_iter()
+        .filter(|(start, _, _)| *start < shown)
+        .map(|(start, end, mark)| {
+            let span = Span::new(start, end.min(shown));
+            match mark {
+                Mark::Strong => span.weight(560.0).color(t.kit.c.text_base),
+                Mark::Unverified => span.color(t.warn).underline(t.warn),
+            }
+        })
+        .collect();
+    let mut body = rich(content, spans)
         .font(if first {
             if s.compact { LEDE_COMPACT } else { LEDE }
         } else {
@@ -464,6 +568,10 @@ fn say(words: &str, first: bool, table: &Table, s: &State, t: &Theme) -> El {
         .wrap()
         .selectable(true)
         .max_w(760.0);
+    if first {
+        // Words, not a paragraph: each one fades in as it lands.
+        body = body.reveal(REVEAL_FADE);
+    }
     if unverified {
         body.help(UNVERIFIED)
     } else {
@@ -475,6 +583,17 @@ fn shown(fact: &Fact, s: &State) -> String {
     fact.value.render(s.privacy, &s.currency())
 }
 
+/// Whether this is the first answer to quote `id`: a figure counts up from zero the first time,
+/// and from the figure the last answer showed after that.
+fn first_time(s: &State, turn: usize, id: &str) -> bool {
+    !s.ask.turns.iter().take(turn).any(|earlier| {
+        earlier.blocks.iter().any(|block| match block {
+            Block::Figures { ids } => ids.iter().any(|each| each == id),
+            _ => false,
+        })
+    })
+}
+
 fn figures(
     ids: &[String],
     table: &Table,
@@ -482,21 +601,34 @@ fn figures(
     t: &Theme,
     key: &str,
     room: ui::Room,
+    slot: &Slot,
 ) -> Option<El> {
     let facts: Vec<&Fact> = ids.iter().filter_map(|id| table.get(id)).take(4).collect();
     if facts.is_empty() {
         return None;
     }
+    let currency = s.currency();
     let figure = |fact: &Fact, index: usize| {
+        let value = shown(fact, s);
+        // A figure that has just arrived counts up from zero; the rolling digits do the counting.
+        let counting =
+            slot.age.is_some_and(|age| age < ask::COUNT_HOLD) && first_time(s, slot.turn, &fact.id);
+        let text = if counting {
+            ask::zero(fact, s.privacy, &currency).unwrap_or_else(|| value.clone())
+        } else {
+            value
+        };
         col()
             .gap(4.0)
             .min_w(0.0)
             .child(ui::caption(fact.short.clone(), t).wrap())
             .child(
-                RollingText::new(format!("{key}-figure-{index}"), shown(fact, s))
+                // Keyed by the figure, so a later answer rolls from the one before it.
+                RollingText::new(format!("ask-figure-{}", fact.id), text)
                     .font(FIGURE)
                     .color(t.kit.c.text_base)
-                    .build(&t.kit),
+                    .build(&t.kit)
+                    .key(format!("{key}-figure-{index}")),
             )
     };
     Some(
@@ -533,7 +665,7 @@ fn chart(
                 &history.points,
                 t,
                 cx,
-                "ask-chart",
+                &format!("{key}-value"),
                 220.0,
             ))
             .child(ui::caption(s.ask_chart_name(period), t)),
@@ -691,161 +823,6 @@ fn allocation(s: &State, t: &Theme, key: &str) -> El {
                 .items_start()
                 .child(open_button("Open Allocation", Page::Allocation, t, key)),
         )
-}
-
-/// A rebalance plan, compactly, with the way to open it on the Rebalance page.
-fn plan_block(s: &State, t: &Theme, fraction: Option<f64>, amount: Option<f64>, key: &str) -> El {
-    let classes = plan::load_classes(s);
-    let (plan, title, detail) = match (fraction, amount) {
-        (Some(fraction), _) => {
-            let plan = crate::rebalance::blend(&classes, fraction);
-            let title = if fraction >= 0.999 {
-                "All the way to your targets".to_string()
-            } else {
-                format!(
-                    "{}% of the way to your targets",
-                    (fraction * 100.0).round() as i64
-                )
-            };
-            (plan, title, "The total stays where it is.".to_string())
-        }
-        (_, Some(amount)) if amount >= 0.0 => (
-            crate::rebalance::place(&classes, amount)
-                .unwrap_or_else(|_| crate::rebalance::today(&classes)),
-            "Where new money goes".to_string(),
-            format!("Buying only, {} in all.", s.money(amount)),
-        ),
-        (_, Some(amount)) => (
-            crate::rebalance::place(&classes, amount)
-                .unwrap_or_else(|_| crate::rebalance::today(&classes)),
-            "Where a withdrawal comes from".to_string(),
-            format!("Selling only, {} in all.", s.money(-amount)),
-        ),
-        _ => (
-            crate::rebalance::today(&classes),
-            String::new(),
-            String::new(),
-        ),
-    };
-    let trades = plan.trades.iter().map(|trade| {
-        row()
-            .center_y()
-            .w_full()
-            .gap(10.0)
-            .child(ui::dot(t.class_color(&trade.asset_class)))
-            .child(
-                text(trade.asset_class.clone())
-                    .font(t.kit.ty.ui)
-                    .color(t.kit.c.text_base)
-                    .grow(1.0)
-                    .truncate(),
-            )
-            .child(ui::caption(trade.action.label(), t))
-            .child(ui::number(s.money(trade.amount), t.kit.c.text_base))
-    });
-    let open = move |s: &mut State| {
-        if let Some(amount) = amount {
-            plan::set_amount(s, amount);
-        } else {
-            plan::set_blend(s, fraction.unwrap_or(0.0));
-        }
-        s.navigate(Page::Rebalance);
-    };
-    col()
-        .key(format!("{key}-plan"))
-        .w_full()
-        .gap(8.0)
-        .child(ui::header(title, detail, t))
-        .children(trades)
-        .child(
-            row().items_start().child(
-                Button::new("Open in Rebalance")
-                    .variant(ButtonVariant::Outline)
-                    .control_size(ControlSize::Small)
-                    .icon(&icons::SCALE)
-                    .on_press(open)
-                    .build(&t.kit)
-                    .key(format!("{key}-open-plan")),
-            ),
-        )
-}
-
-/// A what-if: the model's shocks, the app's consequences.
-fn scenario_block(s: &State, t: &Theme, shocks: &[crate::scenario::Shock], key: &str) -> El {
-    let classes = plan::load_classes(s);
-    let outcome = crate::scenario::project(&classes, shocks);
-    let name = |shock: &crate::scenario::Shock| {
-        if shock.percent <= -100.0 {
-            format!("{} goes to nothing", shock.class)
-        } else if shock.percent < 0.0 {
-            format!("{} falls {:.0}%", shock.class, -shock.percent)
-        } else if shock.percent > 0.0 {
-            format!("{} rises {:.0}%", shock.class, shock.percent)
-        } else {
-            format!("{} stands still", shock.class)
-        }
-    };
-    let words = if shocks.is_empty() {
-        "Nothing changes.".to_string()
-    } else {
-        let list = shocks.iter().map(name).collect::<Vec<_>>().join(", ");
-        match outcome.percent() {
-            Some(percent) => format!(
-                "If {list}, your total goes from {} to {} ({}).",
-                s.money(outcome.total_before),
-                s.money(outcome.total_after),
-                format::percent(percent)
-            ),
-            None => format!("If {list}, there is no total to change."),
-        }
-    };
-    let rows = outcome
-        .lines
-        .iter()
-        .filter(|line| line.before >= 0.005 || line.after >= 0.005)
-        .map(|line| {
-            let note = if line.leaves_band() {
-                Some("leaves its band")
-            } else if line.returns_to_band() {
-                Some("back inside its band")
-            } else {
-                None
-            };
-            vec![
-                row()
-                    .center_y()
-                    .gap(8.0)
-                    .child(ui::dot(t.class_color(&line.name)))
-                    .child(
-                        text(line.name.clone())
-                            .font(t.kit.ty.ui)
-                            .color(t.kit.c.text_base)
-                            .truncate(),
-                    ),
-                ui::number(format!("{:.1}%", line.before_share), t.kit.c.text_muted),
-                ui::number(format!("{:.1}%", line.after_share), t.kit.c.text_base),
-                note.map_or_else(
-                    || ui::number("", t.kit.c.text_faint),
-                    |note| ui::caption(note, t),
-                ),
-            ]
-        })
-        .collect();
-    col()
-        .key(format!("{key}-scenario"))
-        .w_full()
-        .gap(10.0)
-        .child(ui::header("If that happened", words, t))
-        .child(ui::table(&["Class", "Now", "Then", ""], rows, t))
-        .children((!outcome.unknown.is_empty()).then(|| {
-            ui::caption(
-                format!(
-                    "Nothing in the portfolio is called {}.",
-                    outcome.unknown.join(", ")
-                ),
-                t,
-            )
-        }))
 }
 
 fn go(steps: &[Step], t: &Theme, key: &str) -> El {

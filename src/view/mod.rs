@@ -1,6 +1,6 @@
 //! The window: pure functions from [`State`] to elements.
 
-use std::{env, mem};
+use std::{env, mem, path::Path};
 
 use rune::{
     Align, Cx, El, Icon, Key, KeyEvent, ScrollPos, ScrollSpec, Transition, Tx, col, el, icon, row,
@@ -17,6 +17,7 @@ use crate::{
     theme::{PAGE_TITLE, STATEMENT, STATEMENT_COMPACT, Theme, WORDMARK},
 };
 
+pub mod answer;
 pub mod answers;
 pub mod ask;
 mod charts;
@@ -24,8 +25,10 @@ mod compact;
 pub mod door;
 pub mod guide;
 mod insights;
+mod intake;
 mod overlays;
 mod overview;
+pub mod past;
 mod plan;
 pub mod portfolio;
 pub mod rebalance;
@@ -59,6 +62,10 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if event.key == Key::Escape {
+        // The sheet over the page is the first thing Escape puts away.
+        if s.intake.take().is_some() {
+            return true;
+        }
         // A plate lifted off the wall goes back on it first.
         if s.record_plate.take().is_some() {
             return true;
@@ -80,7 +87,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             || s.confirm.take().is_some()
             || s.folder_prompt.take().is_some()
             || mem::take(&mut s.guide)
-            || s.close_update_dialog();
+            || s.close_update_dialog()
+            // Last: the past is left only when nothing smaller was open.
+            || s.return_to_today();
     }
     if portfolio::holdings_key(s, event, tx) {
         return true;
@@ -106,6 +115,9 @@ pub fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         // Some layouts need Shift to type a slash, so it doesn't matter here.
         ('/' | '?', _) => s.toggle_guide(),
         ('q', false) => s.quit_or_ask(tx),
+        // A recorded day back or forward, from anywhere.
+        ('[', false) if s.has_portfolio() => s.step_time(-1),
+        (']', false) if s.has_portfolio() => s.step_time(1),
         (key, false) => match Page::from_shortcut(key) {
             Some(page) if s.has_portfolio() => s.navigate(page),
             _ => return false,
@@ -131,14 +143,20 @@ pub fn view(s: &State, cx: &mut Cx<State>) -> El {
         shell(s, &t, cx, &mut layer)
     };
     layer.extend(door::opening(s));
-    overlays::build(s, &t, &mut layer);
+    overlays::build(s, &t, cx, &mut layer);
 
     let body = body
         .fill(t.kit.c.bg_base)
         .on_drop_files(|s: &mut State, files, _| {
             s.drop_hover = false;
-            if let Some(path) = files.first() {
-                let path = path.clone();
+            let Some(path) = files.first() else {
+                return;
+            };
+            let path = path.clone();
+            // A broker's export goes to the review sheet; anything else opens as it always has.
+            if s.has_portfolio() && is_broker_file(&path) {
+                s.open_intake(&path);
+            } else {
                 s.open_dropped(&path);
             }
         })
@@ -167,6 +185,13 @@ fn drops_work() -> bool {
     // Nor does the iOS shell pass drops on yet.
     !cfg!(target_os = "ios")
         && (!cfg!(target_os = "linux") || env::var_os("WAYLAND_DISPLAY").is_none())
+}
+
+/// Whether a dropped file is a broker's export, which goes to the review sheet.
+fn is_broker_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "csv" | "tsv"))
 }
 
 fn welcome(s: &State, t: &Theme) -> El {
@@ -535,7 +560,7 @@ fn tool(icon: &'static Icon, label: &str, t: &Theme) -> IconButton {
         .help(label.to_string())
 }
 
-fn toolbar(s: &State, t: &Theme) -> Toolbar {
+fn toolbar(s: &State, t: &Theme, cx: &Cx<State>) -> Toolbar {
     let k = &t.kit;
     let refresh = if s.loading {
         Spinner::new().size(14.0).build(k).key("refreshing").mx(7.0)
@@ -614,7 +639,11 @@ fn toolbar(s: &State, t: &Theme) -> Toolbar {
         .leading(if s.positions.is_empty() {
             el()
         } else {
-            freshness(s, t)
+            row()
+                .center_y()
+                .gap(24.0)
+                .child(freshness(s, t))
+                .children(past::strip(s, t, cx))
         })
         .trailing(trailing)
 }
@@ -653,6 +682,10 @@ fn pane_fits(s: &State, cx: &Cx<State>) -> bool {
 /// The current page's content. Without `pane_fits`, a selected holding's details take the
 /// table's place.
 fn page_content(s: &State, t: &Theme, cx: &Cx<State>, pane_fits: bool) -> El {
+    // A page about today says so in the past, rather than show figures that read as current.
+    if let Some(note) = past::now_only(s, t) {
+        return note;
+    }
     let selected = s
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
@@ -749,7 +782,7 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .selected
         .and_then(|id| s.positions.iter().find(|position| position.id == id));
     let pane_fits = pane_fits(s, cx);
-    let scroller = if s.page == Page::Ask {
+    let scroller = if s.page == Page::Ask && !s.in_past() {
         ask::page(s, t, cx)
     } else {
         page_column(
@@ -768,10 +801,11 @@ fn shell(s: &State, t: &Theme, cx: &mut Cx<State>, layer: &mut Vec<El>) -> El {
         .grow(1.0)
         .min_h(0.0)
         .child(ui::light(s, t, 12.0))
+        .children(past::band(s, t))
         .child(scroller);
     let mut split = SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut State| &mut s.sidebar, sidebar(s, t))
-        .toolbar(toolbar(s, t))
+        .toolbar(toolbar(s, t, cx))
         .titlebar_inset(cx.titlebar_inset())
         .reduced_motion(cx.is_reduced_motion());
     if let Some(position) = selected.filter(|_| pane_fits) {

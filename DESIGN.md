@@ -70,6 +70,8 @@ From `src/view/ui.rs`. Reach for these before writing layout.
 | `ui::glass(s, t)` | A floating surface made of glass: a lens that blurs and bends the page behind it, a lit rim, a tint for legibility, and a shadow. Without a compositor it is `ui::floating` |
 | `ui::glow_orb(color, size, strength)` | A soft round light, for the head and live end of the value chart |
 | `ui::card(t)` | A flat box with a hairline border |
+| `ui::plate(s, t, plate, radius)` | A plate of brushed steel: the door's metal, flat, lit by the room's light and chamfered all round. The `Plate` (`src/fx.rs`) says how pale, how coloured, how raised and how much light it gives back. `ui::knob` is the same steel turned as a round knob, and `ui::steel` the face alone, for a surface that is not a plate |
+| `ui::steel_ink`, `ui::engraved` | The ink for words on steel, whatever the theme, and those words cut into it: dark, with the pale lip of the cut a point below |
 | `ui::ledger(t)` | A section with a rule over it and no box |
 | `ui::rule(t)` | A hairline |
 | `ui::floating(t)` | A surface over the page, with a shadow and a blur |
@@ -103,6 +105,9 @@ timings.
 | The pointer over a tile or a pressable surface | The edge nearest it catches a faint light, easing in and out; the surface's own hover fill springs as before | `fx::lift`, `.hover()` |
 | The door is turned by hand | Dragging the sidebar mark or the welcome door turns the dial with the pointer's angle, on the same heavy spring; letting go carries the hand's speed, so the steel coasts past and settles. Left and right arrows turn one notch when the door has focus | `door::vault`, `src/fx.rs` |
 | Something is being composed (an answer) | The door's tumblers turn slowly and the light on its steel breathes until the answer lands, then settle on a whole turn | `State::door_busy` |
+| An answer's first sentence (Counsel) | It arrives as words, not as a paragraph: about half a second a sentence, each word fading in as it lands while the block rises and sharpens as content does | `ask::Reveal`, `.reveal()`, `ui::entering` |
+| A what-if plays (Counsel) | The total rolls from today to what the shock would leave, the difference appears beside it in the gain or loss colour, and the allocation bar reshapes on a heavy one-second spring; the Now/Then toggle puts it back, and the details table is closed until asked for | `view/answer.rs`, `RollingText` |
+| Figures in an answer (Counsel) | They count up from zero the first time, and roll from the figure the last answer showed after that | `RollingText`, `ask::COUNT_HOLD` |
 | A portfolio opens | The landing page's opening, over about 1.8 s: the door starts where the welcome screen's was (or in the window's middle when the app launches straight into a portfolio), its tumblers turn, it pushes in until it fills the window, and its halves part to reveal the page, already laid out, between them | `door::opening`, `src/fx.rs` |
 | A press | A card gives to 0.98, a row to 0.995. Buttons don't move | `ui::PRESS_CARD`, `ui::PRESS_ROW` |
 | A new record arrives | The plate is set onto the wall: it comes the last six points out of a slight blur and settles, and a pale light falls over it once and fades | `ui::settle`, `ui::catch_light` |
