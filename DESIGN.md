@@ -34,11 +34,13 @@ All of these live in `src/theme.rs`. A page never defines its own.
 |---|---|
 | `HERO` | The total value. Newsreader 60, light, tabular figures (`HERO_COMPACT`, 46, on a phone) |
 | `STATEMENT` | The welcome screen's sentence. Newsreader 46 (`STATEMENT_COMPACT`, 32, on a phone) |
+| `LEDE` | The Overview's sentences about what changed. Newsreader 26 (`LEDE_COMPACT`, 21, on a phone) |
 | `PAGE_TITLE` | Every page's name, with its section in a caption above. Newsreader 32 |
 | `HOLDING_TITLE` | A holding's name in the details pane. Newsreader 24 |
 | `FIGURE` | Key figures beside a label (`ui::stat`). Newsreader 24, tabular |
 | `SECTION` | A section's name (`ui::title`). Newsreader 18 |
 | `WORDMARK` | "Stahl Capital" in the sidebar. Newsreader 16 |
+| `FACT` | The figures under the Overview's sentences. Inter 15, medium, tabular |
 | `NUMBER` | Numbers in tables and badges. Inter 13, medium, tabular |
 | `kit.ty.*` | Every other piece of text, from rune-kit, in Inter |
 | `Theme::up/down/warn/info` | Gain, loss, warning, information. Nothing else |
@@ -64,8 +66,38 @@ From `src/view/ui.rs`. Reach for these before writing layout.
 | `ui::title`, `ui::caption`, `ui::muted` | Section title, small label, secondary text |
 | `ui::stat`, `ui::badge`, `ui::finding` | A labelled figure, a coloured value, a finding with its dot |
 | `ui::share_bar`, `ui::stacked_bar`, `ui::gauge` | Shares of a whole, and progress against a target |
+| `door::vault(s, t, size, place)` | The living mark: still at rest, its dial turns once per refresh and once as a portfolio opens, one mark when something needs attention. `door::welcome` and `door::mark` are the flight's two ends |
+| `ui::arrive`, `ui::entering`, `ui::appear`, `ui::float_in`, `ui::notice_in`, `ui::page_arrive` | How things arrive: see "Motion" |
+| `ui::flash`, `ui::price_flash`, `ui::class_flash` | What a refresh moved, shown once in its colour |
 
 A new kind of thing on more than one page becomes a primitive here, with its look decided once.
+
+## Motion
+
+Motion says what changed and where it went. There are few kinds, all in `src/view/ui.rs` and
+`src/view/door.rs`; a page uses them and never writes its own offsets, springs or timings.
+
+| What happens | Motion | Primitive |
+|---|---|---|
+| Content arrives (cards, sections, a list) | Rises 12 pt and sharpens from a 5 pt blur; cards follow one another 0.05 s apart | `ui::entering(card, index)`, `ui::arrive()` |
+| Moving between pages | The new page comes 10 pt from the side moved towards: up from below going down the sidebar, from above going back; along the tabs on a phone. The old page only fades | `ui::page_arrive`, applied by the page container |
+| A small thing appears in place (a badge, a button, a mark) | Scales from 0.9 and fades | `ui::appear()` |
+| Something floats over the page (the palette, a menu) | Scales from 0.96 out of a 4 pt blur | `ui::float_in()` |
+| A banner or an error | Drops 6 pt from above | `ui::notice_in()` |
+| A value follows data (a bar, a highlight) | Springs on `LEAD` | `.motion(LEAD)` |
+| Prices land | What moved washes once in its gain or loss colour, in 0.12 s and out over 0.8 s; digits roll; the door's dial turns once (`door::DIAL_TURN`, 1.1 s, a small give) | `ui::flash`, `RollingText`, `door::vault` |
+| A portfolio opens | The welcome door travels to the mark and shrinks to it, the dial turning once as it lands. Nothing covers the page. With no welcome door, only the dial turns | `door::flight` |
+| A press | A card gives to 0.98, a row to 0.995. Buttons don't move | `ui::PRESS_CARD`, `ui::PRESS_ROW` |
+
+Rules:
+
+- Motion plays once, on a change, and then everything is still. A window at rest draws nothing.
+  Only the live-prices dot and loading placeholders breathe.
+- Keyed by what changed: a flash is keyed by the refresh, the door's flight by the portfolio's
+  shell first showing after the welcome screen, so neither replays on a page change, a redraw or a refresh.
+- Reduced motion lands every one of these at its final pose at once: nothing travels, turns or
+  flashes, and the door appears in its place instead of flying.
+- A new kind of motion is added here and in `ui.rs` first, then used.
 
 ## The icon
 

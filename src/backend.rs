@@ -40,9 +40,11 @@ use portfolio_rs::{
     validate::ValidationReport,
     workspace,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Error as JsonError, from_value, to_value};
 use tokio::{runtime::Handle, sync::RwLock};
+
+use crate::statement::{Change, Contribution, Seen};
 
 pub type BackendResult<T> = Result<T, String>;
 
@@ -54,6 +56,33 @@ fn report<E: Display>(error: E) -> String {
 /// The id `portfolio_rs snapshot` records under by default, so history made
 /// here and on the command line is the same history.
 const HISTORY_ID: &str = "main";
+
+/// Beside a portfolio's history: the days its owner looked at it.
+const SEEN_FILE: &str = "seen.json";
+
+#[derive(Serialize, Deserialize)]
+struct SeenFile {
+    last: String,
+    #[serde(default)]
+    before: Option<String>,
+}
+
+fn read_seen(text: &str) -> Option<Seen> {
+    let file: SeenFile = serde_json::from_str(text).ok()?;
+    Some(Seen {
+        last: snapshots::strict_date(&file.last)?,
+        before: file.before.as_deref().and_then(snapshots::strict_date),
+    })
+}
+
+fn write_seen(seen: Seen) -> String {
+    let day = |day: NaiveDate| day.format("%Y-%m-%d").to_string();
+    let file = SeenFile {
+        last: day(seen.last),
+        before: seen.before.map(day),
+    };
+    serde_json::to_string(&file).unwrap_or_default() + "\n"
+}
 
 /// What a positions file holds before anything is added to it.
 const NO_POSITIONS: &str = "[]\n";
@@ -476,6 +505,8 @@ impl Period {
 #[derive(Clone, Debug, Default)]
 pub struct History {
     pub points: Vec<HistoryValue>,
+    /// One line per holding, for the sparklines. Price when the snapshot recorded one.
+    pub series: Vec<HoldingSeries>,
     pub change: Option<f64>,
     pub net_contributions: Option<f64>,
     pub market_effect: Option<f64>,
@@ -483,6 +514,26 @@ pub struct History {
     pub twr_percent: Option<f64>,
     /// Today's valuation is written here, unless the portfolio is encrypted.
     pub path: Option<String>,
+}
+
+/// A holding's path over the same days as [`History::points`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoldingSeries {
+    pub position_id: String,
+    /// Quote-currency price when the snapshot had one, so a purchase does not read as a jump.
+    /// Value in the base currency only when no price was recorded (cash, a manual holding).
+    pub values: Vec<f64>,
+    pub priced: bool,
+}
+
+impl History {
+    /// The series for a holding, if it has at least two points to draw.
+    pub fn series(&self, position_id: &str) -> Option<&[f64]> {
+        self.series
+            .iter()
+            .find(|series| series.position_id == position_id && series.values.len() >= 2)
+            .map(|series| series.values.as_slice())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -590,6 +641,7 @@ fn build_history(
         market_effect: effects.as_ref().map(|effects| effects.market_effect),
         twr_percent,
         path,
+        series: series_from(&points),
         points: points
             .into_iter()
             .map(|point| HistoryValue {
@@ -598,6 +650,61 @@ fn build_history(
             })
             .collect(),
     }
+}
+
+/// One series per position that appears in the snapshots.
+///
+/// Price, in the quote currency, when at least two days recorded one. A buy changes the
+/// quantity and the value, not the price, so the line is the market and not the purchase.
+/// Value in the base currency is the fallback for cash and anything with no price; a deposit
+/// then does show as a step, because that is the only series those holdings have.
+fn series_from(points: &[HistoryPoint]) -> Vec<HoldingSeries> {
+    let mut ids = Vec::new();
+    for point in points {
+        for position in &point.positions {
+            if !ids.contains(&position.position_id) {
+                ids.push(position.position_id.clone());
+            }
+        }
+    }
+    ids.into_iter()
+        .filter_map(|id| {
+            let prices: Vec<f64> = points
+                .iter()
+                .filter_map(|point| {
+                    point
+                        .positions
+                        .iter()
+                        .find(|position| position.position_id == id)
+                        .and_then(|position| position.price)
+                })
+                .filter(|price| price.is_finite())
+                .collect();
+            if prices.len() >= 2 {
+                return Some(HoldingSeries {
+                    position_id: id,
+                    values: prices,
+                    priced: true,
+                });
+            }
+            let values: Vec<f64> = points
+                .iter()
+                .filter_map(|point| {
+                    point
+                        .positions
+                        .iter()
+                        .find(|position| position.position_id == id)
+                        .and_then(|position| position.value_base)
+                })
+                .filter(|value| value.is_finite())
+                .collect();
+            (values.len() >= 2).then_some(HoldingSeries {
+                position_id: id,
+                values,
+                priced: false,
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone)]
@@ -893,6 +1000,103 @@ impl Backend {
         self.state.refresh_prices().await;
     }
 
+    // --- Since the last look ---
+
+    /// Where the days the owner looked at this portfolio are kept: beside its history, so a
+    /// workspace keeps its own, and a test's data directory keeps the test's. Dates only.
+    async fn seen_path(&self) -> Option<PathBuf> {
+        Some(self.history_path().await?.parent()?.join(SEEN_FILE))
+    }
+
+    /// Note a look at the open portfolio today, and return the record as it stood before it.
+    pub async fn visit(&self) -> BackendResult<Option<Seen>> {
+        let Some(path) = self.seen_path().await else {
+            return Ok(None);
+        };
+        let previous = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| read_seen(&text));
+        let next = Seen::after_visit(previous, Local::now().date_naive());
+        if Some(next) != previous {
+            if let Some(dir) = path.parent() {
+                fs::create_dir_all(dir).map_err(report)?;
+            }
+            atomic_write::write_atomic_private(&path, write_seen(next).as_bytes())
+                .map_err(report)?;
+        }
+        Ok(previous)
+    }
+
+    /// The portfolio between the last stored valuation on or before `since` (the oldest one, for
+    /// `None`) and now. `None` when there is nothing to compare: no such valuation, a price
+    /// missing today, a flow of unknown size, or an encrypted portfolio, which has no history.
+    pub async fn change_since(&self, since: Option<NaiveDate>) -> BackendResult<Option<Change>> {
+        let encrypted = self
+            .state
+            .file_path()
+            .await
+            .is_none_or(|path| path.ends_with(".gpg"));
+        let Some(path) = self.history_path().await.filter(|_| !encrypted) else {
+            return Ok(None);
+        };
+        let (mut points, _skipped) = snapshots::read(&path);
+        let portfolio = self.state.portfolio().await;
+        let today = self.today_point(&portfolio).await;
+        if !today.complete {
+            return Ok(None);
+        }
+        points.retain(|point| {
+            point.complete && point.base_currency == today.base_currency && point.date < today.date
+        });
+        let start = match since {
+            Some(day) => {
+                let day = day.format("%Y-%m-%d").to_string();
+                points.iter().rev().find(|point| point.date <= day)
+            }
+            None => points.first(),
+        };
+        let Some(start) = start else {
+            return Ok(None);
+        };
+        let Some(from) = snapshots::strict_date(&start.date) else {
+            return Ok(None);
+        };
+        let base = self.state.currency().await;
+        let transactions = analytics::transactions(&portfolio, &base, None);
+        let Some(effects) = performance::position_effects(start, &today, &transactions) else {
+            return Ok(None);
+        };
+        let total = performance::total(&effects);
+        let market = today.total_base - start.total_base - total.net_contributions;
+        let names = self.state.get_positions().await;
+        let leader = effects
+            .iter()
+            .map(|(id, (_, effect))| (id, effect.market_effect + effect.manual_revaluation))
+            .filter(|(_, amount)| amount * market > 0.0)
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))
+            .and_then(|(id, amount)| {
+                let position = names
+                    .iter()
+                    .find(|position| position.position_id.as_deref() == Some(id.as_str()))?;
+                let name = position.name.clone().or_else(|| position.ticker.clone())?;
+                Some(Contribution { name, amount })
+            });
+        Ok(Some(Change {
+            from,
+            start: start.total_base,
+            end: today.total_base,
+            added: total.net_contributions,
+            leader,
+            previous_high: points
+                .iter()
+                .map(|point| point.total_base)
+                .max_by(f64::total_cmp),
+            history_from: points
+                .first()
+                .and_then(|point| snapshots::strict_date(&point.date)),
+        }))
+    }
+
     pub async fn add_position(&self, request: CreatePositionRequest) -> BackendResult<()> {
         self.state
             .add_position(request)
@@ -1078,6 +1282,7 @@ mod tests {
     use tokio::runtime::Runtime;
 
     use super::*;
+    use crate::demo;
 
     const CASH_ONLY: &str = r#"[{"Name":"Cash","AssetClass":"Cash","Amount":1000.0}]"#;
 
@@ -1604,6 +1809,59 @@ mod tests {
         assert_eq!(history.change, Some(10.0));
     }
 
+    fn position(
+        id: &str,
+        price: Option<f64>,
+        value: Option<f64>,
+    ) -> portfolio_rs::mcp::snapshots::SnapshotPosition {
+        portfolio_rs::mcp::snapshots::SnapshotPosition {
+            position_id: id.to_string(),
+            kind: if price.is_some() { "market" } else { "cash" }.to_string(),
+            asset_class: "Stocks".to_string(),
+            quantity: 1.0,
+            price,
+            price_currency: price.map(|_| "EUR".to_string()),
+            fx_rate: Some(1.0),
+            value_base: value,
+            ledger_base: None,
+            stale: Some(false),
+        }
+    }
+
+    #[test]
+    fn a_sparkline_uses_price_so_a_purchase_is_not_a_jump() {
+        let mut first = point("2026-03-01", 100.0, true);
+        let mut second = point("2026-03-02", 320.0, true);
+        // Bought another share: value doubles-and-some, price only moves 10%.
+        first.positions = vec![position("pos_spy", Some(100.0), Some(100.0))];
+        second.positions = vec![position("pos_spy", Some(110.0), Some(220.0))];
+        first.positions.push(position("pos_cash", None, Some(50.0)));
+        second
+            .positions
+            .push(position("pos_cash", None, Some(50.0)));
+        let mut once = point("2026-03-03", 1.0, true);
+        once.positions = vec![position("pos_new", Some(5.0), Some(5.0))];
+
+        let history = build_history(vec![first, second, once], &[], None);
+        let spy = history.series("pos_spy").unwrap();
+        assert_eq!(spy, [100.0, 110.0], "price, not the value after the buy");
+        assert!(
+            history
+                .series
+                .iter()
+                .any(|series| series.position_id == "pos_spy" && series.priced)
+        );
+        assert_eq!(history.series("pos_cash"), Some([50.0, 50.0].as_slice()));
+        assert!(
+            history
+                .series
+                .iter()
+                .any(|series| series.position_id == "pos_cash" && !series.priced),
+            "cash has no price, so the line is its value"
+        );
+        assert_eq!(history.series("pos_new"), None, "one point is not a line");
+    }
+
     #[test]
     fn one_valuation_has_no_change_yet() {
         let history = build_history(vec![point("2026-03-01", 100.0, true)], &[], None);
@@ -1646,6 +1904,73 @@ mod tests {
             backend.record_today().await.unwrap();
         });
         assert!(!dir.path().join("main").exists());
+    }
+
+    #[test]
+    fn a_look_is_remembered_beside_the_history_and_measured_from() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("portfolio");
+        demo::seed_workspace(&root);
+        let seen = root.join("portfolio/history/main").join(SEEN_FILE);
+        fs::remove_file(&seen).ok();
+        let backend = demo::backend(dir.path(), Some(&root), runtime.handle().clone());
+        let today = Local::now().date_naive();
+
+        runtime.block_on(async {
+            backend.startup(None).await.unwrap();
+            assert_eq!(backend.visit().await.unwrap(), None, "the first look");
+            let again = backend.visit().await.unwrap();
+            assert_eq!(
+                again,
+                Some(Seen {
+                    last: today,
+                    before: None
+                })
+            );
+            let written = fs::read_to_string(&seen).unwrap();
+            assert_eq!(
+                written,
+                format!(
+                    "{{\"last\":\"{}\",\"before\":null}}\n",
+                    today.format("%Y-%m-%d")
+                ),
+                "dates and nothing else"
+            );
+
+            let week = backend
+                .change_since(Some(today - Duration::days(7)))
+                .await
+                .unwrap()
+                .expect("the demo has 90 days of history");
+            assert_eq!(week.from, today - Duration::days(7));
+            assert!(week.added.abs() < 0.01, "only prices moved: {}", week.added);
+            assert!(week.leader.is_some());
+            assert_eq!(week.history_from, Some(today - Duration::days(90)));
+
+            let oldest = backend.change_since(None).await.unwrap().unwrap();
+            assert_eq!(oldest.from, today - Duration::days(90));
+            assert!(
+                backend
+                    .change_since(Some(today - Duration::days(400)))
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "nothing that old to compare with"
+            );
+        });
+    }
+
+    #[test]
+    fn a_broken_record_of_looks_counts_as_none() {
+        assert_eq!(read_seen("not json"), None);
+        assert_eq!(read_seen(r#"{"last":"2026-11-10T00:00"}"#), None);
+        let day = NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        let seen = Seen {
+            last: day,
+            before: Some(day - Duration::days(3)),
+        };
+        assert_eq!(read_seen(&write_seen(seen)), Some(seen));
     }
 
     #[test]

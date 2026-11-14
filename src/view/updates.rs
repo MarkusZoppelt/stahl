@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use rune::{El, ScrollSpec, Transition, Tx, col, icon, row, text};
+use rune::{El, ScrollSpec, Tx, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, Dialog, Markdown, Spinner};
 
 use crate::{
@@ -49,7 +49,7 @@ fn banner(s: &State, release: &Release, t: &Theme) -> El {
         .padding(14.0)
         .gap(10.0)
         .fill(k.c.layer_01)
-        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()))
+        .transition(ui::arrive())
         .child(
             row()
                 .center_y()

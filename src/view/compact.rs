@@ -10,7 +10,7 @@ use crate::{
     icons,
     state::{Page, State},
     theme::{PAGE_TITLE, Theme},
-    view::{freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui},
+    view::{door, freshness, guide, page_column, page_content, page_heading, page_icon, tool, ui},
 };
 
 /// Side margin of a page on a phone.
@@ -39,12 +39,15 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .child(back_to_more(t))
                 .child(page_heading(s, t))
         };
+        // Overview says what the page is for in its own sentence. On a phone, repeating it
+        // in a caption pushes what to do under the tab bar.
+        let about = (s.page != Page::Overview).then(|| guide::about(s.page));
         page_column(
             s,
             t,
             format!("page-{}", s.page.key()),
             heading,
-            Some(guide::about(s.page)),
+            about,
             page_content(s, t, cx, false),
             MARGIN,
         )
@@ -122,7 +125,7 @@ fn top_bar(s: &State, t: &Theme) -> El {
                         .rotate_motion(Spring::new(0.7, 0.35))
                         .press_scale(0.9)
                         .on_press(|s: &mut State| s.turn_door())
-                        .child(ui::door(22.0)),
+                        .child(door::mark(s, t, 22.0, "phone")),
                 )
                 .children((!s.positions.is_empty()).then(|| freshness(s, t))),
         )

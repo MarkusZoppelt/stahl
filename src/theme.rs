@@ -44,6 +44,18 @@ pub const STATEMENT: TextStyle = TextStyle::new(46.0, 340.0)
     .family(SERIF)
     .lh(52.0)
     .tracking(-0.9);
+/// The Overview's sentences about what changed since the owner last looked.
+pub const LEDE: TextStyle = TextStyle::new(26.0, 360.0)
+    .family(SERIF)
+    .lh(34.0)
+    .tracking(-0.3)
+    .features("'tnum' 1");
+/// [`LEDE`] on a phone.
+pub const LEDE_COMPACT: TextStyle = TextStyle::new(21.0, 360.0)
+    .family(SERIF)
+    .lh(28.0)
+    .tracking(-0.2)
+    .features("'tnum' 1");
 /// A section's name, on a page.
 pub const SECTION: TextStyle = TextStyle::new(18.0, 400.0)
     .family(SERIF)
@@ -55,6 +67,8 @@ pub const FIGURE: TextStyle = TextStyle::new(24.0, 360.0)
     .lh(30.0)
     .tracking(-0.3)
     .features("'tnum' 1");
+/// A figure under the Overview's sentences: quieter than [`FIGURE`], louder than [`NUMBER`].
+pub const FACT: TextStyle = TextStyle::new(15.0, 500.0).lh(20.0).features("'tnum' 1");
 pub const NUMBER: TextStyle = TextStyle::new(13.0, 500.0).features("'tnum' 1");
 
 /// Colours for allocation charts, cycled by slice.

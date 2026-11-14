@@ -9,10 +9,14 @@
 
 use std::{env, fs, process, time::SystemTime};
 
-use portfolio_rs::config::ThemeMode;
+use portfolio_rs::{
+    config::ThemeMode,
+    mcp::dto::{Category, Finding, Severity},
+};
 use stahl::{
     app, demo,
-    state::{Confirm, FolderPrompt, Page, PendingOpen, State, UpdatePhase},
+    state::{Confirm, FolderPrompt, Page, PendingOpen, RebalanceOrigin, State, UpdatePhase},
+    statement::Since,
     update::Installation,
 };
 use tokio::runtime::Builder;
@@ -81,10 +85,44 @@ fn main() {
         s.settle();
         s.updates.dialog = dialog;
     }
+    /// What a refresh that moved two prices leaves behind: stocks up, long bonds down. The
+    /// demo's quotes are fixed, so the figures on screen stay as they were; this shows the flash.
+    fn moved_prices(s: &mut State) {
+        let id = |s: &State, ticker: &str| {
+            s.positions
+                .iter()
+                .find(|position| position.ticker.as_deref() == Some(ticker))
+                .map(|position| position.id)
+        };
+        s.price_moves = [
+            id(s, "SPY").map(|id| (id, 0.012)),
+            id(s, "TLT").map(|id| (id, -0.01)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        s.price_updates += 1;
+    }
     /// A page in the phone layout. Render these at an iPhone's size: `--size 390x844`.
     fn phone(s: &mut State, page: Page) {
         s.compact = true;
         scene(s, page);
+    }
+    /// As on the first day: nothing to compare with yet.
+    fn first_look(s: &mut State) {
+        s.since = Some(Since::First);
+        s.change = None;
+        s.history = None;
+    }
+    /// A portfolio on its targets, so the agenda has nothing to ask.
+    fn on_target(s: &mut State) {
+        if let Some(review) = &mut s.review.data {
+            for class in &mut review.allocations {
+                class.actual_percent = class.target_percent + 0.6 * class.drift_percent.signum();
+                class.drift_percent = class.actual_percent - class.target_percent;
+                class.within_tolerance = true;
+            }
+        }
     }
     fn mac() -> Installation {
         Installation::MacApp {
@@ -95,8 +133,24 @@ fn main() {
         backend,
         env::args().skip(1).collect(),
         &[
+            // A return after some days: the demo's last look was earlier in the week.
             ("overview", |s| scene(s, Page::Overview)),
             ("holdings", |s| scene(s, Page::Holdings)),
+            ("holdings-map", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
+            ("holdings-map-light", |s| {
+                scene(s, Page::Holdings);
+                s.holdings_map = true;
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("holdings-light", |s| {
+                scene(s, Page::Holdings);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("holding-details", |s| {
                 scene(s, Page::Holdings);
                 s.select_position(0);
@@ -107,8 +161,37 @@ fn main() {
             }),
             ("allocation", |s| scene(s, Page::Allocation)),
             ("performance", |s| scene(s, Page::Performance)),
+            ("performance-span", |s| {
+                scene(s, Page::Performance);
+                s.measure.span = Some((2, 14));
+            }),
+            ("performance-span-light", |s| {
+                scene(s, Page::Performance);
+                s.measure.span = Some((2, 14));
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("review", |s| scene(s, Page::Review)),
             ("rebalance", |s| scene(s, Page::Rebalance)),
+            ("rebalance-light", |s| {
+                scene(s, Page::Rebalance);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("rebalance-dragged", |s| {
+                scene(s, Page::Rebalance);
+                // Ten points out of Crypto, into Cash.
+                stahl::view::rebalance::nudge(s, 3, -20);
+            }),
+            ("rebalance-full", |s| {
+                scene(s, Page::Rebalance);
+                s.rebalance.origin = RebalanceOrigin::Full;
+            }),
+            ("rebalance-invest", |s| {
+                scene(s, Page::Rebalance);
+                s.rebalance.amount.replace_text("2000");
+                s.rebalance.origin = RebalanceOrigin::Flow(2000.0);
+            }),
             ("policy", |s| scene(s, Page::Policy)),
             ("documents", |s| {
                 scene(s, Page::Documents);
@@ -200,8 +283,44 @@ fn main() {
                 scene(s, Page::Overview);
                 s.privacy = true;
             }),
+            ("overview-first-look", |s| {
+                scene(s, Page::Overview);
+                first_look(s);
+            }),
+            ("overview-first-light", |s| {
+                scene(s, Page::Overview);
+                first_look(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
+            ("overview-clear", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+            }),
+            ("overview-clear-light", |s| {
+                scene(s, Page::Overview);
+                on_target(s);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+            }),
             ("phone-overview", |s| phone(s, Page::Overview)),
+            ("phone-overview-first", |s| {
+                phone(s, Page::Overview);
+                first_look(s);
+            }),
+            ("phone-overview-clear", |s| {
+                phone(s, Page::Overview);
+                on_target(s);
+            }),
+            ("phone-privacy", |s| {
+                phone(s, Page::Overview);
+                s.privacy = true;
+            }),
             ("phone-holdings", |s| phone(s, Page::Holdings)),
+            ("phone-holdings-map", |s| {
+                phone(s, Page::Holdings);
+                s.holdings_map = true;
+            }),
             ("phone-holding-details", |s| {
                 phone(s, Page::Holdings);
                 s.select_position(0);
@@ -248,6 +367,85 @@ fn main() {
                 scene(s, Page::Overview);
                 s.set_theme(ThemeMode::Light);
                 s.settle();
+            }),
+            // Launched into a portfolio, the door's dial turns once, a frame after it is painted
+            // at rest, so the frames from 0.05 s to 1.2 s show it turning.
+            ("door-turn", |s| scene(s, Page::Overview)),
+            // The welcome door flies to the mark. Held on the welcome screen until 0.08s, after
+            // the large door has been painted, then the shell mounts and the door travels.
+            ("door-open", |s| {
+                scene(s, Page::Overview);
+                s.hold_welcome_until = Some(0.08);
+            }),
+            ("door-open-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.hold_welcome_until = Some(0.08);
+            }),
+            ("phone-door-open", |s| {
+                s.compact = true;
+                scene(s, Page::Overview);
+                s.hold_welcome_until = Some(0.08);
+            }),
+            // A refresh that moves two prices: what moved flashes once in its colour.
+            ("price-moves", |s| {
+                scene(s, Page::Allocation);
+                moved_prices(s);
+            }),
+            ("phone-price-moves", |s| {
+                phone(s, Page::Allocation);
+                moved_prices(s);
+            }),
+            ("door-attention", |s| {
+                scene(s, Page::Overview);
+                s.findings.push(Finding {
+                    code: "cash_below_minimum_amount".into(),
+                    severity: Severity::Warning,
+                    category: Category::Policy,
+                    message: "Cash is below the minimum your policy sets".into(),
+                    position_id: None,
+                    asset_class: None,
+                    detail: None,
+                });
+            }),
+            ("door-attention-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.findings.push(Finding {
+                    code: "cash_below_minimum_amount".into(),
+                    severity: Severity::Warning,
+                    category: Category::Policy,
+                    message: "Cash is below the minimum your policy sets".into(),
+                    position_id: None,
+                    asset_class: None,
+                    detail: None,
+                });
+            }),
+            // The palette answering, before anyone goes anywhere: a class's value, share and day.
+            ("palette-answer", |s| {
+                scene(s, Page::Overview);
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
+            }),
+            ("palette-answer-light", |s| {
+                scene(s, Page::Overview);
+                s.set_theme(ThemeMode::Light);
+                s.settle();
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
+            }),
+            ("phone-palette-answer", |s| {
+                phone(s, Page::Overview);
+                s.open_palette();
+                if let Some(palette) = &mut s.palette {
+                    palette.query.replace_text("stocks");
+                }
             }),
             ("update-banner", |s| update_scene(s, mac(), false)),
             ("update-dialog", |s| update_scene(s, mac(), true)),

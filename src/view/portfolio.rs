@@ -2,10 +2,7 @@
 
 use std::cmp::Ordering;
 
-use portfolio_rs::{
-    mcp::dto::Severity,
-    state::{PositionDto, TopMoverDto},
-};
+use portfolio_rs::state::{PositionDto, TopMoverDto};
 use rune::{
     Beat, Color, Cx, El, Icon, Key, KeyEvent, PopupItem, PopupMenu, ScrollPos, Sequence, Tx, col,
     el, icon, popup_menu_supported, row, text, tok::motion::LEAD,
@@ -19,7 +16,7 @@ use crate::{
     format, icons,
     state::{Confirm, Page, SWIPE_ACTIONS, SortBy, State, file_name, swipe_key},
     theme::{HERO, HERO_COMPACT, HOLDING_TITLE, NUMBER, Theme},
-    view::{charts, guide, ui},
+    view::{charts, guide, overview, ui},
 };
 
 fn display_name(position: &PositionDto) -> String {
@@ -42,6 +39,39 @@ fn compare(a: &PositionDto, b: &PositionDto, sort: SortBy) -> Ordering {
         SortBy::Value => a.value.total_cmp(&b.value),
         SortBy::Pnl => number(a.pnl_percent, b.pnl_percent),
         SortBy::Day => number(a.day_change_percent, b.day_change_percent),
+        SortBy::Impact => number(day_amount(a), day_amount(b)),
+    }
+}
+
+/// A holding's change today, in the portfolio's currency.
+///
+/// `day_change_percent` is the price move, so the amount is that move applied to yesterday's
+/// value. Cash and anything without a previous close contribute nothing. A total loss can't be
+/// recovered from today's value alone, so it is left unknown.
+pub fn day_amount(position: &PositionDto) -> Option<f64> {
+    let percent = position.day_change_percent?;
+    if !position.value.is_finite() || !percent.is_finite() || percent <= -100.0 {
+        return None;
+    }
+    let factor = 1.0 + percent / 100.0;
+    Some(position.value * (percent / 100.0) / factor)
+}
+
+/// `amount` as percentage points of the portfolio's value at the previous close.
+///
+/// A holding that is 40% of the portfolio and down 0.6% moves it by about 0.24 points, which is
+/// more than a 5% holding up 2%. `None` when yesterday's total isn't positive.
+pub fn day_points(amount: Option<f64>, previous_total: f64) -> Option<f64> {
+    let amount = amount?;
+    (previous_total > 0.0 && amount.is_finite()).then_some(amount / previous_total * 100.0)
+}
+
+/// The portfolio's value at the previous close, from today's total and today's move.
+pub fn previous_total(total: f64, day_change: f64) -> f64 {
+    if total.is_finite() && day_change.is_finite() {
+        total - day_change
+    } else {
+        0.0
     }
 }
 
@@ -67,18 +97,51 @@ const FLASH: &[Beat] = &[
     Beat::new(0.9).opacity(0.0),
 ];
 
-fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
+/// The total, with today's move under it. The hero of the page.
+fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
     let k = &t.kit;
     let Some(summary) = &s.summary else {
         return col();
     };
-    let points = s
-        .history
-        .as_ref()
-        .map_or(&[][..], |history| &history.points[..]);
     let day = t.change(summary.day_change_percent);
-    let room = ui::room(s, cx);
-    let narrow = room == ui::Room::Narrow;
+    col()
+        .gap(2.0)
+        .child(ui::caption("Total value", t))
+        .child(
+            RollingText::new("hero-total", s.money(summary.total_value))
+                .font(if narrow { HERO_COMPACT } else { HERO })
+                .color(k.c.text_base)
+                .value(summary.total_value)
+                .build(k)
+                .key("total-value"),
+        )
+        .child(
+            row()
+                .center_y()
+                .gap(8.0)
+                .child(
+                    RollingText::new(
+                        "hero-day",
+                        format!(
+                            "{} ({})",
+                            s.signed_money(summary.day_change),
+                            format::percent(summary.day_change_percent),
+                        ),
+                    )
+                    .font(k.ty.ui_medium)
+                    .color(day)
+                    .value(summary.day_change)
+                    .build(k),
+                )
+                .child(ui::muted("today", t)),
+        )
+}
+
+/// How the total splits. Beside it when there's room; under it, or below the agenda on a phone.
+fn hero_figures(s: &State, t: &Theme, room: ui::Room) -> El {
+    let Some(summary) = &s.summary else {
+        return col();
+    };
     let figures = [
         ui::stat(
             "Unrealized PnL",
@@ -90,25 +153,41 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         ui::stat("Securities", s.money(summary.securities_value), None, t),
         ui::stat("Cash", s.money(summary.cash_value), None, t),
     ];
-    // Beside the total when there's room; under it otherwise, in two columns on a phone.
-    let figures = match room {
+    match room {
         ui::Room::Wide => row().center_y().gap(36.0).pb(2.0).children(figures),
         _ => ui::columns(room, [3, 3, 2], 16.0).children(figures),
+    }
+}
+
+fn hero(s: &State, t: &Theme, cx: &Cx<State>, with_figures: bool) -> El {
+    let Some(summary) = &s.summary else {
+        return col();
     };
-    let top = if room != ui::Room::Wide {
-        col().w_full().gap(20.0)
-    } else {
+    let room = ui::room(s, cx);
+    let narrow = room == ui::Room::Narrow;
+    let day = t.change(summary.day_change_percent);
+    let total = hero_total(s, t, narrow);
+    let body = if !with_figures {
+        total
+    } else if room == ui::Room::Wide {
         row()
             .center_y()
             .w_full()
             .justify_between()
             .items_end()
             .gap(32.0)
+            .child(total)
+            .child(hero_figures(s, t, room))
+    } else {
+        col()
+            .w_full()
+            .gap(16.0)
+            .child(total)
+            .child(hero_figures(s, t, room))
     };
     col()
         .key("hero")
         .w_full()
-        .gap(12.0)
         .child(
             // A new key each refresh, which replays it: the numbers just changed, look here.
             el().key(format!("hero-flash-{}", s.price_updates))
@@ -120,50 +199,7 @@ fn hero(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .a11y_hidden()
                 .sequence(Sequence::new(FLASH)),
         )
-        .child(
-            top.child(
-                col()
-                    .gap(2.0)
-                    .child(ui::caption("Total value", t))
-                    .child(
-                        RollingText::new("hero-total", s.money(summary.total_value))
-                            .font(if narrow { HERO_COMPACT } else { HERO })
-                            .color(k.c.text_base)
-                            .value(summary.total_value)
-                            .build(k)
-                            .key("total-value"),
-                    )
-                    .child(
-                        row()
-                            .center_y()
-                            .gap(8.0)
-                            .child(
-                                RollingText::new(
-                                    "hero-day",
-                                    format!(
-                                        "{} ({})",
-                                        s.signed_money(summary.day_change),
-                                        format::percent(summary.day_change_percent),
-                                    ),
-                                )
-                                .font(k.ty.ui_medium)
-                                .color(day)
-                                .value(summary.day_change)
-                                .build(k),
-                            )
-                            .child(ui::muted("today", t)),
-                    ),
-            )
-            .child(figures),
-        )
-        .child(col().w_full().child(charts::value_chart(
-            s,
-            points,
-            t,
-            cx,
-            "overview-chart",
-            230.0,
-        )))
+        .child(body)
 }
 
 fn allocation_card(s: &State, t: &Theme) -> El {
@@ -271,43 +307,6 @@ fn movers_card(s: &State, t: &Theme) -> El {
                                 .shrink(),
                         )
                         .child(ui::badge(format::percent(change), t.change(change)))
-                })),
-        )
-}
-
-fn attention_card(s: &State, t: &Theme) -> El {
-    let k = &t.kit;
-    let mut findings: Vec<_> = s
-        .findings
-        .iter()
-        .filter(|finding| !matches!(finding.severity, Severity::Info))
-        .collect();
-    findings.sort_by_key(|finding| !matches!(finding.severity, Severity::Critical));
-    ui::ledger(t)
-        .child(ui::title("Needs attention", t))
-        .children(findings.is_empty().then(|| {
-            row()
-                .center_y()
-                .gap(8.0)
-                .center_y()
-                .child(icon(&icons::CHECK_CIRCLE, 16.0).color(t.up))
-                .child(
-                    text("Nothing right now. Your data looks good.")
-                        .font(k.ty.ui)
-                        .color(k.c.text_muted)
-                        .wrap()
-                        .shrink(),
-                )
-        }))
-        .child(
-            col()
-                .gap(8.0)
-                .children(findings.into_iter().take(4).map(|finding| {
-                    let color = match finding.severity {
-                        Severity::Critical => t.down,
-                        _ => t.warn,
-                    };
-                    ui::finding(color, finding.message.clone(), None, t)
                 })),
         )
 }
@@ -420,8 +419,8 @@ fn first_steps(s: &State, t: &Theme) -> El {
             .gap(4.0)
             .child(ui::header(
                 "Your portfolio is empty",
-                "Once it has positions, this page shows their total value, how it has moved, and \
-                 anything that needs a look.",
+                "Once it has positions, this page says what changed, where you stand, and what to \
+                 look at.",
                 t,
             ))
             .child(col().w_full().mt(8.0).children(steps)),
@@ -429,16 +428,28 @@ fn first_steps(s: &State, t: &Theme) -> El {
     )
 }
 
+/// Overview reads top to bottom: what happened, where you stand, what to do. The month's chart
+/// is on Performance, so a usual window shows this whole page without the agenda falling off it.
 pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     if s.positions.is_empty() {
         return first_steps(s, t);
     }
-    col().w_full().gap(28.0).child(hero(s, t, cx)).child(
-        ui::columns(ui::room(s, cx), [3, 2, 1], 32.0)
-            .child(ui::entering(allocation_card(s, t), 0))
-            .child(ui::entering(movers_card(s, t), 1))
-            .child(ui::entering(attention_card(s, t), 2)),
-    )
+    let room = ui::room(s, cx);
+    let narrow = room == ui::Room::Narrow;
+    // On a phone the three standing figures follow the agenda, so what to do is on screen
+    // without scrolling. The total stays the hero, above it.
+    col()
+        .w_full()
+        .gap(if narrow { 16.0 } else { 24.0 })
+        .children(overview::statement(s, t, cx).map(|statement| ui::entering(statement, 0)))
+        .child(hero(s, t, cx, !narrow))
+        .child(ui::entering(overview::agenda(s, t, narrow), 1))
+        .children(narrow.then(|| hero_figures(s, t, room)))
+        .child(
+            ui::columns(room, [2, 2, 1], if narrow { 16.0 } else { 32.0 })
+                .child(ui::entering(allocation_card(s, t), 2))
+                .child(ui::entering(movers_card(s, t), 3)),
+        )
 }
 
 // --- Holdings ---
@@ -449,7 +460,15 @@ struct Columns {
     class: bool,
     pnl: bool,
     today: bool,
+    /// How much of the portfolio's move today came from the holding. Narrower tables fold it
+    /// under Today's own percentage instead of dropping it.
+    impact: bool,
+    /// Each holding's past month, when there's room and any holding has one.
+    lines: bool,
 }
+
+/// How wide a row's line is, and its column.
+const LINE_W: f32 = 72.0;
 
 impl Columns {
     fn for_width(width: f32) -> Columns {
@@ -457,6 +476,9 @@ impl Columns {
             class: width >= 720.0,
             pnl: width >= 560.0,
             today: width >= 340.0,
+            // Beside the details pane the table already drops Class and PnL; this goes with them.
+            impact: width >= 880.0,
+            lines: false,
         }
     }
 
@@ -515,14 +537,82 @@ fn header_cell(
     if right { cell.justify_end() } else { cell }
 }
 
-fn holding_row(
-    s: &State,
-    position: &PositionDto,
+/// One holding's share of today's move, for the table and the details.
+struct TodayShare {
+    /// Change in the portfolio's currency. `None` when it can't be known.
+    amount: Option<f64>,
+    /// Percentage points of yesterday's portfolio. `None` when it can't be known.
+    points: Option<f64>,
+}
+
+fn today_share(position: &PositionDto, previous: f64) -> TodayShare {
+    let amount = day_amount(position);
+    TodayShare {
+        points: day_points(amount, previous),
+        amount,
+    }
+}
+
+/// How far a move reaches from the centre, as a fraction of one half. A loss and a gain of the
+/// same size reach equally far, on opposite sides.
+pub(super) fn diverge_reach(amount: Option<f64>, largest: f64) -> (f32, bool) {
+    let Some(amount) = amount.filter(|amount| amount.is_finite() && *amount != 0.0) else {
+        return (0.0, true);
+    };
+    let reach = if largest > 0.0 {
+        (amount.abs() / largest) as f32
+    } else {
+        1.0
+    };
+    (reach.clamp(0.0, 1.0), amount > 0.0)
+}
+
+/// Who moved the portfolio today: losses grow left of a centre line, gains right, both scaled
+/// to the largest move.
+fn share_bar(share: &TodayShare, largest: f64, t: &Theme) -> El {
+    let (reach, gain) = diverge_reach(share.amount, largest);
+    let fill = |on: bool, color: Color| {
+        el().h(3.0)
+            .w_frac(if on { reach } else { 0.0 })
+            .radius(1.0)
+            .fill(color)
+            .motion(LEAD)
+    };
+    row()
+        .center_y()
+        .w_full()
+        .h(7.0)
+        .a11y_hidden()
+        .child(
+            row()
+                .center_y()
+                .grow(1.0)
+                .h_full()
+                .justify_end()
+                .child(fill(!gain, t.down)),
+        )
+        .child(el().w(1.0).h_full().fill(t.kit.c.text_faint))
+        .child(row().center_y().grow(1.0).h_full().child(fill(gain, t.up)))
+}
+
+struct RowFace<'a> {
     columns: Columns,
+    share: &'a TodayShare,
+    largest: f64,
+    progress: f32,
     first: bool,
     last: bool,
-    t: &Theme,
-) -> El {
+}
+
+fn holding_row(s: &State, position: &PositionDto, face: RowFace<'_>, t: &Theme) -> El {
+    let RowFace {
+        columns,
+        share,
+        largest,
+        progress,
+        first,
+        last,
+    } = face;
     let k = &t.kit;
     let id = position.id;
     let selected = s.selected == Some(id);
@@ -538,6 +628,14 @@ fn holding_row(
     let name = display_name(position);
     let context_name = name.clone();
     let class_color = t.class_color(&position.asset_class);
+    let share_label = share
+        .points
+        .map_or_else(|| "-".to_string(), format::percent);
+    let named = if share.points.is_some() {
+        format!("{name}, {share_label} of today's move")
+    } else {
+        name.clone()
+    };
     let total = s
         .summary
         .as_ref()
@@ -552,7 +650,7 @@ fn holding_row(
         .key(format!("holding-{id}"))
         .matched(format!("position-{id}"))
         .role("row")
-        .label(name.clone())
+        .label(named)
         .focusable(true)
         .w_full()
         .gap(12.0)
@@ -651,6 +749,11 @@ fn holding_row(
             false,
             columns.name_grow(),
         ))
+        // A holding without a line keeps the column's width, so the others stay aligned.
+        .children(columns.lines.then(|| {
+            sparkline(s, position, LINE_W, 18.0, progress, t)
+                .unwrap_or_else(|| el().w(LINE_W).h(18.0).a11y_hidden())
+        }))
         .children(columns.class.then(|| {
             cell(
                 ui::muted(position.asset_class.clone(), t)
@@ -676,15 +779,78 @@ fn holding_row(
             )
         }))
         .children(columns.today.then(|| {
-            cell(
-                number(
-                    format::optional_percent(position.day_change_percent),
-                    t.optional_change(position.day_change_percent),
-                ),
-                true,
-                1.0,
-            )
+            let own = number(
+                format::optional_percent(position.day_change_percent),
+                t.optional_change(position.day_change_percent),
+            );
+            // No room for the column: the bar under the holding's own percentage still says
+            // which move mattered. The number is a tap away, in the details.
+            let content = if columns.impact {
+                own
+            } else {
+                col()
+                    .w_full()
+                    .items_end()
+                    .gap(4.0)
+                    .child(own)
+                    .child(share_bar(share, largest, t).max_w(72.0))
+                    .help("The bar is this holding's share of today's move")
+            };
+            cell(content, true, 1.0)
         }))
+        .children(
+            columns
+                .impact
+                .then(|| cell(share_figure(s, share, largest, &share_label, t), true, 1.0)),
+        )
+}
+
+/// The holding's line over the past month, or nothing when it has no series.
+fn sparkline(
+    s: &State,
+    position: &PositionDto,
+    width: f32,
+    height: f32,
+    progress: f32,
+    t: &Theme,
+) -> Option<El> {
+    let values = position.position_id.as_deref().and_then(|id| {
+        s.history
+            .as_ref()
+            .and_then(|history| history.series(id))
+            .map(<[f64]>::to_vec)
+    })?;
+    Some(
+        charts::sparkline(
+            &values,
+            width,
+            height,
+            charts::spark_color(&values, t),
+            progress,
+        )
+        .key(format!("spark-{}", position.id)),
+    )
+}
+
+/// The share of today's move: the points, and a bar against the largest holding.
+fn share_figure(s: &State, share: &TodayShare, largest: f64, label: &str, t: &Theme) -> El {
+    let color = share
+        .points
+        .map_or(t.kit.c.text_muted, |points| t.change(points));
+    let help = match share.amount {
+        Some(amount) if !s.privacy => {
+            format!("Moved the portfolio by {} today", s.signed_money(amount))
+        }
+        _ => "How many percentage points of the portfolio this holding moved today".to_string(),
+    };
+    col()
+        .w_full()
+        .min_w(88.0)
+        .items_end()
+        .gap(4.0)
+        .help(help)
+        .child(ui::number(label.to_string(), color))
+        .child(share_bar(share, largest, t))
 }
 
 /// A holding's row on a phone, which slides left to show Edit and Delete, as rows in iOS do.
@@ -779,7 +945,7 @@ fn search_input(s: &State) -> TextInput {
 }
 
 /// The rows of the Holdings table, top to bottom.
-fn holding_rows(s: &State) -> Vec<&PositionDto> {
+pub(super) fn holding_rows(s: &State) -> Vec<&PositionDto> {
     let mut rows: Vec<&PositionDto> = s
         .positions
         .iter()
@@ -817,6 +983,10 @@ pub fn holdings_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         };
         s.open_form(Some(id));
         return true;
+    }
+    if s.holdings_map {
+        return matches!(event.key, Key::Up | Key::Down | Key::Left | Key::Right)
+            && super::treemap::focus_tile(s, tx);
     }
     if !matches!(event.key, Key::Up | Key::Down) {
         return false;
@@ -860,7 +1030,28 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
     let rows = holding_rows(s);
     let end = rows.len().saturating_sub(1);
     let width = cx.layout_size("main").map_or(f32::MAX, |[width, _]| width);
-    let columns = Columns::for_width(width);
+    let has_lines = s
+        .history
+        .as_ref()
+        .is_some_and(|history| !history.series.is_empty());
+    let columns = Columns {
+        // On a phone the line would push the value into an ellipsis: the map has the lines there.
+        lines: has_lines && Columns::for_width(width).pnl,
+        ..Columns::for_width(width)
+    };
+    let previous = s.summary.as_ref().map_or(0.0, |summary| {
+        previous_total(summary.total_value, summary.day_change)
+    });
+    // Against what's on screen, so a holding the search hid doesn't shrink the bars.
+    let largest = rows
+        .iter()
+        .filter_map(|position| day_amount(position))
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    let shares: Vec<TodayShare> = rows
+        .iter()
+        .map(|position| today_share(position, previous))
+        .collect();
     let roomy = width >= ROOM_FOR_COUNT;
     let search = search_input(s)
         .width(roomy.then_some(240.0))
@@ -874,6 +1065,19 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .on_press(|s: &mut State| s.open_form(None))
         .build(k)
         .key("add-position");
+    let view = SegmentedControl::new(&["Table", "Map"], Some(usize::from(s.holdings_map)))
+        .label("View")
+        .fit()
+        .on_pick(|s: &mut State, index, tx: &mut Tx| {
+            s.holdings_map = index == 1;
+            if s.holdings_map
+                && let Some(id) = s.selected
+            {
+                tx.focus(format!("tile-{id}"), false);
+            }
+        })
+        .build(k)
+        .key("holdings-view");
     let top = if roomy {
         row()
             .center_y()
@@ -881,16 +1085,51 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .justify_between()
             .gap(16.0)
             .child(ui::muted(format!("{} positions", s.positions.len()), t))
-            .child(row().center_y().gap(8.0).child(search).child(add))
+            .child(
+                row()
+                    .center_y()
+                    .gap(8.0)
+                    .child(view)
+                    .child(search)
+                    .child(add),
+            )
     } else {
-        row()
-            .center_y()
+        col().w_full().gap(8.0).child(view).child(
+            row()
+                .center_y()
+                .w_full()
+                .gap(8.0)
+                .child(search.grow(1.0).min_w(0.0))
+                .child(add),
+        )
+    };
+    let map = s.holdings_map.then(|| {
+        let measured = cx.layout_size("holdings-map").map(|[width, _]| width);
+        let map_width = measured.unwrap_or((width - 64.0).max(1.0));
+        col()
             .w_full()
             .gap(8.0)
-            .child(search.grow(1.0).min_w(0.0))
-            .child(add)
-    };
-    col().w_full().gap(16.0).child(top).child(
+            .child(
+                ui::caption(
+                    if has_lines {
+                        "Area is value, the tint is today's change, and lines are the past month."
+                    } else {
+                        "Area is value, and the tint is today's change."
+                    },
+                    t,
+                )
+                .wrap()
+                .key("map-about"),
+            )
+            .child(super::treemap::view(
+                s,
+                t,
+                map_width,
+                super::treemap::height(s, cx.layout_size("main")),
+                s.draw_progress(cx.is_reduced_motion()),
+            ))
+    });
+    let table = (!s.holdings_map).then(|| {
         ui::card(t)
             .padding(8.0)
             .pt(12.0)
@@ -911,6 +1150,14 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         columns.name_grow(),
                         t,
                     ))
+                    .children(columns.lines.then(|| {
+                        row().w(LINE_W).child(
+                            text("Past month")
+                                .font(k.ty.text_xsmall_medium)
+                                .color(k.c.text_muted)
+                                .truncate(),
+                        )
+                    }))
                     .children(columns.class.then(|| {
                         header_cell(s, "sort-class", "Class", SortBy::Class, false, 1.0, t)
                     }))
@@ -932,7 +1179,12 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                         columns.today.then(|| {
                             header_cell(s, "sort-day", "Today", SortBy::Day, true, 1.0, t)
                         }),
-                    ),
+                    )
+                    .children(columns.impact.then(|| {
+                        header_cell(s, "sort-impact", "Of today", SortBy::Impact, true, 1.0, t).help(
+                            "How many percentage points of the portfolio this holding moved today",
+                        )
+                    })),
             )
             .children(
                 rows.is_empty()
@@ -946,16 +1198,36 @@ pub fn holdings(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                     .focus_group()
                     .focus_follows()
                     .w_full()
-                    .children(rows.into_iter().enumerate().map(|(index, position)| {
-                        let row = holding_row(s, position, columns, index == 0, index == end, t);
-                        if s.compact {
-                            swipe_row(s, position, row, t)
-                        } else {
-                            row
-                        }
-                    })),
-            ),
-    )
+                    .children(rows.into_iter().zip(shares).enumerate().map(
+                        |(index, (position, share))| {
+                            let row = holding_row(
+                                s,
+                                position,
+                                RowFace {
+                                    columns,
+                                    share: &share,
+                                    largest,
+                                    progress: s.draw_progress(cx.is_reduced_motion()),
+                                    first: index == 0,
+                                    last: index == end,
+                                },
+                                t,
+                            );
+                            if s.compact {
+                                swipe_row(s, position, row, t)
+                            } else {
+                                row
+                            }
+                        },
+                    )),
+            )
+    });
+    col()
+        .w_full()
+        .gap(16.0)
+        .child(top)
+        .children(map)
+        .children(table)
 }
 
 fn detail(label: impl Into<String>, value: String, t: &Theme) -> El {
@@ -1040,6 +1312,17 @@ pub fn inspector(s: &State, position: &PositionDto, t: &Theme) -> El {
                 .child(detail(
                     "Today",
                     format::optional_percent(position.day_change_percent),
+                    t,
+                ))
+                .child(detail(
+                    "Of today",
+                    day_points(
+                        day_amount(position),
+                        s.summary.as_ref().map_or(0.0, |summary| {
+                            previous_total(summary.total_value, summary.day_change)
+                        }),
+                    )
+                    .map_or_else(|| "-".to_string(), format::percent),
                     t,
                 )),
         )
@@ -1169,6 +1452,7 @@ pub fn allocation(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             .on_hover_change(move |s: &mut State, over, _| {
                 s.donut_hover = over.then_some(index);
             })
+            .children(ui::class_flash(s, &item.asset_class, 8.0, t))
             .child(
                 row()
                     .center_y()
@@ -1458,6 +1742,63 @@ mod tests {
         let known = position(Some("A"), None, Some(-50.0));
         let unknown = position(Some("B"), None, None);
         assert_eq!(compare(&known, &unknown, SortBy::Pnl), Ordering::Greater);
+    }
+
+    fn holding(value: f64, day: Option<f64>) -> PositionDto {
+        PositionDto {
+            value,
+            day_change_percent: day,
+            ..position(Some("Held"), None, None)
+        }
+    }
+
+    #[test]
+    fn a_large_holding_moves_the_portfolio_more_than_a_lively_small_one() {
+        // 40% of yesterday's 100, down 0.6%: about -0.24 points.
+        let heavy = holding(40.0 * 0.994, Some(-0.6));
+        // 5% of it, up 2%: about +0.10 points.
+        let light = holding(5.0 * 1.02, Some(2.0));
+        let heavy_points = day_points(day_amount(&heavy), 100.0).unwrap();
+        let light_points = day_points(day_amount(&light), 100.0).unwrap();
+        assert!(
+            (heavy_points + 0.24).abs() < 0.01,
+            "heavy moved {heavy_points}"
+        );
+        assert!(
+            (light_points - 0.10).abs() < 0.01,
+            "light moved {light_points}"
+        );
+        assert!(heavy_points.abs() > light_points.abs());
+        assert_eq!(
+            compare(&heavy, &light, SortBy::Impact),
+            Ordering::Less,
+            "the loss sorts below the gain"
+        );
+    }
+
+    #[test]
+    fn a_loss_and_a_gain_reach_opposite_ways_from_the_centre() {
+        let (loss, loss_gain) = diverge_reach(Some(-240.0), 450.0);
+        let (gain, is_gain) = diverge_reach(Some(100.0), 450.0);
+        let (full, _) = diverge_reach(Some(450.0), 450.0);
+        assert!(!loss_gain && is_gain);
+        assert!((loss - 240.0 / 450.0).abs() < 0.001);
+        assert!(gain < loss, "the smaller move reaches less far");
+        assert!(
+            (full - 1.0).abs() < 0.001,
+            "the largest move fills its half"
+        );
+        assert_eq!(diverge_reach(None, 450.0).0, 0.0);
+        assert_eq!(diverge_reach(Some(0.0), 450.0).0, 0.0);
+    }
+
+    #[test]
+    fn cash_and_a_total_loss_contribute_nothing_known() {
+        assert_eq!(day_amount(&holding(30_000.0, None)), None);
+        assert_eq!(day_amount(&holding(0.0, Some(-100.0))), None);
+        assert_eq!(day_points(None, 100.0), None);
+        assert_eq!(day_points(Some(1.0), 0.0), None);
+        assert_eq!(previous_total(107_400.0, 280.0), 107_120.0);
     }
 
     #[test]

@@ -29,7 +29,7 @@ use portfolio_rs::{
     },
     validate::ValidationReport,
 };
-use rune::{ClipboardContent, FileDialogOptions, Live, TextEdit, Tx, Waker};
+use rune::{ClipboardContent, Color, FileDialogOptions, Live, LiveText, TextEdit, Tx, Waker};
 use rune_kit::shell::PaneState;
 
 use crate::{
@@ -38,6 +38,7 @@ use crate::{
         Snapshot, WorkspaceField, WorkspaceProblem,
     },
     format,
+    statement::{self, Change, Facts, Seen, Since, Statement},
     update::{self, Installed, Release, Updater},
 };
 
@@ -98,6 +99,11 @@ pub fn swipe_key(id: usize) -> String {
 }
 /// Refresh prices on returning to the app, if the last refresh is older than this.
 const STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+/// Into the welcome door's flight, when its dial starts turning: as it nears the mark.
+pub const DOOR_TURN_AT: f64 = 0.45;
+/// When the flight hands over to the mark: once the dial has turned and settled.
+pub const DOOR_FLIGHT_ENDS: f64 = DOOR_TURN_AT + 1.35;
+
 const TOAST_FOR: Duration = Duration::from_millis(2600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -197,6 +203,51 @@ pub enum SortBy {
     Value,
     Pnl,
     Day,
+    /// How much of the portfolio's move today came from the holding.
+    Impact,
+}
+
+/// A span measured on the value chart. The band and the readout are live, so a drag does not
+/// rebuild the view on every move. `span` is what stays after the pointer lifts.
+pub struct ChartMeasure {
+    pub span: Option<(usize, usize)>,
+    /// Set for the gesture, so hover doesn't rebuild the view underneath it. The view doesn't read it.
+    pub dragging: bool,
+    pub band: Live<[f32; 4]>,
+    pub shown: Live<f32>,
+    pub pin: Live<[f32; 2]>,
+    pub ink: Live<Color>,
+    pub dates: LiveText,
+    pub change: LiveText,
+    pub detail: LiveText,
+}
+
+impl Default for ChartMeasure {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChartMeasure {
+    pub fn new() -> Self {
+        Self {
+            span: None,
+            dragging: false,
+            band: Live::new([0.0, 0.0, 0.0, 0.0]),
+            shown: Live::new(0.0),
+            pin: Live::new([0.0, 0.0]),
+            ink: Live::new(Color::TRANSPARENT),
+            dates: LiveText::new(""),
+            change: LiveText::new(""),
+            detail: LiveText::new(""),
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.span = None;
+        self.dragging = false;
+        self.shown.set(0.0);
+    }
 }
 
 /// Data a page fetches when it opens. A failed reload keeps the last result.
@@ -428,6 +479,82 @@ pub struct SettingsForm {
     pub error: Option<String>,
 }
 
+/// How many classes the rebalance bar prepares live values for.
+const REBALANCE_SLOTS: usize = 12;
+
+/// What produced the split the bar is showing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum RebalanceOrigin {
+    /// The portfolio as it is.
+    Today,
+    /// New money, or a withdrawal, placed by buying or selling only.
+    Flow(f64),
+    /// Every class at its policy target.
+    Full,
+    /// Halfway back, and only for classes outside their band.
+    Conservative,
+    /// A boundary the owner dragged or stepped.
+    Custom,
+}
+
+/// The allocation being dragged on the Rebalance page. Live values move the bar without
+/// rebuilding the view; the view must not read `press`, `held`, `drag_values`, `step` or
+/// `painted`.
+pub struct RebalancePage {
+    /// Class names `values` belong to. A mismatch means the portfolio changed under a drag.
+    pub names: Vec<String>,
+    pub values: Vec<f64>,
+    pub origin: RebalanceOrigin,
+    /// New money, or a withdrawal. Parsed with [`parse_number`].
+    pub amount: TextEdit,
+    pub amount_error: Option<String>,
+    /// A boundary is held. The bar follows the pointer on a quicker spring.
+    pub dragging: bool,
+    /// The bar has been measured, so its segments can follow live rects.
+    pub placed: bool,
+    pub bar_width: f32,
+    pub boundary: Option<usize>,
+    pub press: Vec<f64>,
+    pub held: Option<f64>,
+    pub drag_values: Vec<f64>,
+    /// The quarter point the dragged class last committed at, so a drag rebuilds the
+    /// view only when the figures under the bar would change.
+    pub step: i64,
+    /// What the bar last drew, so a change from anywhere else glides it there.
+    pub painted: u64,
+    /// Each class's bar, its in-band lane under it, and the boundary after it.
+    pub rects: Vec<Live<[f32; 4]>>,
+    pub lanes: Vec<Live<[f32; 4]>>,
+    pub offsets: Vec<Live<[f32; 2]>>,
+}
+
+impl RebalancePage {
+    fn new() -> Self {
+        let rects = || (0..REBALANCE_SLOTS).map(|_| Live::new([0.0; 4])).collect();
+        Self {
+            names: Vec::new(),
+            values: Vec::new(),
+            origin: RebalanceOrigin::Today,
+            amount: TextEdit::new(""),
+            amount_error: None,
+            dragging: false,
+            placed: false,
+            bar_width: 0.0,
+            boundary: None,
+            press: Vec::new(),
+            held: None,
+            drag_values: Vec::new(),
+            step: 0,
+            painted: 0,
+            rects: rects(),
+            lanes: rects(),
+            offsets: (0..REBALANCE_SLOTS)
+                .map(|_| Live::new([0.0, 0.0]))
+                .collect(),
+        }
+    }
+}
+
 pub struct PolicyPage {
     pub policy: Option<Policy>,
     pub editor: TextEdit,
@@ -526,10 +653,36 @@ pub struct State {
     pub updated_at: Option<String>,
     /// How many times prices have landed, to mark the moment on screen.
     pub price_updates: u64,
+    /// One full turn when a portfolio's door first appears: as it lands from the welcome screen,
+    /// or on its own when the app opened straight into a portfolio. Not a price refresh, and not
+    /// replayed by one.
+    pub door_arrivals: u64,
+    /// The door has been painted at rest for this portfolio, so the next frame can start the turn.
+    door_seen: bool,
+    /// The arrival turn has started for the portfolio now open.
+    door_landed: bool,
+    /// Show the welcome screen until this time even with a portfolio open, so a scene can paint
+    /// the large door and then let it fly. `None` in the running app.
+    pub hold_welcome_until: Option<f64>,
+    /// When the welcome door started its flight to the mark, while it is still travelling.
+    pub door_flight: Option<f64>,
+    /// The flying door has been drawn where the welcome door was, and now heads for the mark.
+    pub door_released: bool,
+    /// Where the welcome door and the mark were last laid out, in window points: the flight's
+    /// two ends.
+    pub welcome_door: Option<[f32; 4]>,
+    pub mark_door: Option<[f32; 4]>,
+    /// The welcome screen was showing at the last poll.
+    welcome_showing: bool,
+    /// What the last refresh moved: each position (by id) whose price changed, and by how much,
+    /// as a fraction. Empty when it moved nothing.
+    pub price_moves: Vec<(usize, f64)>,
     refreshed: Option<Instant>,
 
     // The window.
     pub page: Page,
+    /// The page before this one, so the way between them can show which way the owner went.
+    pub previous_page: Page,
     /// The phone layout: a tab bar instead of the sidebar, one column, the details in place of the
     /// table. The platform decides (on iOS, UIKit's horizontal size class), not the window's width.
     pub compact: bool,
@@ -582,15 +735,21 @@ pub struct State {
     pub chart_hover: Option<f32>,
     /// The chart's point nearest the pointer or finger, for a tick as it passes each one.
     pub chart_point: Option<usize>,
+    /// A span dragged out on the value chart, kept until dismissed.
+    pub measure: ChartMeasure,
     pub donut_hover: Option<usize>,
 
     // Pages.
     pub search: TextEdit,
+    /// Holdings drawn as a treemap instead of the table.
+    pub holdings_map: bool,
     pub sort: SortBy,
     pub ascending: bool,
     pub selected: Option<usize>,
     pub review: Loadable<Review>,
     pub simulation: Loadable<RebalanceSimulation>,
+    /// The allocation the Rebalance page is being played with.
+    pub rebalance: RebalancePage,
     pub briefing: Loadable<Briefing>,
     pub validation: Loadable<ValidationReport>,
     pub doctor: Loadable<WorkspaceHealth>,
@@ -599,6 +758,14 @@ pub struct State {
     pub settings: SettingsForm,
     pub has_api_key: bool,
     pub updates: Updates,
+
+    // Since the last look.
+    /// The portfolio this session's look was noted for, so reopening it doesn't count again.
+    seen_for: Option<String>,
+    /// When the owner last looked before this time: `None` until it's known.
+    pub since: Option<Since>,
+    /// The portfolio since then, from the stored valuations.
+    pub change: Option<Change>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -748,8 +915,19 @@ impl State {
             error: None,
             updated_at: None,
             price_updates: 0,
+            door_arrivals: 0,
+            door_seen: false,
+            door_landed: false,
+            hold_welcome_until: None,
+            door_flight: None,
+            door_released: false,
+            welcome_door: None,
+            mark_door: None,
+            welcome_showing: false,
+            price_moves: Vec::new(),
             refreshed: None,
             page: Page::Overview,
+            previous_page: Page::Overview,
             compact: false,
             more: false,
             door_turns: 0,
@@ -785,13 +963,16 @@ impl State {
             history_request: 0,
             chart_hover: None,
             chart_point: None,
+            measure: ChartMeasure::new(),
             donut_hover: None,
             search: TextEdit::new(""),
+            holdings_map: false,
             sort: SortBy::Value,
             ascending: false,
             selected: None,
             review: Loadable::default(),
             simulation: Loadable::default(),
+            rebalance: RebalancePage::new(),
             briefing: Loadable::default(),
             validation: Loadable::default(),
             doctor: Loadable::default(),
@@ -828,6 +1009,9 @@ impl State {
                 check_is_quiet: false,
                 restart_error: None,
             },
+            seen_for: None,
+            since: None,
+            change: None,
         }
     }
 
@@ -894,7 +1078,11 @@ impl State {
     /// Runs at the start of every frame. True when something on screen changed.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.now = now;
+        let from_welcome = self.welcome_showing;
+        crate::view::rebalance::sync(self);
         let mut changed = self.drain() || mem::take(&mut self.settled);
+        changed |= self.door_arrives(now, from_welcome, tx);
+        self.welcome_showing = self.on_welcome();
         if self.quit_requested {
             tx.quit();
         }
@@ -1044,6 +1232,7 @@ impl State {
         self.form
             .as_ref()
             .is_some_and(|form| form.amount.focused || form.quantity.focused || form.price.focused)
+            || self.rebalance.amount.focused
     }
 
     /// 0 to 1 through a chart's draw-in.
@@ -1123,6 +1312,74 @@ impl State {
         self.folder_prompt.is_none() && self.open.is_open() && self.open.parse_error.is_none()
     }
 
+    /// The shell is up: a portfolio is open, and a scene isn't still holding the welcome screen.
+    fn shell_showing(&self) -> bool {
+        self.has_portfolio() && self.hold_welcome_until.is_none_or(|at| self.now >= at)
+    }
+
+    /// The welcome screen, with its large door, is what the window shows.
+    fn on_welcome(&self) -> bool {
+        !self.starting
+            && self.folder_prompt.is_none()
+            && self.open.parse_error.is_none()
+            && !self.shell_showing()
+    }
+
+    /// The door's arrival when a portfolio's shell first shows. From the welcome screen, the
+    /// welcome door flies to the mark and its dial turns as it lands; launched straight into a
+    /// portfolio, the mark's dial just turns. Once per opened portfolio: a refresh, a page
+    /// change or a redraw never comes through here again. Returns whether anything changed.
+    fn door_arrives(&mut self, now: f64, from_welcome: bool, tx: &mut Tx) -> bool {
+        if !self.shell_showing() {
+            if !self.has_portfolio() {
+                self.door_seen = false;
+                self.door_landed = false;
+                self.door_flight = None;
+            }
+            return false;
+        }
+        let mut changed = false;
+        if !self.door_seen {
+            // The first poll with the shell up. The turn waits a frame at least, so the dial is
+            // painted at rest before it turns.
+            self.door_seen = true;
+            if from_welcome && self.welcome_door.is_some() {
+                self.door_flight = Some(now);
+                self.door_released = false;
+                tx.wake_after(Duration::from_millis(20));
+                tx.wake_at(now + DOOR_TURN_AT);
+                tx.wake_at(now + DOOR_FLIGHT_ENDS);
+                changed = true;
+            } else {
+                tx.wake_after(Duration::from_millis(30));
+            }
+        } else if self.door_flight.is_some() && !self.door_released {
+            // It has been drawn at the welcome door's place: now it can set off.
+            if self.mark_door.is_some() {
+                self.door_released = true;
+                changed = true;
+            } else {
+                tx.wake_after(Duration::from_millis(20));
+            }
+        } else if !self.door_landed
+            && self
+                .door_flight
+                .is_none_or(|start| now >= start + DOOR_TURN_AT)
+        {
+            self.door_landed = true;
+            self.door_arrivals += 1;
+            changed = true;
+        }
+        if self
+            .door_flight
+            .is_some_and(|start| now >= start + DOOR_FLIGHT_ENDS)
+        {
+            self.door_flight = None;
+            changed = true;
+        }
+        changed
+    }
+
     pub fn theme_mode(&self) -> ThemeMode {
         self.config
             .as_ref()
@@ -1191,6 +1448,7 @@ impl State {
         self.refreshed = Some(Instant::now());
         self.updated_at = Some(Local::now().format("%H:%M").to_string());
         self.load_page();
+        self.load_since();
     }
 
     /// Run a change, then re-read everything it can affect.
@@ -1718,10 +1976,14 @@ impl State {
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
+        if page != self.page {
+            self.previous_page = self.page;
+        }
         self.page = page;
         self.more = false;
         self.chart_hover = None;
         self.chart_point = None;
+        self.measure.clear();
         self.donut_hover = None;
         self.palette = None;
         if page != Page::Holdings {
@@ -1735,22 +1997,32 @@ impl State {
     /// Fetch what the current page shows.
     pub fn load_page(&mut self) {
         match self.page {
-            Page::Overview | Page::Performance => self.load_history(),
+            Page::Overview => {
+                self.load_history();
+                // The agenda reads the same review as the Review page, so they never disagree.
+                self.load_review();
+            }
+            Page::Holdings | Page::Performance => self.load_history(),
             Page::Allocation | Page::Review => self.load_review(),
-            Page::Rebalance => self.load_simulation(),
+            Page::Rebalance => {
+                self.load_simulation();
+                // Targets and tolerance bands live on the review, not the simulation.
+                self.load_review();
+            }
             Page::Briefing => self.load_briefing(),
             Page::Health => self.load_health(),
             Page::Policy => self.load_policy_page(),
             Page::Settings => self.load_settings(),
-            Page::Holdings | Page::Documents => {}
+            Page::Documents => {}
         }
     }
 
     fn load_history(&mut self) {
-        let period = if self.page == Page::Overview {
-            Period::Month
-        } else {
+        // Holdings sparklines use the same month Overview charts, so the two pages agree.
+        let period = if self.page == Page::Performance {
             self.period
+        } else {
+            Period::Month
         };
         self.history_request += 1;
         let request = self.history_request;
@@ -1777,6 +2049,7 @@ impl State {
     pub fn set_period(&mut self, period: Period) {
         self.period = period;
         self.chart_hover = None;
+        self.measure.clear();
         self.load_history();
     }
 
@@ -1791,6 +2064,15 @@ impl State {
             |backend| async move { backend.review().await },
             |state, result| state.review.finish(result),
         );
+    }
+
+    /// Prices again, and the bar goes back to the portfolio as it is.
+    pub fn refresh_rebalance(&mut self) {
+        self.rebalance.origin = RebalanceOrigin::Today;
+        self.rebalance.amount.replace_text("");
+        self.rebalance.amount_error = None;
+        self.load_simulation();
+        self.load_review();
     }
 
     pub fn load_simulation(&mut self) {
@@ -1828,6 +2110,84 @@ impl State {
         }
     }
 
+    // --- Since the last look ---
+
+    /// Note this look at a newly opened portfolio, then measure what changed since the last one.
+    /// After that, every snapshot measures again, because the prices just moved.
+    fn load_since(&mut self) {
+        let key = self
+            .open
+            .workspace_dir
+            .clone()
+            .or_else(|| self.open.file_path.clone());
+        // An empty portfolio isn't a look at anything yet.
+        if key.is_none() || self.positions.is_empty() {
+            return;
+        }
+        if key != self.seen_for {
+            self.seen_for = key;
+            self.since = None;
+            self.change = None;
+            self.run(
+                |backend| async move {
+                    let previous = backend.visit().await?;
+                    let since = Seen::since(previous, Local::now().date_naive());
+                    let change = match since {
+                        Since::Day(day) => backend.change_since(Some(day)).await?,
+                        Since::First => backend.change_since(None).await?,
+                        Since::EarlierToday => None,
+                    };
+                    Ok((since, change))
+                },
+                |state, result| {
+                    if let Ok((since, change)) = result {
+                        state.since = Some(since);
+                        state.change = change;
+                    }
+                },
+            );
+            return;
+        }
+        let from = match self.since {
+            Some(Since::Day(day)) => Some(day),
+            Some(Since::First) => None,
+            _ => return,
+        };
+        self.run(
+            move |backend| async move { backend.change_since(from).await },
+            |state, result| {
+                if let Ok(change) = result {
+                    state.change = change;
+                }
+            },
+        );
+    }
+
+    /// What changed since the owner last looked, in words, or `None` with nothing worth saying.
+    pub fn statement(&self) -> Option<Statement> {
+        let summary = self.summary.as_ref()?;
+        let currency = self.currency();
+        let encrypted = self
+            .open
+            .file_path
+            .as_deref()
+            .is_some_and(|path| path.ends_with(".gpg"));
+        statement::compose(&Facts {
+            today: Local::now().date_naive(),
+            since: self.since?,
+            currency: &currency,
+            hidden: self.privacy,
+            complete: summary.complete,
+            encrypted,
+            change: self.change.clone(),
+            today_move: Some(statement::today_move(
+                summary.day_change,
+                summary.day_change_percent,
+                &self.positions,
+            )),
+        })
+    }
+
     // --- Portfolio ---
 
     pub fn refresh_prices(&mut self) {
@@ -1836,9 +2196,15 @@ impl State {
         }
         // History follows the file on disk, so unsaved edits don't record.
         let record = !self.dirty;
+        let before: Vec<(usize, f64)> = self
+            .positions
+            .iter()
+            .map(|position| (position.id, position.price))
+            .collect();
         self.change_and_reload(
             record,
-            |state| {
+            move |state| {
+                state.price_moves = price_moves(&before, &state.positions);
                 state.price_updates += 1;
                 state.show_toast("Prices updated");
             },
@@ -2499,8 +2865,48 @@ pub fn file_name(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+/// Which positions a refresh moved, and by what fraction of their old price. A position that
+/// wasn't there before, or had no price, didn't move: nothing is compared with nothing.
+pub fn price_moves(before: &[(usize, f64)], after: &[PositionDto]) -> Vec<(usize, f64)> {
+    after
+        .iter()
+        .filter_map(|position| {
+            let (_, old) = before.iter().find(|(id, _)| *id == position.id)?;
+            let change = (position.price - old) / old;
+            (old.abs() > f64::EPSILON && change.is_finite() && change.abs() > 1e-9)
+                .then_some((position.id, change))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refresh_moves_only_the_prices_that_changed() {
+        let position = |id: usize, price: f64| {
+            serde_json::from_value::<PositionDto>(serde_json::json!({
+                "id": id, "assetClass": "Stocks", "amount": 1.0, "price": price, "value": price,
+                "purchases": []
+            }))
+            .unwrap()
+        };
+        let before = [(0, 100.0), (1, 50.0), (2, 0.0)];
+        let after = [
+            position(0, 101.0),
+            position(1, 50.0),
+            position(2, 3.0),
+            position(3, 9.0),
+        ];
+        let moves = price_moves(&before, &after);
+        assert_eq!(
+            moves.len(),
+            1,
+            "unchanged, unpriced and new positions didn't move"
+        );
+        assert_eq!(moves[0].0, 0);
+        assert!((moves[0].1 - 0.01).abs() < 1e-12);
+    }
+
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

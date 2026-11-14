@@ -101,18 +101,29 @@ pub fn seed_workspace(dir: &Path) {
         ("pos_tlt", "Bonds", 60.0, 90.0, "EUR", 1.0),
         ("pos_gld", "Gold", 25.0, 200.0, "EUR", 1.0),
     ];
+    // Each holding's own drift per day, swing and phase, so their lines differ. Every one lands
+    // on today's price.
+    let paths = [
+        (0.0030, 0.05, 1.3),
+        (0.0012, 0.02, 0.0),
+        (-0.0006, 0.015, 2.4),
+        (0.0016, 0.012, 4.1),
+    ];
     let today = Local::now().date_naive();
     let lines: Vec<String> = (1..=90)
         .rev()
         .map(|days_ago: i64| {
             let date = today - Duration::days(days_ago);
-            let wave = 1.0 - days_ago as f64 * 0.0012 + (days_ago as f64 / 8.0).sin() * 0.02;
             let mut positions = vec![
                 r#"{"positionId":"pos_cash","kind":"cash","assetClass":"Cash","quantity":30000.0,"valueBase":30000.0}"#
                     .to_string(),
             ];
             let mut total = 30000.0;
-            for (id, class, quantity, price, currency, fx) in holdings {
+            for ((id, class, quantity, price, currency, fx), (drift, swing, phase)) in
+                holdings.into_iter().zip(paths)
+            {
+                let wave = 1.0 - days_ago as f64 * drift
+                    + ((days_ago as f64 / 8.0 + phase).sin() - phase.sin()) * swing;
                 let price = (price * wave * 100.0_f64).round() / 100.0;
                 let value = (quantity * price * fx * 100.0_f64).round() / 100.0;
                 total += value;
@@ -128,6 +139,14 @@ pub fn seed_workspace(dir: &Path) {
         .collect();
     fs::write(history.join("snapshots.jsonl"), lines.join("\n") + "\n")
         .expect("demo workspace is writable");
+
+    // The owner last looked five days ago, so the Overview has something to tell them.
+    let day = |days_ago| (today - Duration::days(days_ago)).format("%Y-%m-%d");
+    fs::write(
+        history.join("seen.json"),
+        format!("{{\"last\":\"{}\",\"before\":\"{}\"}}\n", day(5), day(12)),
+    )
+    .expect("demo workspace is writable");
 }
 
 /// A workspace as a new user has it: the files `portfolio_rs` sets up, and no positions.

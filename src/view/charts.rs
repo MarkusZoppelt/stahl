@@ -3,7 +3,10 @@
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use chrono::NaiveDate;
-use rune::{Align, Cx, El, Shape, Transition, canvas, col, el, row, text};
+use rune::{
+    Align, Color, Cx, Drag, El, Key, KeyEvent, Phase, Shape, Transition, Tx, canvas, col, el, row,
+    text,
+};
 use rune_kit::RollingText;
 
 use crate::{
@@ -20,6 +23,31 @@ fn short_date(date: &str) -> String {
         |_| date.to_string(),
         |date| date.format("%b %-d").to_string(),
     )
+}
+
+/// A holding's line over the period the page states. No line, and no placeholder, without two
+/// points. The stroke draws in with the value chart and holds still under reduced motion.
+pub fn sparkline(values: &[f64], width: f32, height: f32, color: Color, progress: f32) -> El {
+    if values.len() < 2 || width < 4.0 || height < 4.0 {
+        return el();
+    }
+    let inset = 1.0;
+    let points: Vec<[f32; 2]> = plot(values, width - inset * 2.0, height - inset * 2.0)
+        .into_iter()
+        .map(|[x, y]| [x + inset, y + inset])
+        .collect();
+    let line = Shape::new().stroke(points, 1.25, color).drawn(progress);
+    canvas(line).size(width, height).a11y_hidden()
+}
+
+/// Gain or loss over the series, or steel when it is flat. The shape is the data; the colour
+/// says which way it went.
+pub fn spark_color(values: &[f64], t: &Theme) -> Color {
+    match (values.first(), values.last()) {
+        (Some(first), Some(last)) if last > first => t.up,
+        (Some(first), Some(last)) if last < first => t.down,
+        _ => t.kit.c.text_muted,
+    }
 }
 
 /// Where each value lands in a chart `width` by `height`.
@@ -43,6 +71,139 @@ fn plot(values: &[f64], width: f32, height: f32) -> Vec<[f32; 2]> {
             ]
         })
         .collect()
+}
+
+/// What an arbitrary span of the value chart honestly supports: the change in value, that change
+/// as a percentage of the start, and how many days it covers. Time-weighted return and
+/// contributions need each day's positions and the ledger, which this chart does not hold.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Measured {
+    pub start: usize,
+    pub end: usize,
+    pub days: i64,
+    pub change: f64,
+    pub percent: Option<f64>,
+}
+
+pub fn measure_span(dates: &[String], values: &[f64], a: usize, b: usize) -> Option<Measured> {
+    if dates.len() != values.len() || values.len() < 2 {
+        return None;
+    }
+    let last = values.len() - 1;
+    let start = a.min(b).min(last);
+    let end = a.max(b).min(last);
+    if start == end {
+        return None;
+    }
+    let from = NaiveDate::parse_from_str(&dates[start], "%Y-%m-%d").ok()?;
+    let to = NaiveDate::parse_from_str(&dates[end], "%Y-%m-%d").ok()?;
+    let days = (to - from).num_days();
+    if days < 0 {
+        return None;
+    }
+    let change = values[end] - values[start];
+    let percent =
+        (values[start] > 0.0 && values[start].is_finite()).then(|| change / values[start] * 100.0);
+    Some(Measured {
+        start,
+        end,
+        days,
+        change,
+        percent,
+    })
+}
+
+const READOUT_W: f32 = 168.0;
+
+/// The chart's box and its gain and loss colours, so a drag doesn't take eight arguments.
+#[derive(Clone, Copy)]
+struct Frame {
+    width: f32,
+    height: f32,
+    up: Color,
+    down: Color,
+}
+
+/// Publish the band and the readout. Live, so a drag can call it without rebuilding the view.
+fn publish_span(
+    s: &State,
+    measured: &Measured,
+    dates: &[String],
+    plotted: &[[f32; 2]],
+    frame: Frame,
+) {
+    let left = plotted[measured.start][0].min(plotted[measured.end][0]);
+    let right = plotted[measured.start][0].max(plotted[measured.end][0]);
+    s.measure
+        .band
+        .set([left, 0.0, (right - left).max(1.0), frame.height]);
+    s.measure.shown.set(1.0);
+    let pin = (left + (right - left) / 2.0 - READOUT_W / 2.0)
+        .clamp(0.0, (frame.width - READOUT_W).max(0.0));
+    s.measure.pin.set([pin, 0.0]);
+    s.measure.ink.set(if measured.change >= 0.0 {
+        frame.up
+    } else {
+        frame.down
+    });
+    s.measure.dates.set(format!(
+        "{} – {}",
+        short_date(&dates[measured.start]),
+        short_date(&dates[measured.end])
+    ));
+    s.measure.change.set(if s.privacy {
+        format::HIDDEN.to_string()
+    } else {
+        s.signed_money(measured.change)
+    });
+    let percent = measured
+        .percent
+        .map(format::percent)
+        .unwrap_or_else(|| "-".to_string());
+    let days = if measured.days == 1 {
+        "1 day".to_string()
+    } else {
+        format!("{} days", measured.days)
+    };
+    s.measure.detail.set(format!("{percent} · {days}"));
+}
+
+/// One move of a measuring drag. `live_only` on the move, so the view is not rebuilt; the
+/// press and the release commit, because they change what the view reads.
+fn drag_span(
+    s: &mut State,
+    drag: &mut Drag,
+    dates: &[String],
+    values: &[f64],
+    frame: Frame,
+    tx: &mut Tx,
+) {
+    let plotted = plot(values, frame.width, frame.height);
+    let Some(index) = nearest(&plotted, drag.x) else {
+        return;
+    };
+    if drag.phase == Phase::Down {
+        s.measure.dragging = true;
+        s.chart_hover = None;
+        s.chart_point = None;
+        drag.data = index as f32;
+    }
+    let start = drag.data as usize;
+    if drag.phase == Phase::Up {
+        s.measure.dragging = false;
+        if !drag.cancelled() && index != start {
+            s.measure.span = Some((start.min(index), start.max(index)));
+        }
+        // The release commits: the view reads the kept span. Moves below do not.
+        return;
+    }
+    if let Some(measured) = measure_span(dates, values, start, index) {
+        publish_span(s, &measured, dates, &plotted, frame);
+    }
+    // Down changed the hover, which the view reads, so it has to commit. A move does not.
+    if drag.phase == Phase::Move {
+        tx.live_only();
+    }
 }
 
 /// The nearest point to a pointer at `x`.
@@ -90,15 +251,21 @@ pub fn value_chart(
     let holder = el()
         .key(key)
         .role("img")
-        .label("Portfolio value over time")
+        .label("Portfolio value over time. Drag across it to measure a span.")
+        .focusable(true)
         .w_full()
         .h(chart_height)
-        .on_pointer_move_local(move |s: &mut State, event, _| {
+        .on_pointer_move_local(move |s: &mut State, event, tx: &mut Tx| {
+            // A measuring drag owns the pointer. Hover would rebuild the view every move.
+            if s.measure.dragging {
+                tx.live_only();
+                return;
+            }
             s.chart_hover = Some(event.x);
             s.chart_point = nearest(&days, event.x);
         })
         .on_hover_change(|s: &mut State, over, _| {
-            if !over {
+            if !over && !s.measure.dragging {
                 s.chart_hover = None;
                 s.chart_point = None;
             }
@@ -167,29 +334,153 @@ pub fn value_chart(
             )
             .child(el().size(6.0, 6.0).radius(3.0).fill(trend))
     });
-    let readout = hovered.map(|index| {
-        let point = &points[index];
-        let [x, _] = plotted[index];
-        let value = if s.privacy {
-            format::HIDDEN.to_string()
+    // A kept span, or one being dragged, replaces the hover readout.
+    let readout = hovered
+        .filter(|_| s.measure.span.is_none() && !s.measure.dragging)
+        .map(|index| {
+            let point = &points[index];
+            let [x, _] = plotted[index];
+            let value = if s.privacy {
+                format::HIDDEN.to_string()
+            } else {
+                s.money(point.value)
+            };
+            ui::floating(t)
+                .key("chart-readout")
+                .pin(
+                    Some((x + 10.0).min(width - 124.0).max(0.0)),
+                    Some(4.0),
+                    None,
+                    None,
+                )
+                .w(120.0)
+                .px(10.0)
+                .py(6.0)
+                .radius(8.0)
+                .child(ui::caption(short_date(&point.date), t))
+                .child(text(value).font(NUMBER).color(k.c.text_base))
+        });
+    let point_dates: Vec<String> = points.iter().map(|point| point.date.clone()).collect();
+    let frame = Frame {
+        width,
+        height: chart_height,
+        up: t.up,
+        down: t.down,
+    };
+    if !s.measure.dragging
+        && let Some((start, end)) = s.measure.span
+    {
+        if let Some(measured) = measure_span(&point_dates, &values, start, end) {
+            publish_span(s, &measured, &point_dates, &plotted, frame);
         } else {
-            s.money(point.value)
-        };
-        ui::floating(t)
-            .key("chart-readout")
-            .pin(
-                Some((x + 10.0).min(width - 124.0).max(0.0)),
-                Some(4.0),
-                None,
-                None,
+            s.measure.shown.set(0.0);
+        }
+    }
+    let drag_dates = point_dates.clone();
+    let drag_values = values.clone();
+    // A finger drag on the chart itself would steal scrolling, pull-to-refresh and the edge
+    // swipe. On a phone the rail below takes the drag; the chart stays a vertical pan.
+    let holder = if s.compact {
+        holder
+    } else {
+        let keys_dates = point_dates.clone();
+        let keys_values = values.clone();
+        holder
+            .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
+                drag_span(s, drag, &drag_dates, &drag_values, frame, tx);
+            })
+            .on_key(move |s: &mut State, event: &KeyEvent, _: &mut Tx| {
+                if event.mods.ctrl || event.mods.alt || event.mods.cmd {
+                    return false;
+                }
+                if event.key == Key::Escape {
+                    s.measure.clear();
+                    return true;
+                }
+                let step = match event.key {
+                    Key::Left => -1,
+                    Key::Right => 1,
+                    _ => return false,
+                };
+                let last = keys_values.len().saturating_sub(1);
+                let current = s.chart_point.unwrap_or(last);
+                let next = (current as i32 + step).clamp(0, last as i32) as usize;
+                if event.mods.shift {
+                    let anchor = s.measure.span.map(|(start, _)| start).unwrap_or(current);
+                    s.measure.span = Some((anchor.min(next), anchor.max(next)));
+                    if let Some(measured) = measure_span(&keys_dates, &keys_values, anchor, next) {
+                        let plotted = plot(&keys_values, width, chart_height);
+                        publish_span(s, &measured, &keys_dates, &plotted, frame);
+                    }
+                } else {
+                    s.chart_point = Some(next);
+                    s.chart_hover = plot(&keys_values, width, chart_height)
+                        .get(next)
+                        .map(|point| point[0]);
+                }
+                true
+            })
+    };
+    let rail = s.compact.then(|| {
+        let rail_dates = point_dates.clone();
+        let rail_values = values.clone();
+        col()
+            .key("chart-rail")
+            .role("slider")
+            .label("Drag to measure a span")
+            .w_full()
+            .h(44.0)
+            .gap(6.0)
+            .justify_center()
+            .on_drag(move |s: &mut State, drag: &mut Drag, tx: &mut Tx| {
+                drag_span(s, drag, &rail_dates, &rail_values, frame, tx);
+            })
+            .child(ui::caption("Drag to measure", t))
+            .child(
+                el().w_full()
+                    .h(4.0)
+                    .radius(2.0)
+                    .fill(k.c.border_strong)
+                    .a11y_hidden(),
             )
-            .w(120.0)
-            .px(10.0)
-            .py(6.0)
-            .radius(8.0)
-            .child(ui::caption(short_date(&point.date), t))
-            .child(text(value).font(NUMBER).color(k.c.text_base))
     });
+    let band = el()
+        .key("chart-band")
+        .absolute(0.0, 0.0)
+        .size(1.0, chart_height)
+        .live_rect(&s.measure.band)
+        .live_opacity(&s.measure.shown)
+        .fill(trend.alpha(0.16))
+        .border(1.0, trend.alpha(0.7))
+        .a11y_hidden();
+    let measure = ui::floating(t)
+        .key("chart-measure")
+        .absolute(0.0, 8.0)
+        .live_offset(&s.measure.pin)
+        .live_opacity(&s.measure.shown)
+        .w(READOUT_W)
+        .px(10.0)
+        .py(8.0)
+        .radius(8.0)
+        .gap(2.0)
+        .child(
+            text("Nov 00 – Nov 00")
+                .live_text(&s.measure.dates)
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_muted),
+        )
+        .child(
+            text("+€000,000.00")
+                .live_text(&s.measure.change)
+                .font(NUMBER)
+                .live_text_color(&s.measure.ink),
+        )
+        .child(
+            text("+00.00% · 000 days")
+                .live_text(&s.measure.detail)
+                .font(k.ty.text_xsmall)
+                .color(k.c.text_muted),
+        );
     col()
         .w_full()
         .child(
@@ -210,10 +501,13 @@ pub fn value_chart(
                         .blur(5.0),
                 )
                 .child(canvas(line).absolute(0.0, 0.0).size(width, chart_height))
+                .child(band)
                 .children(now)
-                .children(readout),
+                .children(readout)
+                .child(measure),
         )
         .child(axis)
+        .children(rail)
 }
 
 struct AreaBand {
@@ -440,6 +734,24 @@ mod tests {
             }
             assert!(band.points.iter().all(|point| point[1] <= 100.0));
         }
+    }
+
+    #[test]
+    fn a_span_is_the_change_in_value_over_its_days() {
+        let dates = ["2026-03-01", "2026-03-02", "2026-03-10"]
+            .map(str::to_string)
+            .to_vec();
+        let values = [100.0, 110.0, 80.0];
+        let span = measure_span(&dates, &values, 2, 0).unwrap();
+        assert_eq!((span.start, span.end, span.days), (0, 2, 9));
+        assert_eq!(span.change, -20.0);
+        assert_eq!(span.percent, Some(-20.0));
+        assert!(
+            measure_span(&dates, &values, 1, 1).is_none(),
+            "a point is not a span"
+        );
+        let flat = measure_span(&dates[..2], &[0.0, 10.0], 0, 1).unwrap();
+        assert!(flat.percent.is_none(), "no percentage from a zero start");
     }
 
     #[test]
