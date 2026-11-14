@@ -7,6 +7,9 @@
 //! Nothing is installed without its SHA-256 matching the `<asset>.sha256` file from the same
 //! release. That catches a corrupt or truncated download. It does not protect against a release
 //! that was itself tampered with, because the attacker could publish matching checksums too.
+//!
+//! On macOS the new app must also be signed with Stahl's Developer ID (see [`DEVELOPER_TEAM`]),
+//! which a tampered release can't forge. The Windows `.zip` and the `.deb` are checksum-only.
 
 use std::{
     env,
@@ -808,6 +811,36 @@ fn plist_value(plist: &Path, key: &str) -> Result<String, String> {
     )
 }
 
+/// What `codesign` prints when the app is readable and validly signed, but not by who the
+/// requirement names.
+const REQUIREMENT_NOT_MET: &str = "failed to satisfy specified code requirement";
+
+/// Does the app's signature meet `requirement`? Wrong or no signer gets the sentence for the owner.
+/// `codesign` failing some other way (an unreadable app, a requirement it can't parse) says so,
+/// with its own words, so a broken requirement never looks like a wrong signer.
+fn verify_signer(app: &Path, requirement: &str) -> Result<(), String> {
+    let requirement = format!("-R={requirement}");
+    run_tool(
+        CODESIGN,
+        &[
+            "--verify".as_ref(),
+            "--deep".as_ref(),
+            "--strict".as_ref(),
+            requirement.as_ref(),
+            app.as_os_str(),
+        ],
+    )
+    .map(|_| ())
+    .map_err(|detail| {
+        if detail.contains(REQUIREMENT_NOT_MET) {
+            "The downloaded app isn't signed by Stahl's developer, so it wasn't installed."
+                .to_string()
+        } else {
+            format!("The downloaded app's signature couldn't be checked, so it wasn't installed ({detail}).")
+        }
+    })
+}
+
 /// Before anything moves: is this really intact, and really the version the release promised?
 /// `codesign` proves it's undamaged, but accepts any valid signature, ad-hoc too. So when there is a
 /// `signer` requirement (the real app always has one), the signature must also meet it: Stahl's
@@ -823,21 +856,7 @@ fn check_mac_app(app: &Path, version: &Version, signer: Option<&str>) -> Result<
         ],
     )?;
     if let Some(requirement) = signer {
-        let requirement = format!("-R={requirement}");
-        run_tool(
-            CODESIGN,
-            &[
-                "--verify".as_ref(),
-                "--deep".as_ref(),
-                "--strict".as_ref(),
-                requirement.as_ref(),
-                app.as_os_str(),
-            ],
-        )
-        .map_err(|_| {
-            "The downloaded app isn't signed by Stahl's developer, so it wasn't installed."
-                .to_string()
-        })?;
+        verify_signer(app, requirement)?;
     }
     let plist = app.join("Contents/Info.plist");
     let identifier = plist_value(&plist, "CFBundleIdentifier")?;
@@ -894,9 +913,10 @@ fn install_mac_app(
     let mounted = Mounted(mount);
     let app = the_app_in(&mounted.0)?;
     let new = stage.path().join("new.app");
-    // --noqtn: a quarantined copy of an ad-hoc signed app might refuse to open, leaving someone
-    // with a broken install. It is only reached after the checksum and these checks passed, and
-    // after the user pressed Install. This does mean Gatekeeper doesn't review the new version.
+    // --noqtn: without it Gatekeeper would review the copy on first launch and could refuse it,
+    // leaving someone with a broken install. It is only reached after the checksum and the
+    // Developer ID check (`check_mac_app`) passed, and after the user pressed Install. This does
+    // mean Gatekeeper doesn't review the new version; the Developer ID check stands in for it.
     run_tool(
         DITTO,
         &["--noqtn".as_ref(), app.as_os_str(), new.as_os_str()],
@@ -1341,6 +1361,38 @@ mod tests {
         assert!(save_package(&file, "stahl.deb", &nowhere).is_err());
     }
 
+    /// Proves the requirement accepts what we really ship. Point it at a published release:
+    /// `STAHL_RELEASE_DMG=/path/to/Stahl.dmg cargo test --lib -- --ignored real_release`
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a real release disk image in STAHL_RELEASE_DMG; run by hand"]
+    fn real_release_meets_the_requirement() {
+        let Some(dmg) = env::var_os("STAHL_RELEASE_DMG") else {
+            eprintln!("skipped: STAHL_RELEASE_DMG is not set");
+            return;
+        };
+        let dir = tempdir().unwrap();
+        let mount = dir.path().join("mount");
+        fs::create_dir(&mount).unwrap();
+        run_tool(
+            HDIUTIL,
+            &[
+                "attach".as_ref(),
+                dmg.as_os_str(),
+                "-nobrowse".as_ref(),
+                "-readonly".as_ref(),
+                "-noautoopen".as_ref(),
+                "-mountpoint".as_ref(),
+                mount.as_os_str(),
+            ],
+        )
+        .unwrap();
+        // Detaches when dropped, pass or fail.
+        let mounted = Mounted(mount);
+        let app = the_app_in(&mounted.0).unwrap();
+        verify_signer(&app, &developer_id_requirement(DEVELOPER_TEAM)).unwrap();
+    }
+
     #[test]
     fn the_developer_id_requirement_names_the_team() {
         let requirement = developer_id_requirement(DEVELOPER_TEAM);
@@ -1436,6 +1488,30 @@ mod tests {
         assert!(
             refused.contains("isn't signed by Stahl's developer"),
             "{refused}"
+        );
+        // The refusal is for the right reason: codesign says the requirement wasn't met.
+        let raw = run_tool(
+            CODESIGN,
+            &[
+                "--verify".as_ref(),
+                "--deep".as_ref(),
+                "--strict".as_ref(),
+                format!("-R={team}").as_ref(),
+                source.join("Stahl Capital.app").as_os_str(),
+            ],
+        )
+        .unwrap_err();
+        assert!(raw.contains(REQUIREMENT_NOT_MET), "{raw}");
+        // A requirement codesign can't read is not a wrong signer.
+        let broken = verify_signer(
+            &source.join("Stahl Capital.app"),
+            "this is not a requirement",
+        )
+        .unwrap_err();
+        assert!(
+            !broken.contains("isn't signed by Stahl's developer")
+                && broken.contains("couldn't be checked"),
+            "{broken}"
         );
         assert!(marker().contains("old"));
         assert_eq!(fs::read_dir(&installed).unwrap().count(), 1, "no debris");

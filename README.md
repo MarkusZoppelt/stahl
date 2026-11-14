@@ -58,8 +58,10 @@ Windows `.zip` replace themselves and restart. The `.deb` is downloaded and chec
 release.
 
 Downloads must match the SHA-256 checksum published next to them. That catches a broken download,
-not a compromised release, since whoever can replace one can replace the other. If that matters to
-you, verify releases yourself or use Nix.
+not a compromised release, since whoever can replace one can replace the other. On macOS the new
+app must also be signed with Stahl's Developer ID, which a tampered release can't forge; the
+Windows `.zip` and the `.deb` rely on the checksum alone. If that matters to you, verify releases
+yourself or use Nix.
 
 ## History
 
