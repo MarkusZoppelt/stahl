@@ -681,6 +681,25 @@ pub struct State {
     /// picture. The compositor sets it on the first frame it renders: false in tests, which never
     /// draw, and on iOS, which keeps the picture.
     pub shaders: bool,
+    /// Something is being composed for the owner: the sidebar's door turns its tumblers slowly
+    /// and breathes until this goes false, and then settles as it does after a refresh. Another
+    /// part of the app sets it; it is false by default.
+    pub door_busy: bool,
+    /// How far the owner has turned a door's dial by hand, in radians, on top of the turns that
+    /// refreshes and arrivals have made. It stays where it was left.
+    pub dial_hand: f32,
+    /// While a door is being dragged, the pointer's last angle around its centre, so each move
+    /// adds the short way round.
+    pub dial_drag: Option<f32>,
+    /// Where the sidebar's (or the phone's) mark was last laid out, so a refresh's pulse of
+    /// light can leave it.
+    pub door_mark: Option<[f32; 4]>,
+    /// When the last refresh landed on the animation clock, so one pulse crosses the page.
+    pub pulse_started: Option<f64>,
+    /// When the total first beat its record today, so light runs along it once.
+    pub high_flourish: Option<f64>,
+    /// The day the record was celebrated, so it happens once a day and not on every visit.
+    high_day: Option<chrono::NaiveDate>,
     /// The view has been built since `shaders` turned true.
     shader_view: bool,
     /// The opening has played for the portfolio now open: it never replays on a refresh or a page
@@ -940,6 +959,13 @@ impl State {
             price_updates: 0,
             door_arrivals: 0,
             shaders: false,
+            door_busy: false,
+            dial_hand: 0.0,
+            dial_drag: None,
+            door_mark: None,
+            pulse_started: None,
+            high_flourish: None,
+            high_day: None,
             shader_view: false,
             opening_seen: false,
             opening: None,
@@ -1109,6 +1135,36 @@ impl State {
             changed = true;
         }
         changed |= self.opening_arrives(now, from_welcome, tx);
+        // A record beaten today: one run of light along the total, the first time it is seen.
+        let today = chrono::Local::now().date_naive();
+        if self.page == Page::Overview
+            && self.has_portfolio()
+            && self.high_day != Some(today)
+            && self
+                .change
+                .as_ref()
+                .is_some_and(|change| crate::statement::is_record(change, today))
+        {
+            self.high_day = Some(today);
+            self.high_flourish = Some(now);
+            changed = true;
+        }
+        // The refresh's pulse is over: its slot leaves the tree so nothing is left to draw.
+        if self
+            .pulse_started
+            .is_some_and(|started| now - started >= crate::fx::PULSE_LIFE)
+        {
+            self.pulse_started = None;
+            changed = true;
+        }
+        // While the light runs, the view follows it; after it, nothing is left to draw.
+        let running = self
+            .high_flourish
+            .is_some_and(|started| now - started < crate::fx::FLOURISH + 0.1);
+        if !running {
+            self.high_flourish = None;
+        }
+        changed |= running || self.high_flourish.is_some();
         self.welcome_showing = self.on_welcome();
         if self.quit_requested {
             tx.quit();
@@ -2223,6 +2279,7 @@ impl State {
             move |state| {
                 state.price_moves = price_moves(&before, &state.positions);
                 state.price_updates += 1;
+                state.pulse_started = Some(state.now);
                 state.show_toast("Prices updated");
             },
             |backend| async move {

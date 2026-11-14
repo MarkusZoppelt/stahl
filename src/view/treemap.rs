@@ -506,6 +506,7 @@ pub fn view(s: &State, t: &Theme, width: f32, height: f32, progress: f32) -> El 
                     tx.scroll_into_view(format!("tile-{next}"));
                     true
                 })
+                .children(s.shaders.then(|| crate::fx::lift(8.0)))
                 .children(
                     wash(change, largest, t.up, t.down)
                         .map(|wash| el().absolute(0.0, 0.0).size(w, h).fill(wash).a11y_hidden()),

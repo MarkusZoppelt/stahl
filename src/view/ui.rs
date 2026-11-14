@@ -101,6 +101,49 @@ pub fn floating(t: &Theme) -> El {
         )
 }
 
+/// A floating surface made of glass when a compositor draws the window: the page behind it is
+/// blurred and slightly bent by a lens, and the rim facing the room's light catches it. Text is
+/// drawn on top by the caller, as on any panel. Without a compositor (tests, iOS) it is
+/// [`floating`].
+pub fn glass(s: &State, t: &Theme) -> El {
+    if !s.shaders {
+        return floating(t);
+    }
+    col()
+        .radius(12.0)
+        .continuous_corners()
+        .shadow(
+            18.0,
+            48.0,
+            Color::BLACK.alpha(if t.dark { 0.45 } else { 0.16 }),
+        )
+        // The lens bends and blurs the page behind the panel and lights its rim.
+        .child(crate::fx::glass())
+        // A tint over the glass, inset so the lit rim stays, so text keeps its contrast over any
+        // page: a treemap, a chart, a photograph of a lot of colour.
+        .child(
+            el().pin(Some(1.5), Some(1.5), Some(1.5), Some(1.5))
+                .radius(10.5)
+                .continuous_corners()
+                .fill(t.card.alpha(if t.dark { 0.62 } else { 0.60 }))
+                .a11y_hidden(),
+        )
+}
+
+/// A soft round light of `color`, `size` points across, brightest at its centre. For the head
+/// of a line as it draws, and the live end it comes to rest at.
+pub fn glow_orb(color: Color, size: f32, strength: f32) -> El {
+    el().size(size, size).a11y_hidden().radial_gradient(
+        [0.5, 0.5],
+        size / 2.0,
+        [
+            (0.0, color.alpha(strength)),
+            (0.35, color.alpha(strength * 0.42)),
+            (1.0, color.alpha(0.0)),
+        ],
+    )
+}
+
 /// A section with a rule over it and no box, like a line in a ledger.
 pub fn ledger(t: &Theme) -> El {
     col()
@@ -205,8 +248,10 @@ pub fn flash(key: impl Into<String>, updates: u64, color: Color, radius: f32) ->
 /// The flash: quickly in, then a slow fade.
 pub const FLASH: &[Beat] = &[
     Beat::new(0.0).opacity(0.0),
-    Beat::new(0.12).opacity(1.0),
-    Beat::new(0.9).opacity(0.0),
+    // The refresh's pulse of light reaches the figures first; then they wash.
+    Beat::new(0.18).opacity(0.0),
+    Beat::new(0.30).opacity(1.0),
+    Beat::new(1.05).opacity(0.0),
 ];
 
 /// How the last refresh moved an asset class, as the change in its value: positive, negative,
@@ -251,7 +296,23 @@ pub fn price_flash(s: &State, id: usize, radius: f32, t: &Theme) -> Option<El> {
         })
 }
 
-/// One soft light from above, on the wall behind a page.
+/// The room's one light on the wall behind a page. A compositor draws it live: it follows the
+/// pointer, rests above the middle of the window, and takes the day's colour. Without one (tests,
+/// iOS) it is [`wash`], the still light the app has always had.
+pub fn light(s: &State, t: &Theme, radius: f32) -> El {
+    if s.shaders {
+        // A refresh's pulse crosses the same wall the light falls on.
+        let pulse = match (s.pulse_started, s.door_mark) {
+            (Some(started), Some([x, y, w, h])) => [started as f32, x + w / 2.0, y + h / 2.0, 1.0],
+            _ => [0.0; 4],
+        };
+        crate::fx::room(radius, pulse)
+    } else {
+        wash(t, radius)
+    }
+}
+
+/// One soft light from above, on the wall behind a page, for a window without a compositor.
 /// `radius` follows whatever it fills: the rounded main pane, or a whole window.
 pub fn wash(t: &Theme, radius: f32) -> El {
     let light = if t.dark {

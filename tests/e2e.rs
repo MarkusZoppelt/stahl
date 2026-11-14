@@ -3513,3 +3513,55 @@ fn new_money_is_placed_by_buying_only_and_an_ambiguous_amount_is_refused() {
     );
     assert!(app.has_text("Nothing changes yet"));
 }
+
+#[test]
+fn the_door_can_be_turned_by_hand_and_by_the_keyboard() {
+    use std::f32::consts::PI;
+
+    let mut app = Harness::boot(false, None);
+    let (x, y) = app
+        .rt
+        .find("door-welcome")
+        .expect("the welcome screen's door");
+    // A hand on the dial: press to the right of its centre and carry it a quarter turn up.
+    let radius = 60.0;
+    app.rt.pointer_move(x + radius, y);
+    app.rt.frame(1.0 / 60.0);
+    app.rt.pointer_down(x + radius, y);
+    for step in 1..=12 {
+        let angle = -(step as f32 / 12.0) * PI / 2.0;
+        app.rt
+            .pointer_move(x + radius * angle.cos(), y + radius * angle.sin());
+        app.rt.frame(1.0 / 60.0);
+    }
+    app.rt.pointer_up(x, y - radius);
+    app.settle();
+    assert!(
+        app.rt.state.dial_hand < -1.2,
+        "the dial followed the hand: {}",
+        app.rt.state.dial_hand
+    );
+    assert!(app.rt.state.dial_drag.is_none(), "the hand let go");
+
+    // The keyboard turns it a notch at a time: the press above gave the door focus.
+    let before = app.rt.state.dial_hand;
+    app.press(Key::Right);
+    app.press(Key::Right);
+    assert!(
+        app.rt.state.dial_hand > before + 0.4,
+        "two notches to the right: {}",
+        app.rt.state.dial_hand
+    );
+    app.press(Key::Left);
+    assert!(app.rt.state.dial_hand < before + 0.6, "and one back");
+
+    // From a cold start, Tab reaches the door and the arrows turn it there too.
+    let mut cold = Harness::boot(false, None);
+    cold.press(Key::Tab);
+    cold.press(Key::Right);
+    assert!(
+        cold.rt.state.dial_hand > 0.2,
+        "a keyboard reaches the dial: {}",
+        cold.rt.state.dial_hand
+    );
+}

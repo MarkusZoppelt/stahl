@@ -63,7 +63,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .child(ui::wash(t, 0.0))
+                .child(ui::light(s, t, 0.0))
                 .child(pull_door(s))
                 .child(content),
         )

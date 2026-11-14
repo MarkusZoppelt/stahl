@@ -317,6 +317,18 @@ pub fn value_chart(
             .fill(circle([x, y], 2.0), t.card);
     }
     let [last_x, last_y] = plotted[plotted.len() - 1];
+    // The live end: a soft glow in the gain or loss colour, breathing as the live dot does.
+    // While the line draws in, the same light sits at its head and runs along it, once.
+    let live = {
+        let head = along(&plotted, progress);
+        if progress < 1.0 {
+            ui::glow_orb(trend, 26.0, 0.7).absolute(head[0] - 13.0, head[1] - 13.0)
+        } else {
+            ui::glow_orb(trend, 34.0, 0.42)
+                .absolute(head[0] - 17.0, head[1] - 17.0)
+                .cycle(ui::BREATHE)
+        }
+    };
     // Where the line has got to: today, once it has finished drawing.
     let now = (progress >= 1.0).then(|| {
         el().key(format!("{key}-now"))
@@ -325,13 +337,6 @@ pub fn value_chart(
             .center()
             .a11y_hidden()
             .transition(Transition::scale(0.2).combined(Transition::opacity()))
-            .child(
-                el().absolute(0.0, 0.0)
-                    .size(16.0, 16.0)
-                    .radius(8.0)
-                    .fill(trend.alpha(0.2))
-                    .cycle(ui::BREATHE),
-            )
             .child(el().size(6.0, 6.0).radius(3.0).fill(trend))
     });
     // A kept span, or one being dragged, replaces the hover readout.
@@ -345,7 +350,7 @@ pub fn value_chart(
             } else {
                 s.money(point.value)
             };
-            ui::floating(t)
+            ui::glass(s, t)
                 .key("chart-readout")
                 .pin(
                     Some((x + 10.0).min(width - 124.0).max(0.0)),
@@ -453,7 +458,7 @@ pub fn value_chart(
         .fill(trend.alpha(0.16))
         .border(1.0, trend.alpha(0.7))
         .a11y_hidden();
-    let measure = ui::floating(t)
+    let measure = ui::glass(s, t)
         .key("chart-measure")
         .absolute(0.0, 8.0)
         .live_offset(&s.measure.pin)
@@ -503,6 +508,7 @@ pub fn value_chart(
                 .child(canvas(line).absolute(0.0, 0.0).size(width, chart_height))
                 .child(band)
                 .children(now)
+                .child(live)
                 .children(readout)
                 .child(measure),
         )
@@ -541,6 +547,19 @@ fn area_bands(line: &[[f32; 2]], height: f32) -> Vec<AreaBand> {
             }
         })
         .collect()
+}
+
+/// The point `t` of the way along a polyline, from 0 at its start to 1 at its end.
+fn along(points: &[[f32; 2]], t: f32) -> [f32; 2] {
+    let Some(last) = points.len().checked_sub(1) else {
+        return [0.0, 0.0];
+    };
+    let at = t.clamp(0.0, 1.0) * last as f32;
+    let index = (at.floor() as usize).min(last);
+    let part = at - index as f32;
+    let [ax, ay] = points[index];
+    let [bx, by] = points[(index + 1).min(last)];
+    [ax + (bx - ax) * part, ay + (by - ay) * part]
 }
 
 fn circle(center: [f32; 2], radius: f32) -> Vec<[f32; 2]> {

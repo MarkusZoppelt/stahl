@@ -452,7 +452,7 @@ fn palette(s: &State, t: &Theme, layer: &mut Vec<El>) {
                 ),
         );
     }
-    let panel = ui::floating(t)
+    let panel = ui::glass(s, t)
         .key("palette-panel")
         .role("dialog")
         .label("Command Palette")

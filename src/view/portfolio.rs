@@ -93,8 +93,10 @@ pub fn matches_search(position: &PositionDto, query: &str) -> bool {
 
 const FLASH: &[Beat] = &[
     Beat::new(0.0).opacity(0.0),
-    Beat::new(0.12).opacity(1.0),
-    Beat::new(0.9).opacity(0.0),
+    // The refresh's pulse of light reaches the figures first; then they wash.
+    Beat::new(0.18).opacity(0.0),
+    Beat::new(0.30).opacity(1.0),
+    Beat::new(1.05).opacity(0.0),
 ];
 
 /// The total, with today's move under it. The hero of the page.
@@ -104,16 +106,25 @@ fn hero_total(s: &State, t: &Theme, narrow: bool) -> El {
         return col();
     };
     let day = t.change(summary.day_change_percent);
+    // A record beaten today: light runs along the total once, the first time it is seen.
+    let run = s.high_flourish.map_or(0.0, |started| {
+        ((s.now - started) / crate::fx::FLOURISH).clamp(0.0, 1.0) as f32
+    });
     col()
         .gap(2.0)
         .child(ui::caption("Total value", t))
         .child(
-            RollingText::new("hero-total", s.money(summary.total_value))
-                .font(if narrow { HERO_COMPACT } else { HERO })
-                .color(k.c.text_base)
-                .value(summary.total_value)
-                .build(k)
-                .key("total-value"),
+            // The digits are the steel: a sheen follows the room's light across them. It is a
+            // slot over the text, so the text keeps rolling and stays crisp.
+            el().child(
+                RollingText::new("hero-total", s.money(summary.total_value))
+                    .font(if narrow { HERO_COMPACT } else { HERO })
+                    .color(k.c.text_base)
+                    .value(summary.total_value)
+                    .build(k)
+                    .key("total-value"),
+            )
+            .children(s.shaders.then(|| crate::fx::sheen(1.0, run))),
         )
         .child(
             row()

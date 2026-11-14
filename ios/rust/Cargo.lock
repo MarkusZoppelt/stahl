@@ -3326,15 +3326,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ordered-float"
-version = "5.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "ordered-stream"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4559,6 +4550,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune-fx"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=2bdfae16568782a56cb93818944d05b93546bce5#2bdfae16568782a56cb93818944d05b93546bce5"
+dependencies = [
+ "bytemuck",
+ "rune-motion",
+ "rune-staging",
+ "wgpu",
+]
+
+[[package]]
 name = "rune-kit"
 version = "0.0.1"
 source = "git+https://github.com/anomalyco/rune?rev=2bdfae16568782a56cb93818944d05b93546bce5#2bdfae16568782a56cb93818944d05b93546bce5"
@@ -5204,6 +5206,7 @@ dependencies = [
  "portfolio_rs",
  "reqwest",
  "rune",
+ "rune-fx",
  "rune-kit",
  "semver",
  "serde",
@@ -5221,6 +5224,7 @@ version = "0.0.0"
 dependencies = [
  "portfolio_rs",
  "rune",
+ "rune-fx",
  "stahl",
  "tokio",
  "wgpu",
@@ -5521,7 +5525,7 @@ dependencies = [
  "nix 0.29.0",
  "num-derive",
  "num-traits",
- "ordered-float 4.6.0",
+ "ordered-float",
  "pest",
  "pest_derive",
  "phf 0.11.3",
@@ -6318,7 +6322,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5f2ab60e120fd6eaa68d9567f3226e876684639d22a4219b313ff69ec0ccd5ac"
 dependencies = [
  "log",
- "ordered-float 4.6.0",
+ "ordered-float",
  "strsim",
  "thiserror 1.0.69",
  "wezterm-dynamic-derive",
@@ -6458,7 +6462,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "once_cell",
- "ordered-float 5.5.1",
+ "ordered-float",
  "parking_lot 0.12.5",
  "portable-atomic",
  "portable-atomic-util",
