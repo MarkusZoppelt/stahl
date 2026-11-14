@@ -1811,13 +1811,16 @@ fn steel(p: vec2f) -> vec4f {
     } else {
         // Brushed straight across: long streaks along x, a new one every pixel or two down.
         let y = p.y * dev;
-        let streak = vnoise(vec2f(p.x * dev * 0.010, y * 0.55)) * 0.65
-            + vnoise(vec2f(p.x * dev * 0.003 + 17.0, y * 0.21)) * 0.35;
+        // Fine and long: a line is about a device pixel tall, so at 1x it reads as a surface, not
+        // as scan lines. A second, slower pass keeps it from repeating.
+        let sx = clamp(p.x, r.x, r.x + r.z) * dev;
+        let streak = vnoise(vec2f(sx * 0.006, y * 1.0)) * 0.6
+            + vnoise(vec2f(sx * 0.002 + 17.0, y * 0.37)) * 0.4;
         let blotch = vnoise(local * 0.012 + vec2f(5.0, 9.0));
         // The plate is a little brighter on the side toward the light, as each half of the door is.
         let across = clamp(dot(local / max(half, vec2f(1.0)), dir), -1.0, 1.0);
         var base = mix(dim_c, lit_c, 0.7 + 0.3 * across) * (0.95 + 0.05 * across);
-        base *= 0.93 + (streak - 0.5) * select(0.05, 0.07, dark) + (blotch - 0.5) * 0.04;
+        base *= 0.93 + (streak - 0.5) * select(0.025, 0.018, dark) + (blotch - 0.5) * 0.04;
         base *= mix(0.84, 1.04, reach);
         // A recessed channel sits in shade.
         if (depth < 0.0) { base *= 0.80; }
@@ -1828,9 +1831,9 @@ fn steel(p: vec2f) -> vec4f {
         let off = (p.x - clamp(u.light.x, r.x - r.z * 0.4, r.x + r.z * 1.4)) / width;
         let tilt = (p.y - r.y) / max(r.w, 1.0) - 0.5;
         let band = exp(-off * off * 2.2) * 0.55
-            + exp(-pow(off + tilt * 0.12, 2.0) * mix(18.0, 30.0, hover)) * 0.75;
+            + exp(-pow(off + tilt * 0.12, 2.0) * mix(7.0, 12.0, hover)) * 0.6;
         let peak = select(0.10, 0.13, dark) * (1.0 + 0.30 * hover) * gain * reach;
-        c = base + steel_white * band * peak * (0.9 + (streak - 0.5) * 0.4);
+        c = base + steel_white * band * peak * (0.95 + (streak - 0.5) * 0.1);
 
         // A band of light sweeps across once, the first time a plate is seen.
         let run = u.spin;
@@ -1849,9 +1852,11 @@ fn steel(p: vec2f) -> vec4f {
             steel_sd(local + vec2f(0.0, e), half, u.radius) - steel_sd(local - vec2f(0.0, e), half, u.radius));
         let normal = normalize(g + vec2f(0.0, 1e-4));
         let bevel = smoothstep(-1.5 - 0.5 / dev, -1.5 + 0.5 / dev, sd);
-        let facing = dot(normal, dir) * depth;
-        let edge_lit = select(0.26, 0.24, dark) * (1.0 + 0.6 * hover) * (0.6 + 0.4 * gain);
-        let edge_dim = select(0.22, 0.30, dark);
+        // The one light, but from above as well as across: the top edge catches it as a hairline
+        // and the bottom edge is in shade, so the plate has a thickness.
+        let facing = dot(normal, normalize(dir + vec2f(0.0, -1.1))) * depth;
+        let edge_lit = select(0.34, 0.42, dark) * (1.0 + 0.6 * hover) * (0.6 + 0.4 * gain);
+        let edge_dim = select(0.30, 0.46, dark);
         c += steel_white * bevel * max(facing, 0.0) * edge_lit;
         c *= 1.0 - bevel * max(-facing, 0.0) * edge_dim;
         // The bevel's own sides: even facing away from the light, it reads as an edge.

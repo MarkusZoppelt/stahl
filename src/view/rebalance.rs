@@ -86,7 +86,7 @@ pub fn instrument(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         .child(money_row(s, t))
         .child(ui::rule(t))
         .child(plot(s, t, &classes, stacked))
-        .child(key(t, &classes))
+        .child(key(s, t, &classes))
         .child(rows(s, t, &classes, &plan, stacked))
         .child(closing(s, t, &plan))
 }
@@ -560,8 +560,85 @@ fn bar_label(line: &str, t: &Theme) -> El {
         .color(t.kit.c.text_muted)
 }
 
+/// What a bead can say about where a class would be after the change. The row draws one and the
+/// legend lists them, both from this, so they cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bead {
+    /// Inside the class's tolerance band.
+    Inside,
+    /// Outside it.
+    Outside,
+    /// No target to be inside or outside of, or no portfolio to take a share of.
+    Open,
+}
+
+impl Bead {
+    const ALL: [Bead; 3] = [Bead::Inside, Bead::Outside, Bead::Open];
+
+    fn of(class: &Class, value: f64, total: f64) -> Bead {
+        match rebalance::inside_band(class, value, total) {
+            Some(true) => Bead::Inside,
+            Some(false) => Bead::Outside,
+            None => Bead::Open,
+        }
+    }
+
+    fn colour(self, t: &Theme) -> Color {
+        match self {
+            Bead::Inside => t.up,
+            Bead::Outside => t.warn,
+            Bead::Open => t.kit.c.text_muted,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Bead::Inside => "after, inside tolerance",
+            Bead::Outside => "after, outside tolerance",
+            Bead::Open => "after, no target",
+        }
+    }
+
+    /// The beads a row of these classes can draw at some position of the slider: a class with a
+    /// target is inside or outside it, one without is open.
+    fn drawn(classes: &[Class]) -> Vec<Bead> {
+        let targeted = classes.iter().any(|class| class.target.is_some());
+        let open = classes.iter().any(|class| class.target.is_none());
+        Bead::ALL
+            .into_iter()
+            .filter(|bead| match bead {
+                Bead::Inside | Bead::Outside => targeted,
+                Bead::Open => open,
+            })
+            .collect()
+    }
+}
+
+/// The bead itself, `size` across: a small steel knob that leans to its colour.
+fn bead(s: &State, t: &Theme, state: Bead, size: f32) -> El {
+    let colour = state.colour(t);
+    if s.shaders {
+        el().size(size, size).radius(size / 2.0).child(ui::knob(
+            s,
+            Plate::new(0.9).tint([colour.r, colour.g, colour.b].map(srgb_encode), 0.6),
+        ))
+    } else {
+        el().size(size, size)
+            .radius(size / 2.0)
+            .fill(colour)
+            .border(2.0, t.card)
+    }
+}
+
+/// Where the class is today: a hollow ring, so the bead that is filled reads as where it would be.
+fn ring(t: &Theme) -> El {
+    el().size(TODAY, TODAY)
+        .radius(TODAY / 2.0)
+        .border(1.5, t.kit.c.text_muted)
+}
+
 /// What the marks on a track mean, once, and who pays for a change.
-fn key(t: &Theme, classes: &[Class]) -> El {
+fn key(s: &State, t: &Theme, classes: &[Class]) -> El {
     let item = |mark: El, line: &str| {
         row()
             .center_y()
@@ -569,11 +646,6 @@ fn key(t: &Theme, classes: &[Class]) -> El {
             .child(mark)
             .child(ui::caption(line, t))
     };
-    let hollow = el()
-        .size(TODAY, TODAY)
-        .radius(TODAY / 2.0)
-        .border(1.5, t.kit.c.text_muted);
-    let filled = el().size(TODAY, TODAY).radius(TODAY / 2.0).fill(t.up);
     let tick = el().w(2.0).h(11.0).radius(1.0).fill(tick_color(t));
     let band = el()
         .size(16.0, 9.0)
@@ -584,8 +656,12 @@ fn key(t: &Theme, classes: &[Class]) -> El {
         .w_full()
         .flex_wrap()
         .gaps(8.0, 16.0)
-        .child(item(hollow, "today"))
-        .child(item(filled, "after"))
+        .child(item(ring(t), "today"))
+        .children(
+            Bead::drawn(classes)
+                .into_iter()
+                .map(|state| item(bead(s, t, state, THUMB), state.label())),
+        )
         .child(item(tick, "target"))
         .child(item(band, "tolerance"))
         .child(el().grow(1.0))
@@ -769,7 +845,6 @@ fn track(s: &State, t: &Theme, classes: &[Class], plan: &Plan, index: usize, sta
                 ),
         );
     }
-    // Where the class is today: hollow, so the thumb that is filled reads as where it would be.
     track = track.child(
         row()
             .center_y()
@@ -779,19 +854,10 @@ fn track(s: &State, t: &Theme, classes: &[Class], plan: &Plan, index: usize, sta
             .inert()
             .a11y_hidden()
             .child(el().w_frac(fraction(held)))
-            .child(
-                el().size(TODAY, TODAY)
-                    .radius(TODAY / 2.0)
-                    .border(1.5, t.kit.c.text_muted)
-                    .offset(-TODAY / 2.0, 0.0),
-            ),
+            .child(ring(t).offset(-TODAY / 2.0, 0.0)),
     );
-    let colour = match rebalance::inside_band(class, plan.values[index], plan.total) {
-        Some(true) => t.up,
-        Some(false) => t.warn,
-        None => t.kit.c.text_muted,
-    };
-    track.child(thumb(s, t, class, index, height, share, top, colour))
+    let state = Bead::of(class, plan.values[index], plan.total);
+    track.child(thumb(s, t, class, index, height, share, top, state))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -803,7 +869,7 @@ fn thumb(
     height: f32,
     share: f64,
     top: f64,
-    colour: Color,
+    state: Bead,
 ) -> El {
     let enabled = matches!(
         s.rebalance.plan,
@@ -834,18 +900,7 @@ fn thumb(
         .child(
             el().size(THUMB + 6.0, THUMB + 6.0)
                 .center()
-                .child(if s.shaders {
-                    // A small steel knob that leans to its class's colour.
-                    el().size(THUMB, THUMB).radius(THUMB / 2.0).child(ui::knob(
-                        s,
-                        Plate::new(0.9).tint([colour.r, colour.g, colour.b].map(srgb_encode), 0.6),
-                    ))
-                } else {
-                    el().size(THUMB, THUMB)
-                        .radius(THUMB / 2.0)
-                        .fill(colour)
-                        .border(2.0, t.card)
-                }),
+                .child(bead(s, t, state, THUMB)),
         );
     if enabled {
         thumb = thumb
@@ -1375,4 +1430,64 @@ pub fn set_share(s: &mut State, index: usize, percent: f64) {
 pub fn set_amount(s: &mut State, amount: f64) {
     s.rebalance.amount.replace_text(format!("{amount}"));
     apply_amount(s);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn class(name: &str, value: f64, target: Option<f64>) -> Class {
+        super::class(name, value, target, None)
+    }
+
+    /// Every bead a row can draw as the slider moves: each class's value swept across the whole.
+    fn drawn_by_rows(classes: &[Class]) -> Vec<Bead> {
+        let total: f64 = classes.iter().map(Class::held_value).sum();
+        let mut seen = Vec::new();
+        for class in classes {
+            for step in 0..=200 {
+                let value = total * f64::from(step) / 200.0;
+                let bead = Bead::of(class, value, total);
+                if !seen.contains(&bead) {
+                    seen.push(bead);
+                }
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn the_legend_lists_the_beads_a_row_can_draw_and_no_others() {
+        for classes in [
+            vec![
+                class("Stocks", 60.0, Some(50.0)),
+                class("Bonds", 40.0, Some(50.0)),
+            ],
+            vec![
+                class("Stocks", 60.0, Some(50.0)),
+                class("Other", 40.0, None),
+            ],
+            vec![class("Other", 100.0, None)],
+        ] {
+            let drawn = drawn_by_rows(&classes);
+            let legend = Bead::drawn(&classes);
+            for bead in &drawn {
+                assert!(legend.contains(bead), "{bead:?} is drawn but not listed");
+            }
+            for bead in &legend {
+                assert!(drawn.contains(bead), "{bead:?} is listed but never drawn");
+            }
+        }
+    }
+
+    #[test]
+    fn each_bead_has_its_own_colour_and_words() {
+        let t = Theme::new(true);
+        for (i, a) in Bead::ALL.into_iter().enumerate() {
+            for b in Bead::ALL.into_iter().skip(i + 1) {
+                assert_ne!(a.label(), b.label());
+                assert_ne!(a.colour(&t), b.colour(&t));
+            }
+        }
+    }
 }

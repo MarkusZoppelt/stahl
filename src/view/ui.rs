@@ -156,9 +156,9 @@ pub fn plate(s: &State, t: &Theme, plate: Plate, radius: f32) -> El {
     let col = col().radius(radius).continuous_corners().min_w(0.0);
     let col = if plate.raised {
         col.shadow(
-            2.0,
-            6.0,
-            Color::BLACK.alpha(if t.dark { 0.55 } else { 0.22 }),
+            3.0,
+            9.0,
+            Color::BLACK.alpha(if t.dark { 0.70 } else { 0.26 }),
         )
     } else {
         col

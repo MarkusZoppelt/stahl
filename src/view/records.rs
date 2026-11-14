@@ -176,17 +176,22 @@ fn plate(s: &State, record: &Record, index: usize, newest: NaiveDate, t: &Theme)
 /// The steel a plate is made of: pale in either theme, leaning to the change it records, and
 /// duller when it is old, so it gives back less of the light.
 fn steel_of(record: &Record, fresh: bool, t: &Theme) -> Plate {
-    let tint = record.tone().map(|change| {
-        let c = t.change(change);
-        (
-            [c.r, c.g, c.b].map(srgb_encode),
-            if t.dark { 0.10 } else { 0.07 },
-        )
-    });
-    let tone = if fresh { 0.88 } else { 0.82 } + if t.dark { 0.0 } else { 0.08 };
+    let change = record.tone();
+    let fall = change.is_some_and(|change| change < 0.0);
+    // The wall is the dimmest light in the room, so in the dark the plates sit a step down. A
+    // fall is darker and cooler, a slate with no red in it.
+    let tone = if fresh { 0.88 } else { 0.82 } + if t.dark { -0.16 } else { 0.08 };
+    let tone = if fall { tone - 0.05 } else { tone };
     let steel = Plate::new(tone).gain(if fresh { 1.0 } else { 0.45 });
-    match tint {
-        Some((rgb, strength)) => steel.tint(rgb, strength),
+    match change {
+        Some(_) if fall => steel.tint([0.50, 0.57, 0.66], 0.22),
+        Some(change) => {
+            let c = t.change(change);
+            steel.tint(
+                [c.r, c.g, c.b].map(srgb_encode),
+                if t.dark { 0.10 } else { 0.07 },
+            )
+        }
         None => steel,
     }
 }
