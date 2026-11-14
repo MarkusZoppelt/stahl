@@ -1622,6 +1622,33 @@ impl Backend {
         Some(config.with_file_name("ask-consent.json"))
     }
 
+    /// The file that remembers whether AI features are on. Beside the config, like the consent.
+    pub fn features_path(&self) -> Option<PathBuf> {
+        let config = self
+            .config_path
+            .clone()
+            .or_else(|| config_path().ok().map(PathBuf::from))?;
+        Some(config.with_file_name("features.json"))
+    }
+
+    /// Whether the owner turned AI features on. A missing or unreadable file means off.
+    pub fn ai_features(&self) -> bool {
+        self.features_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|value| value.get("ai").and_then(serde_json::Value::as_bool))
+            .unwrap_or(false)
+    }
+
+    /// Remember the choice at once.
+    pub fn set_ai_features(&self, on: bool) -> BackendResult<()> {
+        let Some(path) = self.features_path() else {
+            return Ok(());
+        };
+        std::fs::write(&path, serde_json::json!({ "ai": on }).to_string())
+            .map_err(|error| format!("couldn't remember that choice: {error}"))
+    }
+
     /// The hosts the owner has already said yes to.
     pub fn consented_hosts(&self) -> Vec<String> {
         self.consent_path()
@@ -1735,6 +1762,23 @@ mod tests {
             vec!["api.example.com".to_string(), "127.0.0.1".to_string()]
         );
         assert!(dir.path().join("ask-consent.json").is_file());
+    }
+
+    #[test]
+    fn a_missing_or_corrupt_features_file_reads_as_off() {
+        let runtime = Runtime::new().unwrap();
+        let dir = TempDir::new().unwrap();
+        let backend = offline_backend(&runtime, &dir);
+        assert!(!backend.ai_features(), "missing");
+        fs::write(dir.path().join("features.json"), "{not json").unwrap();
+        assert!(!backend.ai_features(), "corrupt");
+        fs::write(dir.path().join("features.json"), r#"{"ai": "yes"}"#).unwrap();
+        assert!(!backend.ai_features(), "wrong type");
+        backend.set_ai_features(true).unwrap();
+        assert!(backend.ai_features());
+        assert!(dir.path().join("features.json").is_file());
+        backend.set_ai_features(false).unwrap();
+        assert!(!backend.ai_features());
     }
 
     #[test]

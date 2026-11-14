@@ -49,6 +49,8 @@ fn main() {
     fn scene(s: &mut State, page: Page) {
         s.startup();
         s.settle();
+        // Counsel exists only with AI features on.
+        s.ai = s.ai || page == Page::Ask;
         // The owner has been to the records room before, so its mark is not on every screen.
         s.navigate(Page::Records);
         s.settle();
@@ -424,6 +426,7 @@ fn main() {
             // while an answer is being composed.
             ("door-thinking", |s| {
                 scene(s, Page::Overview);
+                s.ai = true;
                 s.skip_opening();
                 s.door_busy = true;
             }),
@@ -501,10 +504,15 @@ fn main() {
             }),
             ("briefing", |s| scene(s, Page::Briefing)),
             ("health", |s| scene(s, Page::Health)),
-            ("settings", |s| scene(s, Page::Settings)),
+            ("settings", |s| {
+                scene(s, Page::Settings);
+                s.ai = true;
+            }),
             // A provider away from this machine over plain http is refused with a sentence.
+            ("settings-ai-off", |s| scene(s, Page::Settings)),
             ("settings-refused", |s| {
                 scene(s, Page::Settings);
+                s.ai = true;
                 s.settings
                     .provider_url
                     .replace_text("http://evil.example#@localhost/v1");
