@@ -252,12 +252,13 @@ impl Page {
         let name = name.trim().to_lowercase().replace([' ', '_'], "-");
         Self::ALL
             .into_iter()
+            .filter(|page| *page != Page::Ask)
             .find(|page| page.label().to_lowercase().replace(' ', "-") == name)
             .or(match name.as_str() {
                 "health" | "data-health" => Some(Page::Health),
                 "docs" => Some(Page::Documents),
                 "settings" | "preferences" => Some(Page::Settings),
-                "ask" | "counsel" => Some(Page::Ask),
+                // Counsel is reached only through the AI switch, never by name.
                 _ => None,
             })
     }
@@ -813,6 +814,9 @@ pub struct Pick {
 
 pub struct State {
     pub backend: Backend,
+    /// Whether AI features are on: Counsel, its questions, and the provider. Off until the owner
+    /// turns them on; the saved choice is read at startup.
+    pub ai: bool,
     jobs_tx: Sender<Job>,
     jobs_rx: Receiver<Job>,
     pending: usize,
@@ -1166,7 +1170,9 @@ impl State {
     pub fn new(backend: Backend, initial_file: Option<String>) -> State {
         let (jobs_tx, jobs_rx) = channel();
         let (ask_events_tx, ask_events) = channel();
+        let ai = backend.ai_features();
         State {
+            ai,
             backend,
             jobs_tx,
             jobs_rx,
@@ -2733,6 +2739,11 @@ impl State {
     // --- Navigating ---
 
     pub fn navigate(&mut self, page: Page) {
+        let page = if page == Page::Ask && !self.ai {
+            Page::Overview
+        } else {
+            page
+        };
         if page.needs_workspace() && !self.is_workspace() {
             return;
         }
@@ -3348,6 +3359,9 @@ impl State {
 
     /// Ask `question` as if it had been typed.
     pub fn ask_question(&mut self, question: impl Into<String>) {
+        if !self.ai {
+            return;
+        }
         let question = question.into();
         self.ask.input.replace_text(&question);
         self.ask_send();
@@ -3355,13 +3369,16 @@ impl State {
 
     /// Ask `question` on the Counsel page, from anywhere: a palette row, a chip, a next step.
     pub fn ask_about(&mut self, question: impl Into<String>) {
+        if !self.ai {
+            return;
+        }
         self.navigate(Page::Ask);
         self.ask_question(question);
     }
 
     /// Send what is in the input from the Overview's line, on the Counsel page.
     pub fn ask_here(&mut self) {
-        if self.ask.input.text.trim().is_empty() {
+        if !self.ai || self.ask.input.text.trim().is_empty() {
             return;
         }
         self.navigate(Page::Ask);
@@ -3371,7 +3388,7 @@ impl State {
     /// Send what is in the input. Nothing happens for an empty question, or while an answer is
     /// still arriving: one question at a time.
     pub fn ask_send(&mut self) {
-        if self.ask.thinking || self.consent.is_some() {
+        if !self.ai || self.ask.thinking || self.consent.is_some() {
             return;
         }
         let question = self.ask.input.text.trim().to_string();
@@ -3774,6 +3791,26 @@ impl State {
         if let Some(turn) = self.ask.current_mut() {
             turn.phase = crate::ask::Phase::Failed;
             turn.error = Some(why);
+        }
+    }
+
+    /// Turn AI features on or off. Saved at once. Turning them off leaves the Counsel page for the
+    /// Overview, stops an answer that is arriving, and drops a question waiting for consent.
+    pub fn set_ai(&mut self, on: bool) {
+        if self.ai == on {
+            return;
+        }
+        if let Err(error) = self.backend.set_ai_features(on) {
+            self.settings.error = Some(error);
+            return;
+        }
+        self.ai = on;
+        if !on {
+            self.ask_stop();
+            self.consent = None;
+            if self.page == Page::Ask {
+                self.navigate(Page::Overview);
+            }
         }
     }
 

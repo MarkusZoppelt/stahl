@@ -473,7 +473,7 @@ pub fn overview(s: &State, t: &Theme, cx: &Cx<State>) -> El {
             2,
         ))
         // Questions are about today; a past day only shows what was.
-        .children((!s.in_past()).then(|| ask::overview_line(s, t, narrow)))
+        .children((s.ai && !s.in_past()).then(|| ask::overview_line(s, t, narrow)))
         .children(
             narrow
                 .then(|| overview::statement_figures(s, t, cx))

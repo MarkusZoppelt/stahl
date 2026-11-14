@@ -44,7 +44,7 @@ pub fn shell(s: &State, t: &Theme, cx: &Cx<State>) -> El {
         // Overview says what the page is for in its own sentence. On a phone, repeating it
         // in a caption pushes what to do under the tab bar.
         let about = (s.page != Page::Overview).then(|| guide::about(s.page));
-        if s.page == Page::Ask && !s.in_past() {
+        if s.page == Page::Ask && s.ai && !s.in_past() {
             ask::page(s, t, cx)
         } else {
             page_column(
@@ -326,7 +326,7 @@ fn more_list(s: &State, t: &Theme) -> El {
     col()
         .w_full()
         .gap(24.0)
-        .child(section("Counsel", vec![page_row(Page::Ask, t)], t))
+        .children(s.ai.then(|| section("Counsel", vec![page_row(Page::Ask, t)], t)))
         .child(section("Portfolio", vec![page_row(Page::Allocation, t)], t))
         .child(section("Plan", plan, t))
         .child(section(

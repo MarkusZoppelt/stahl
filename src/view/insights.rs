@@ -355,7 +355,19 @@ pub fn settings(s: &State, t: &Theme) -> El {
                     t,
                     |s| &mut s.settings.currency,
                 ))
-                .child(col().gap(6.0).child(ui::caption("Theme", t)).child(theme)),
+                .child(col().gap(6.0).child(ui::caption("Theme", t)).child(theme))
+                .child(
+                    Checkbox::new(s.ai)
+                        .label("AI features")
+                        .description(
+                            "Counsel, its questions on the Overview and in the palette, and the \
+                             AI provider. Off by default. Nothing is sent to a provider while \
+                             it's off.",
+                        )
+                        .on_toggle(|s: &mut State| s.set_ai(!s.ai))
+                        .build(k)
+                        .key("settings-ai"),
+                ),
         )
         .children(s.lock.map(|on| {
             ui::card(t)
@@ -375,7 +387,7 @@ pub fn settings(s: &State, t: &Theme) -> El {
                         .key("settings-lock"),
                 )
         }))
-        .child(
+        .children(s.ai.then(|| {
             ui::card(t)
                 .gap(16.0)
                 .child(ui::header(
@@ -410,8 +422,8 @@ pub fn settings(s: &State, t: &Theme) -> El {
                     "settings-model",
                     t,
                     |s| &mut s.settings.model,
-                )),
-        )
+                ))
+        }))
         .child(
             row().center_y().child(
                 Button::new("Save Settings")
@@ -426,8 +438,12 @@ pub fn settings(s: &State, t: &Theme) -> El {
             ui::card(t)
                 .child(ui::header(
                     "Workspace tools",
-                    "A workspace adds a policy, reviews, decisions and reports. An agent skill \
-                     is a file that tells an AI agent how to use portfolio_rs on your data.",
+                    if s.ai {
+                        "A workspace adds a policy, reviews, decisions and reports. An agent skill \
+                         is a file that tells an AI agent how to use portfolio_rs on your data."
+                    } else {
+                        "A workspace adds a policy, reviews, decisions and reports."
+                    },
                     t,
                 ))
                 .child(
@@ -441,13 +457,13 @@ pub fn settings(s: &State, t: &Theme) -> El {
                                 .build(k)
                                 .key("create-workspace"),
                         )
-                        .child(
+                        .children(s.ai.then(|| {
                             Button::new("Export Agent Skill…")
                                 .icon(&icons::SHIELD)
                                 .on_press_tx(|s: &mut State, tx| s.export_skill(tx))
                                 .build(k)
-                                .key("export-skill"),
-                        ),
+                                .key("export-skill")
+                        })),
                 ),
         )
         .children(update::SELF_UPDATES.then(|| updates::settings_card(s, t)))
