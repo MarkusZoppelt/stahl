@@ -1367,10 +1367,9 @@ mod tests {
     #[test]
     #[ignore = "needs a real release disk image in STAHL_RELEASE_DMG; run by hand"]
     fn real_release_meets_the_requirement() {
-        let Some(dmg) = env::var_os("STAHL_RELEASE_DMG") else {
-            eprintln!("skipped: STAHL_RELEASE_DMG is not set");
-            return;
-        };
+        // Ignored, so it only runs when asked; then a missing disk image is a failure, not a pass.
+        let dmg = env::var_os("STAHL_RELEASE_DMG")
+            .expect("set STAHL_RELEASE_DMG to a published release's disk image");
         let dir = tempdir().unwrap();
         let mount = dir.path().join("mount");
         fs::create_dir(&mount).unwrap();
@@ -1390,7 +1389,19 @@ mod tests {
         // Detaches when dropped, pass or fail.
         let mounted = Mounted(mount);
         let app = the_app_in(&mounted.0).unwrap();
-        verify_signer(&app, &developer_id_requirement(DEVELOPER_TEAM)).unwrap();
+        // The updater checks its own `ditto` copy, so this does too, with the whole check: the
+        // signature, the team, the bundle id, the version and the executable.
+        let copy = dir.path().join("Stahl Capital.app");
+        run_tool(DITTO, &[app.as_os_str(), copy.as_os_str()]).unwrap();
+        let found = plist_value(
+            &copy.join("Contents/Info.plist"),
+            "CFBundleShortVersionString",
+        )
+        .unwrap();
+        let version = Version::parse(&found).unwrap();
+        let requirement = developer_id_requirement(DEVELOPER_TEAM);
+        check_mac_app(&copy, &version, Some(&requirement)).unwrap();
+        eprintln!("{found} meets the requirement for team {DEVELOPER_TEAM}");
     }
 
     #[test]
