@@ -356,6 +356,7 @@
             <button type="button" role="tab" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
             <button type="button" role="tab" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1">Linux</button>
             <button type="button" role="tab" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1">Windows</button>
+            <button type="button" role="tab" id="tab-ios" aria-controls="panel-ios" aria-selected="false" tabindex="-1">iPhone and iPad</button>
           </div>
 
           <div class="install__panel" role="tabpanel" id="panel-mac" aria-labelledby="tab-mac">
@@ -397,6 +398,15 @@
               <span class="row__value">Build it yourself with rustup</span>
               <a class="row__go" href="https://github.com/MarkusZoppelt/stahl#without-nix">Guide</a>
             </div>
+          </div>
+
+          <div class="install__panel" role="tabpanel" id="panel-ios" aria-labelledby="tab-ios" hidden>
+            <div class="row">
+              <span class="row__label">Beta</span>
+              <span class="row__value">Join the beta on TestFlight</span>
+              <a class="row__go" href="https://testflight.apple.com/join/CHy1x1Bc">Join</a>
+            </div>
+            <p class="install__note">Install Apple’s TestFlight app first. It’s a beta build, usually ahead of the latest release.</p>
           </div>
         </div>
         <p class="install__all"><a href="https://github.com/MarkusZoppelt/stahl/releases">All releases</a></p>

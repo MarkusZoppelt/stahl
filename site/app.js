@@ -611,10 +611,12 @@ const PLATFORMS = {
   mac: { label: "Download for macOS", small: "Version 0.5.0 for Apple silicon", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-macos-arm64.dmg" },
   linux: { label: "Download for Linux", small: "Version 0.5.0, .deb for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/download/v0.5.0/stahl_0.5.0_amd64.deb" },
   windows: { label: "Download for Windows", small: "Version 0.5.0 for x64", href: "https://github.com/MarkusZoppelt/stahl/releases/latest/download/stahl-capital-windows-x64.zip" },
+  ios: { label: "Join the beta on TestFlight", small: "A beta for iPhone and iPad", href: "https://testflight.apple.com/join/CHy1x1Bc" },
 };
 const agent = `${navigator.platform} ${navigator.userAgent}`;
-const isPhone = /iPhone|iPad|Android/.test(agent) || (navigator.maxTouchPoints > 1 && /Mac/.test(agent));
-const platform = /Win/.test(agent) ? "windows" : /Mac/.test(agent) && !isPhone ? "mac" : /Linux|X11/.test(agent) && !isPhone ? "linux" : null;
+const isApplePhone = /iPhone|iPad/.test(agent) || (navigator.maxTouchPoints > 1 && /Mac/.test(agent));
+const isPhone = isApplePhone || /Android/.test(agent);
+const platform = isApplePhone ? "ios" : /Win/.test(agent) ? "windows" : /Mac/.test(agent) && !isPhone ? "mac" : /Linux|X11/.test(agent) && !isPhone ? "linux" : null;
 
 if (platform) {
   const chosen = PLATFORMS[platform];

@@ -30,6 +30,7 @@ Three things can leave the machine: tickers sent to Yahoo Finance to fetch price
 - Install with Nix: `nix profile install github:MarkusZoppelt/stahl`
 - Installers (.dmg for Apple silicon, .deb for x64, .zip for Windows x64): https://github.com/MarkusZoppelt/stahl/releases
 - macOS builds are signed with a Developer ID and notarized by Apple.
+- iPhone and iPad: a beta through TestFlight: https://testflight.apple.com/join/CHy1x1Bc
 
 ## Links
 

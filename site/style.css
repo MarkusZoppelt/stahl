@@ -578,8 +578,8 @@ input[type="range"]::-moz-range-thumb { width: 18px; height: 18px; border: 0; bo
 .account h2 { font-size: clamp(46px, 8vw, 112px); margin-top: 0; }
 .account .dept__lede { margin-inline: auto; }
 .install { max-width: 690px; margin: 38px auto 0; text-align: left; }
-.install__tabs { display: flex; gap: 2px; margin-bottom: 8px; }
-.install__tabs button { padding: 7px 13px; border-radius: 8px; color: var(--body); font-size: 14px; }
+.install__tabs { display: flex; flex-wrap: wrap; gap: 2px; margin-bottom: 8px; }
+.install__tabs button { white-space: nowrap; padding: 7px 13px; border-radius: 8px; color: var(--body); font-size: 14px; }
 .install__tabs button:hover { color: var(--ink); }
 .install__tabs [aria-selected="true"] { color: var(--ink); background: #ffffff14; }
 .row {
@@ -708,6 +708,7 @@ dialog { color: inherit; }
   .row { grid-template-columns: minmax(0, 1fr) auto; padding-left: 12px; }
   .row__label { grid-column: 1 / -1; margin-bottom: -10px; font-size: 12px; }
   code.row__value { font-size: 11.5px; }
+  .install__tabs button { padding: 7px 8px; }
 }
 
 @media (max-height: 700px) and (min-width: 561px) {
